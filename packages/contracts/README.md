@@ -1,5 +1,6 @@
 # Contracts
 
-Versioned external-configuration contracts shared by the UI, product-owned mode
-registry, projection engine, and target adapters. The product renders mode
-semantics into managed Skills/instructions; it does not supervise agent runs.
+Versioned workflow-Skill contracts shared by the UI, product-owned mode
+registry, Skill catalog, projection engine, and target adapters. The product
+resolves mode plus agent bindings into an effective Skill bundle; it does not
+supervise agent runs.

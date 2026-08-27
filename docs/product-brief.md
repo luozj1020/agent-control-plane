@@ -2,18 +2,19 @@
 
 ## Outcome
 
-Provide a CC-Switch-style visual application that configures how an existing
-coding agent collaborates with other agents. The product owns three versioned
-workflow modes, renders the selected mode into the target agent's instructions,
-and lets the user launch the selected main agent normally.
+Provide a CC-Switch-style visual workflow Skill manager. Users select a mode,
+main agent, and downstream role bindings; the product resolves them into an
+effective Skill bundle, activates that bundle for the main agent, and lets the
+user launch the main agent normally.
 
 ## Canonical flow
 
 ```text
 select profile
   -> preview generated configuration
-  -> compile the selected product mode for the target agents
-  -> atomically activate generated Skill/instructions and managed config
+  -> resolve mode + agent bindings + target adapter
+  -> render an effective Skill bundle
+  -> atomically activate the Skill and managed config
   -> start the selected main agent
   -> main agent loads the generated instructions
   -> main agent coordinates downstream agents according to the selected mode
@@ -31,17 +32,19 @@ template into Codex.
 2. Overnight, Balanced, and Interactive are versioned product-owned mode
    templates. The product compiles them into agent-specific Skills,
    instructions, and configuration.
-3. Main agents and downstream roles are configurable independently. Runtime
+3. The managed unit is an effective Skill bundle whose identity binds the mode,
+   agent bindings, adapter versions, source hashes, and generated artifacts.
+4. Main agents and downstream roles are configurable independently. Runtime
    names never imply model providers.
-4. Activation produces deterministic target-file projections and a receipt with
+5. Activation produces deterministic target-file projections and a receipt with
    source profile version, Skill version, target paths, hashes, and backups.
-5. Every managed write uses preview, atomic replacement, and recoverable backup.
+6. Every managed write uses preview, atomic replacement, and recoverable backup.
    User-owned text outside managed markers is preserved.
-6. Active agent sessions are not silently mutated. A newly activated profile
+7. Active agent sessions are not silently mutated. A newly activated profile
    applies when the relevant agent or session is restarted/reloaded.
-7. Credentials remain in the agent/provider's existing credential store. The
+8. Credentials remain in the agent/provider's existing credential store. The
    product may reference a provider profile but does not copy raw secrets.
-8. Removing the application must not leave Codex, Claude Code, or another agent
+9. Removing the application must not leave Codex, Claude Code, or another agent
    unusable; the last known-good configuration remains recoverable.
 
 ## Configuration model
@@ -53,8 +56,12 @@ template into Codex.
   installed agent command/profile.
 - **Mode template:** product-owned, versioned orchestration contract with role
   requirements, capabilities, continuation/review policy, and render inputs.
-- **Instruction bundle:** generated Skill/instruction/config artifacts for the
-  selected main and downstream agent adapters.
+- **Target adapter:** renders a product mode for Codex, Claude Code, or another
+  compatible main-agent Skill/config format.
+- **Effective Skill bundle:** immutable resolved mode, agent bindings, adapter
+  versions, source hashes, and generated Skill/instruction/config artifacts.
+- **Skill catalog entry:** installed, available, active, incompatible, stale, or
+  recoverable Skill bundle plus its compatibility and health information.
 - **Projection:** deterministic files and managed blocks generated for each
   target agent.
 - **Activation receipt:** before/after hashes, backups, compatibility result,
@@ -76,15 +83,20 @@ Mode templates are agent-neutral. Target adapters render the same template for
 Codex, Claude Code, or future main agents. Adding new modes later uses the same
 versioned mode registry rather than changing the profile schema.
 
+The catalog treats rendered combinations as logical Skill variants. Only the
+selected variant must be materialized, so adding agents and modes does not
+require maintaining a Cartesian product of copied Skill directories.
+
 ## First vertical slices
 
-1. Versioned profile, role-binding, product-mode, instruction-bundle,
-   projection, and activation-receipt contracts.
-2. Read-only preview plus atomic activation/rollback for Codex project config.
-3. Local UI for profiles, agents, modes, downstream roles, diff preview, and
+1. Versioned profile, role-binding, product-mode, effective-Skill-bundle,
+   catalog-entry, projection, and activation-receipt contracts.
+2. Resolve and render one Codex Skill variant from mode plus agent bindings.
+3. Read-only preview plus atomic activation/rollback for Codex project config.
+4. Local UI for Skills, modes, agents, downstream roles, active-Skill diff, and
    activation health.
-4. Additional target adapters for Claude Code and other agent hosts.
-5. Import/export and compatibility migration across Skill versions.
+5. Additional target adapters for Claude Code and other agent hosts.
+6. Import/export and compatibility migration across Skill versions.
 
 ## Explicit non-goals
 
