@@ -1,0 +1,13 @@
+{
+  "name": "@agent-control-plane/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/check-assets.mjs",
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "test": "npm --prefix ../../packages/contracts run build && node --test test/*.test.mjs",
+    "typecheck": "node scripts/check-assets.mjs"
+  }
+}

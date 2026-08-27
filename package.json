@@ -9,6 +9,8 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
+    "dev": "npm --workspace @agent-control-plane/web run dev",
+    "start": "npm --workspace @agent-control-plane/web run start",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },

@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Agent Workflow Switch — 为 Codex 切换最小工作流 Skill"
+    />
+    <title>Agent Workflow Switch</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">A</div>
+          <div>
+            <strong>Agent Workflow</strong>
+            <span>Skill Switch</span>
+          </div>
+        </div>
+
+        <nav aria-label="主要导航">
+          <button class="nav-item active" type="button">
+            <span class="nav-icon">◆</span>
+            Skill 配置
+          </button>
+          <button class="nav-item" type="button" disabled>
+            <span class="nav-icon">◎</span>
+            Agent 目标
+            <span class="soon">即将推出</span>
+          </button>
+          <button class="nav-item" type="button" disabled>
+            <span class="nav-icon">↺</span>
+            激活记录
+            <span class="soon">即将推出</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-status">
+          <span class="status-dot"></span>
+          <div>
+            <strong>本地预览</strong>
+            <span>不会修改 Codex 配置</span>
+          </div>
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">WORKFLOW SKILL MANAGER</p>
+            <h1>配置当前 Codex 工作流</h1>
+            <p class="subtitle">只生成所选模式和 Agent 所需的最小 Skill。</p>
+          </div>
+          <div class="top-actions">
+            <button class="button ghost" id="copy-button" type="button">复制 Skill</button>
+            <button class="button primary" id="export-button" type="button">导出 SKILL.md</button>
+          </div>
+        </header>
+
+        <section class="workspace-grid">
+          <div class="configuration-column">
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="step">01</span>
+                  <h2>选择模式 Skill</h2>
+                </div>
+                <span class="panel-hint">每次只激活一个</span>
+              </div>
+              <div class="mode-grid" id="mode-grid" role="radiogroup" aria-label="工作流模式"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="step">02</span>
+                  <h2>绑定 Agent</h2>
+                </div>
+                <span class="panel-hint">角色与模型提供商解耦</span>
+              </div>
+
+              <div class="field-grid">
+                <label class="field">
+                  <span>主 Agent</span>
+                  <select id="main-agent"></select>
+                  <small>启动入口与最终决策者</small>
+                </label>
+                <label class="field" id="builder-field">
+                  <span>下游 Builder</span>
+                  <select id="builder-agent"></select>
+                  <small id="builder-help">接收实现任务的外部 Agent</small>
+                </label>
+              </div>
+            </section>
+
+            <section class="panel activation-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="step">03</span>
+                  <h2>激活预览</h2>
+                </div>
+                <span class="compatibility" id="compatibility-badge">正在校验</span>
+              </div>
+              <div class="activation-summary">
+                <div>
+                  <span class="label">目标 Skill</span>
+                  <strong id="variant-name">—</strong>
+                </div>
+                <div>
+                  <span class="label">预计上下文</span>
+                  <strong id="token-estimate">—</strong>
+                </div>
+                <div>
+                  <span class="label">包含模式</span>
+                  <strong id="included-modes">—</strong>
+                </div>
+                <div>
+                  <span class="label">包含 Agent</span>
+                  <strong id="included-agents">—</strong>
+                </div>
+              </div>
+              <div class="issue-list" id="issue-list" hidden></div>
+              <div class="activation-actions">
+                <p id="activation-note">保存只影响浏览器中的预览状态。</p>
+                <button class="button primary" id="activate-button" type="button">
+                  设为当前预览 Skill
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <aside class="preview-column">
+            <section class="preview-panel">
+              <div class="preview-heading">
+                <div>
+                  <span class="preview-dot red"></span>
+                  <span class="preview-dot amber"></span>
+                  <span class="preview-dot green"></span>
+                </div>
+                <code id="skill-path">SKILL.md</code>
+                <span class="live-badge">LIVE</span>
+              </div>
+              <pre id="skill-preview" tabindex="0" aria-label="生成的 Skill 内容"></pre>
+            </section>
+
+            <section class="plan-panel">
+              <div class="plan-heading">
+                <h3>切换操作</h3>
+                <span id="restart-badge">无需重启</span>
+              </div>
+              <ol id="operation-list"></ol>
+            </section>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

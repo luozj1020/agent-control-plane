@@ -79,3 +79,17 @@ daemon is required.
 Early product development. The first milestone defines the workflow Skill
 catalog, product-owned modes, effective Skill bundles, and deterministic
 target-file projections.
+
+## Run the local preview
+
+Node.js 24 and a global TypeScript compiler are currently required. No package
+installation is needed for this dependency-free milestone.
+
+```bash
+npm run build
+npm run dev
+```
+
+Open `http://127.0.0.1:4173`. The current UI resolves modes and agent bindings
+through the real contracts package, previews the minimal generated `SKILL.md`,
+and exports it. It deliberately does not write into Codex configuration yet.
