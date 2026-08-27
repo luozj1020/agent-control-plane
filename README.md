@@ -22,9 +22,15 @@ product mode template + agent bindings + target adapter
                          -> activate for Codex or another main agent
 ```
 
-The product does not need a hand-maintained Skill for every combination. It
-keeps versioned mode templates and adapter renderers, materializes the selected
-Skill variant deterministically, and records exactly which variant is active.
+Each mode is a separate Skill family rather than one Skill containing all mode
+instructions. The product may reuse source fragments internally, but it
+materializes only the selected mode and selected agent bindings, exposes only
+that workflow Skill to the target agent, and records exactly which variant is
+active.
+
+This keeps inactive modes and unused agent adapters out of Codex's loaded Skill
+context. Switching mode means atomically switching the active minimal Skill,
+not asking a large Skill to route among three embedded modes.
 
 ## Product boundary
 
@@ -34,7 +40,7 @@ runtime or supervise model processes.
 
 It owns:
 
-- a workflow Skill catalog and activation lifecycle;
+- a workflow Skill catalog with separate mode Skill families;
 - reusable workflow profiles;
 - built-in Overnight, Balanced, and Interactive mode templates;
 - main-agent, mode, and downstream role selections;

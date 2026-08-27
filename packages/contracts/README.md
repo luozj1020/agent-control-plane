@@ -2,5 +2,6 @@
 
 Versioned workflow-Skill contracts shared by the UI, product-owned mode
 registry, Skill catalog, projection engine, and target adapters. The product
-resolves mode plus agent bindings into an effective Skill bundle; it does not
+resolves one mode plus its selected agent bindings into a minimal effective
+Skill variant; inactive modes and unused adapters are excluded. It does not
 supervise agent runs.

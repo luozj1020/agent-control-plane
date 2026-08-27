@@ -34,17 +34,19 @@ template into Codex.
    instructions, and configuration.
 3. The managed unit is an effective Skill bundle whose identity binds the mode,
    agent bindings, adapter versions, source hashes, and generated artifacts.
-4. Main agents and downstream roles are configurable independently. Runtime
+4. One effective Skill contains exactly one mode. Inactive modes and unused
+   agent adapters are not projected into the target agent's visible Skill set.
+5. Main agents and downstream roles are configurable independently. Runtime
    names never imply model providers.
-5. Activation produces deterministic target-file projections and a receipt with
+6. Activation produces deterministic target-file projections and a receipt with
    source profile version, Skill version, target paths, hashes, and backups.
-6. Every managed write uses preview, atomic replacement, and recoverable backup.
+7. Every managed write uses preview, atomic replacement, and recoverable backup.
    User-owned text outside managed markers is preserved.
-7. Active agent sessions are not silently mutated. A newly activated profile
+8. Active agent sessions are not silently mutated. A newly activated profile
    applies when the relevant agent or session is restarted/reloaded.
-8. Credentials remain in the agent/provider's existing credential store. The
+9. Credentials remain in the agent/provider's existing credential store. The
    product may reference a provider profile but does not copy raw secrets.
-9. Removing the application must not leave Codex, Claude Code, or another agent
+10. Removing the application must not leave Codex, Claude Code, or another agent
    unusable; the last known-good configuration remains recoverable.
 
 ## Configuration model
@@ -54,8 +56,9 @@ template into Codex.
   repository scope, and optional provider-profile references.
 - **Role binding:** builder, reviewer, tester, planner, or subagent mapped to an
   installed agent command/profile.
-- **Mode template:** product-owned, versioned orchestration contract with role
-  requirements, capabilities, continuation/review policy, and render inputs.
+- **Mode Skill template:** one product-owned, versioned orchestration contract
+  for exactly one mode, with role requirements, capabilities,
+  continuation/review policy, and render inputs.
 - **Target adapter:** renders a product mode for Codex, Claude Code, or another
   compatible main-agent Skill/config format.
 - **Effective Skill bundle:** immutable resolved mode, agent bindings, adapter
@@ -87,10 +90,25 @@ The catalog treats rendered combinations as logical Skill variants. Only the
 selected variant must be materialized, so adding agents and modes does not
 require maintaining a Cartesian product of copied Skill directories.
 
+## Context and token policy
+
+- Overnight, Balanced, and Interactive are separate Skill families.
+- The target agent sees only the currently activated workflow Skill.
+- A rendered Skill includes only the selected downstream agent adapters and
+  role bindings.
+- Shared source fragments are resolved at render time; they are not bundled as
+  unused runtime instructions.
+- Switching modes replaces the managed active Skill atomically and preserves a
+  rollback copy of the previous variant.
+
+This makes token cost proportional to the selected workflow instead of the
+total number of modes and supported agents in the product catalog.
+
 ## First vertical slices
 
-1. Versioned profile, role-binding, product-mode, effective-Skill-bundle,
-   catalog-entry, projection, and activation-receipt contracts.
+1. Versioned profile, role-binding, single-mode-Skill-template,
+   effective-Skill-variant, catalog-entry, projection, and activation-receipt
+   contracts.
 2. Resolve and render one Codex Skill variant from mode plus agent bindings.
 3. Read-only preview plus atomic activation/rollback for Codex project config.
 4. Local UI for Skills, modes, agents, downstream roles, active-Skill diff, and
