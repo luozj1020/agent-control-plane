@@ -1,4 +1,4 @@
 # Contracts
 
-Versioned domain contracts shared by the daemon, clients, and runtime adapters.
-
+Versioned external-configuration contracts shared by the UI, projection engine,
+and target adapters. Execution semantics remain in the selected Skill.
