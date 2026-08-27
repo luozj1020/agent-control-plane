@@ -1,0 +1,19 @@
+{
+  "name": "agent-control-plane",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local-first control plane for pluggable coding-agent teams and execution modes.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
+
