@@ -1,0 +1,179 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  BUILTIN_MODE_CATALOG,
+  CODEX_OVERNIGHT_CLAUDE_PROFILE,
+  EXAMPLE_AGENTS,
+  planSkillActivation,
+  resolveEffectiveSkill,
+} from "../dist/index.js";
+
+function resolve(profile, agents = EXAMPLE_AGENTS, catalog = BUILTIN_MODE_CATALOG) {
+  return resolveEffectiveSkill({ profile, agents, catalog });
+}
+
+test("catalog exposes three distinct immutable mode Skill families", () => {
+  assert.deepEqual(
+    BUILTIN_MODE_CATALOG.modes.map((mode) => mode.id),
+    ["overnight", "balanced", "interactive"],
+  );
+  assert.equal(new Set(BUILTIN_MODE_CATALOG.modes.map((mode) => mode.id)).size, 3);
+  assert.equal(Object.isFrozen(BUILTIN_MODE_CATALOG), true);
+  assert.equal(Object.isFrozen(BUILTIN_MODE_CATALOG.modes[0]), true);
+});
+
+test("Overnight resolves one minimal Skill with only selected agents", () => {
+  const result = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  assert.deepEqual(result.value.includedModeIds, ["overnight"]);
+  assert.deepEqual(result.value.includedAgentIds, ["codex", "claude-code"]);
+  assert.match(result.value.content, /# Overnight/);
+  assert.doesNotMatch(result.value.content, /Balanced|Interactive/);
+  assert.match(result.value.content, /builder: Claude Code/);
+  assert.match(result.value.relativeSkillPath, /SKILL\.md$/);
+});
+
+test("Balanced resolves its tuned policy and excludes other modes", () => {
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    id: "codex-balanced-claude",
+    mode: { id: "balanced", version: "1.0.0" },
+  };
+  const result = resolve(profile);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  assert.match(result.value.content, /balanced-default@1\.0\.0/);
+  assert.doesNotMatch(result.value.content, /Overnight|Interactive/);
+});
+
+test("Balanced rejects arbitrary window configuration on the profile", () => {
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    mode: { id: "balanced", version: "1.0.0" },
+    windowMinutes: 5,
+  };
+  const result = resolve(profile);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert(result.issues.some((entry) => entry.code === "profile.unknown_field"));
+});
+
+test("Interactive uses native subagents and includes no external agent", () => {
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    id: "codex-interactive-native",
+    mode: { id: "interactive", version: "1.0.0" },
+    roleBindings: [{ role: "subagent", target: { kind: "main-native" } }],
+  };
+  const result = resolve(profile);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  assert.deepEqual(result.value.includedModeIds, ["interactive"]);
+  assert.deepEqual(result.value.includedAgentIds, ["codex"]);
+  assert.match(result.value.content, /# Interactive/);
+  assert.doesNotMatch(result.value.content, /Overnight|Balanced|Claude Code/);
+});
+
+test("Interactive rejects external-only subagent topology", () => {
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    mode: { id: "interactive", version: "1.0.0" },
+    roleBindings: [
+      { role: "subagent", target: { kind: "agent", agentId: "claude-code" } },
+    ],
+  };
+  const result = resolve(profile);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert(result.issues.some((entry) => entry.code === "mode.incompatible_role"));
+});
+
+test("unknown mode versions and duplicate roles fail closed", () => {
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    mode: { id: "overnight", version: "99.0.0" },
+    roleBindings: [
+      ...CODEX_OVERNIGHT_CLAUDE_PROFILE.roleBindings,
+      { role: "builder", target: { kind: "agent", agentId: "claude-code" } },
+    ],
+  };
+  const result = resolve(profile);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert(result.issues.some((entry) => entry.code === "mode.unknown"));
+  assert(result.issues.some((entry) => entry.code === "profile.duplicate_role"));
+});
+
+test("raw credentials are rejected", () => {
+  const profile = { ...CODEX_OVERNIGHT_CLAUDE_PROFILE, apiKey: "not-allowed" };
+  const result = resolve(profile);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert(result.issues.some((entry) => entry.code === "security.raw_secret"));
+});
+
+test("malformed JSON-shaped input fails closed instead of throwing", () => {
+  const result = resolveEffectiveSkill({ profile: null, agents: "invalid" });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert(result.issues.some((entry) => entry.code === "profile.invalid"));
+});
+
+test("activation switches off every other managed workflow Skill", () => {
+  const resolved = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE);
+  assert.equal(resolved.ok, true);
+  if (!resolved.ok) return;
+
+  const plan = planSkillActivation(resolved.value, [
+    {
+      variantId: "workflow-codex-interactive",
+      relativeSkillPath: "workflow-codex-interactive/SKILL.md",
+      contentFingerprint: "fnv1a32:00000000",
+      active: true,
+    },
+  ]);
+  assert.equal(plan.ok, true);
+  if (!plan.ok) return;
+  assert.deepEqual(plan.value.deactivatedVariantIds, ["workflow-codex-interactive"]);
+  assert.deepEqual(
+    plan.value.operations.map((operation) => operation.kind),
+    ["deactivate", "write", "activate"],
+  );
+  assert.equal(plan.value.restartRequired, true);
+});
+
+test("activation is a no-op for the identical sole active Skill", () => {
+  const resolved = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE);
+  assert.equal(resolved.ok, true);
+  if (!resolved.ok) return;
+
+  const plan = planSkillActivation(resolved.value, [
+    {
+      variantId: resolved.value.id,
+      relativeSkillPath: resolved.value.relativeSkillPath,
+      contentFingerprint: resolved.value.contentFingerprint,
+      active: true,
+    },
+  ]);
+  assert.equal(plan.ok, true);
+  if (!plan.ok) return;
+  assert.deepEqual(plan.value.operations, []);
+  assert.equal(plan.value.restartRequired, false);
+});
+
+test("activation rejects traversal paths", () => {
+  const resolved = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE);
+  assert.equal(resolved.ok, true);
+  if (!resolved.ok) return;
+
+  const unsafe = { ...resolved.value, relativeSkillPath: "../SKILL.md" };
+  const plan = planSkillActivation(unsafe, []);
+  assert.equal(plan.ok, false);
+  if (plan.ok) return;
+  assert(plan.issues.some((entry) => entry.code === "activation.path_unsafe"));
+});
