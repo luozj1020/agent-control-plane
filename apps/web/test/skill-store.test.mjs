@@ -67,6 +67,23 @@ test("preview-only store rejects writes", async () => {
   );
 });
 
+test("store rejects a resolved variant with an out-of-range Balanced budget", async () => {
+  await withTempDirectory(async (skillsDir) => {
+    const store = testStore(skillsDir);
+    const balanced = resolveMode("balanced");
+    await assert.rejects(
+      store.activate({
+        ...balanced,
+        balancedBudget: {
+          ...balanced.balancedBudget,
+          maxTotalTokens: 1_000_000_001,
+        },
+      }),
+      (error) => error instanceof SkillStoreError && error.code === "variant.invalid",
+    );
+  });
+});
+
 test("activation writes an owned minimal Skill atomically", async () => {
   await withTempDirectory(async (skillsDir) => {
     const store = testStore(skillsDir);

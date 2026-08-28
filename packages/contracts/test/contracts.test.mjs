@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  BALANCED_BUDGET_LIMITS,
   BUILTIN_MODE_CATALOG,
   CODEX_OVERNIGHT_CLAUDE_PROFILE,
   EXAMPLE_AGENTS,
@@ -20,6 +21,8 @@ test("catalog exposes three distinct immutable mode Skill families", () => {
   );
   assert.equal(new Set(BUILTIN_MODE_CATALOG.modes.map((mode) => mode.id)).size, 3);
   assert.equal(Object.isFrozen(BUILTIN_MODE_CATALOG), true);
+  assert.deepEqual(BALANCED_BUDGET_LIMITS.mainReviewCalls, { min: 1, max: 99 });
+  assert.deepEqual(BALANCED_BUDGET_LIMITS.maxTotalTokens, { min: 0, max: 1_000_000_000 });
   assert.equal(Object.isFrozen(BUILTIN_MODE_CATALOG.modes[0]), true);
 });
 
@@ -91,6 +94,28 @@ test("Balanced rejects a budget that consumes the protected final review slot", 
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert(result.issues.some((entry) => entry.path.endsWith("reservedFinalReviewCalls")));
+});
+
+test("Balanced rejects every budget field outside its product range", () => {
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    id: "codex-balanced-out-of-range",
+    mode: { id: "balanced", version: "1.0.0" },
+    balancedBudget: {
+      mainReviewCalls: 100,
+      downstreamCalls: 100,
+      advisorCalls: 100,
+      reservedFinalReviewCalls: 100,
+      maxTotalTokens: 1_000_000_001,
+    },
+  };
+  const result = resolve(profile);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  const paths = new Set(result.issues.map((entry) => entry.path));
+  for (const key of Object.keys(profile.balancedBudget)) {
+    assert(paths.has(`/profile/balancedBudget/${key}`));
+  }
 });
 
 test("Balanced rejects arbitrary window configuration on the profile", () => {

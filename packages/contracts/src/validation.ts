@@ -1,4 +1,5 @@
 import { BUILTIN_MODE_CATALOG } from "./catalog.js";
+import { BALANCED_BUDGET_LIMITS } from "./budget.js";
 import type {
   AgentCapability,
   AgentTarget,
@@ -192,25 +193,31 @@ function validateBalancedBudget(value: unknown, issues: ValidationIssue[]): void
       );
     }
   }
-  const integer = (key: string, minimum: number) =>
-    Number.isSafeInteger(value[key]) && Number(value[key]) >= minimum;
-  if (
-    !integer("mainReviewCalls", 1) ||
-    !integer("downstreamCalls", 1) ||
-    !integer("advisorCalls", 0) ||
-    !integer("reservedFinalReviewCalls", 0) ||
-    !integer("maxTotalTokens", 0)
-  ) {
-    issues.push(
-      issue(
-        "profile.invalid",
-        "/profile/balancedBudget",
-        "Balanced budget values must be non-negative integers with at least one main review and downstream call.",
-      ),
+  const integer = (key: keyof typeof BALANCED_BUDGET_LIMITS) => {
+    const range = BALANCED_BUDGET_LIMITS[key];
+    return (
+      Number.isSafeInteger(value[key]) &&
+      Number(value[key]) >= range.min &&
+      Number(value[key]) <= range.max
     );
-    return;
+  };
+  for (const key of Object.keys(BALANCED_BUDGET_LIMITS) as Array<keyof typeof BALANCED_BUDGET_LIMITS>) {
+    if (!integer(key)) {
+      const range = BALANCED_BUDGET_LIMITS[key];
+      issues.push(
+        issue(
+          "profile.invalid",
+          `/profile/balancedBudget/${key}`,
+          `${key} must be an integer from ${range.min} to ${range.max}.`,
+        ),
+      );
+    }
   }
-  if (Number(value.reservedFinalReviewCalls) > Number(value.mainReviewCalls)) {
+  if (
+    integer("reservedFinalReviewCalls") &&
+    integer("mainReviewCalls") &&
+    Number(value.reservedFinalReviewCalls) > Number(value.mainReviewCalls)
+  ) {
     issues.push(
       issue(
         "profile.invalid",
@@ -451,16 +458,21 @@ export function validateSkillResolutionInput(input: unknown): readonly Validatio
       );
     } else if (
       !Number.isSafeInteger(budgetPolicy.mainReviewCalls) ||
-      budgetPolicy.mainReviewCalls < 1 ||
+      budgetPolicy.mainReviewCalls < BALANCED_BUDGET_LIMITS.mainReviewCalls.min ||
+      budgetPolicy.mainReviewCalls > BALANCED_BUDGET_LIMITS.mainReviewCalls.max ||
       !Number.isSafeInteger(budgetPolicy.downstreamCalls) ||
-      budgetPolicy.downstreamCalls < 1 ||
+      budgetPolicy.downstreamCalls < BALANCED_BUDGET_LIMITS.downstreamCalls.min ||
+      budgetPolicy.downstreamCalls > BALANCED_BUDGET_LIMITS.downstreamCalls.max ||
       !Number.isSafeInteger(budgetPolicy.advisorCalls) ||
-      budgetPolicy.advisorCalls < 0 ||
+      budgetPolicy.advisorCalls < BALANCED_BUDGET_LIMITS.advisorCalls.min ||
+      budgetPolicy.advisorCalls > BALANCED_BUDGET_LIMITS.advisorCalls.max ||
       !Number.isSafeInteger(budgetPolicy.reservedFinalReviewCalls) ||
-      budgetPolicy.reservedFinalReviewCalls < 0 ||
+      budgetPolicy.reservedFinalReviewCalls < BALANCED_BUDGET_LIMITS.reservedFinalReviewCalls.min ||
+      budgetPolicy.reservedFinalReviewCalls > BALANCED_BUDGET_LIMITS.reservedFinalReviewCalls.max ||
       budgetPolicy.reservedFinalReviewCalls > budgetPolicy.mainReviewCalls ||
       !Number.isSafeInteger(budgetPolicy.maxTotalTokens) ||
-      budgetPolicy.maxTotalTokens < 0
+      budgetPolicy.maxTotalTokens < BALANCED_BUDGET_LIMITS.maxTotalTokens.min ||
+      budgetPolicy.maxTotalTokens > BALANCED_BUDGET_LIMITS.maxTotalTokens.max
     ) {
       issues.push(
         issue(

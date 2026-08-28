@@ -127,6 +127,30 @@ test("refuses to place Balanced runtime artifacts inside the product worktree", 
   });
 });
 
+test("runtime rejects budget overrides above the shared product limits", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const adapter = editingAdapter();
+    const runtime = createBalancedRuntime({
+      runtimeRoot,
+      catalog: testCatalog(),
+      adapters: adapterRegistry(adapter),
+    });
+    await assert.rejects(
+      runtime.run({
+        task: task(),
+        worktree,
+        adapterId: adapter.id,
+        policyRef: "balanced-test@1.0.0",
+        budget: { mainReviewCalls: 100 },
+      }),
+      (error) =>
+        error instanceof BalancedRuntimeError &&
+        error.code === "runtime.invalid_budget" &&
+        error.message.includes("1 to 99"),
+    );
+  });
+});
+
 function editingAdapter() {
   let calls = 0;
   return {

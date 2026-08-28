@@ -5,6 +5,7 @@ import { extname, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
+  BALANCED_BUDGET_LIMITS,
   BUILTIN_MODE_CATALOG,
   EXAMPLE_AGENTS,
   resolveEffectiveSkill,
@@ -203,6 +204,7 @@ export function createAppServer(options = {}) {
             mode: mode ? { id: mode.id, version: mode.version } : null,
             policy,
             budget,
+            budgetLimits: BALANCED_BUDGET_LIMITS,
             adapters: EXAMPLE_AGENTS.filter((agent) => agent.capabilities.includes("bounded-execution"))
               .map((agent) => ({ id: agent.id, displayName: agent.displayName })),
           },

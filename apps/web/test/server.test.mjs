@@ -140,6 +140,8 @@ test("serves Balanced policy and persisted run status", async () => {
       assert.equal(configBody.policy.id, "balanced-default");
       assert.equal(configBody.policy.contextAcquisitionSeconds, 600);
       assert.equal(configBody.budget.downstreamCalls, 3);
+      assert.deepEqual(configBody.budgetLimits.mainReviewCalls, { min: 1, max: 99 });
+      assert.deepEqual(configBody.budgetLimits.maxTotalTokens, { min: 0, max: 1000000000 });
       assert.deepEqual(configBody.adapters, [{ id: "claude-code", displayName: "Claude Code" }]);
 
       const runs = await fetch(`${baseUrl}/api/balanced/runs`);

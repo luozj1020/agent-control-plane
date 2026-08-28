@@ -17,7 +17,10 @@ import {
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, parse, resolve, sep } from "node:path";
 
-import { BUILTIN_MODE_CATALOG } from "../../packages/contracts/dist/index.js";
+import {
+  BALANCED_BUDGET_LIMITS,
+  BUILTIN_MODE_CATALOG,
+} from "../../packages/contracts/dist/index.js";
 import { createBuiltInAdapterRegistry } from "./agent-adapters.mjs";
 
 const RUNTIME_SCHEMA_VERSION = 1;
@@ -113,15 +116,16 @@ function validatePolicy(policy) {
 }
 
 function validateBudget(budget) {
-  for (const [key, minimum] of [
-    ["mainReviewCalls", 1],
-    ["downstreamCalls", 1],
-    ["advisorCalls", 0],
-    ["reservedFinalReviewCalls", 0],
-    ["maxTotalTokens", 0],
-  ]) {
-    if (!Number.isSafeInteger(budget[key]) || budget[key] < minimum) {
-      throw new BalancedRuntimeError("runtime.invalid_budget", `${key} is invalid.`);
+  for (const [key, range] of Object.entries(BALANCED_BUDGET_LIMITS)) {
+    if (
+      !Number.isSafeInteger(budget[key]) ||
+      budget[key] < range.min ||
+      budget[key] > range.max
+    ) {
+      throw new BalancedRuntimeError(
+        "runtime.invalid_budget",
+        `${key} must be an integer from ${range.min} to ${range.max}.`,
+      );
     }
   }
   if (budget.reservedFinalReviewCalls > budget.mainReviewCalls) {

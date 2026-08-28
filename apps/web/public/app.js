@@ -1,4 +1,5 @@
 import {
+  BALANCED_BUDGET_LIMITS,
   BUILTIN_MODE_CATALOG,
   CODEX_OVERNIGHT_CLAUDE_PROFILE,
   EXAMPLE_AGENTS,
@@ -851,6 +852,34 @@ function balancedBudgetFromControls() {
   };
 }
 
+function synchronizeBalancedBudgetConstraints({ clampReserved = false } = {}) {
+  const controls = {
+    mainReviewCalls: elements.balancedMainCalls,
+    downstreamCalls: elements.balancedDownstreamCalls,
+    advisorCalls: elements.balancedAdvisorCalls,
+    reservedFinalReviewCalls: elements.balancedReservedCalls,
+    maxTotalTokens: elements.balancedTokenBudget,
+  };
+  for (const [key, input] of Object.entries(controls)) {
+    const range = BALANCED_BUDGET_LIMITS[key];
+    input.min = String(range.min);
+    input.max = String(range.max);
+  }
+  const mainReviewCalls = Number(elements.balancedMainCalls.value);
+  if (
+    Number.isInteger(mainReviewCalls) &&
+    mainReviewCalls >= BALANCED_BUDGET_LIMITS.mainReviewCalls.min &&
+    mainReviewCalls <= BALANCED_BUDGET_LIMITS.mainReviewCalls.max
+  ) {
+    elements.balancedReservedCalls.max = String(
+      Math.min(mainReviewCalls, BALANCED_BUDGET_LIMITS.reservedFinalReviewCalls.max),
+    );
+    if (clampReserved && Number(elements.balancedReservedCalls.value) > mainReviewCalls) {
+      elements.balancedReservedCalls.value = String(mainReviewCalls);
+    }
+  }
+}
+
 function initializeBalancedControls() {
   if (!BALANCED_MODE || !BALANCED_POLICY || !BALANCED_BUDGET) return;
   elements.balancedPolicyVersion.textContent = `${BALANCED_POLICY.id}@${BALANCED_POLICY.version}`;
@@ -863,6 +892,7 @@ function initializeBalancedControls() {
   elements.balancedAdvisorCalls.value = String(BALANCED_BUDGET.advisorCalls);
   elements.balancedReservedCalls.value = String(BALANCED_BUDGET.reservedFinalReviewCalls);
   elements.balancedTokenBudget.value = String(BALANCED_BUDGET.maxTotalTokens);
+  synchronizeBalancedBudgetConstraints();
 }
 
 function applyBalancedBudgetToControls(budget) {
@@ -875,8 +905,16 @@ function applyBalancedBudgetToControls(budget) {
     ["maxTotalTokens", elements.balancedTokenBudget],
   ];
   for (const [key, input] of fields) {
-    if (Number.isInteger(budget[key]) && budget[key] >= 0) input.value = String(budget[key]);
+    const range = BALANCED_BUDGET_LIMITS[key];
+    if (
+      Number.isInteger(budget[key]) &&
+      budget[key] >= range.min &&
+      budget[key] <= range.max
+    ) {
+      input.value = String(budget[key]);
+    }
   }
+  synchronizeBalancedBudgetConstraints({ clampReserved: true });
 }
 
 function renderBalancedRuns() {
@@ -1310,7 +1348,13 @@ for (const input of [
   elements.balancedReservedCalls,
   elements.balancedTokenBudget,
 ]) {
-  input.addEventListener("input", refresh);
+  input.addEventListener("input", () => {
+    synchronizeBalancedBudgetConstraints({
+      clampReserved:
+        input === elements.balancedMainCalls || input === elements.balancedReservedCalls,
+    });
+    refresh();
+  });
 }
 async function requestJson(path, options) {
   const response = await fetch(path, options);

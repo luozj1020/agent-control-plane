@@ -117,6 +117,12 @@ changes refresh the active window; assistant text, Token use, and control-file
 activity do not. The UI exposes call and Token budgets but does not allow an
 ad-hoc replacement for the tuned timing policy.
 
+Balanced budget ranges are enforced consistently by the UI, profile resolver,
+Skill store, and Runner: main-review and downstream calls are `1–99`, Advisor
+calls are `0–99`, reserved final reviews are `0–main-review calls`, and the
+Token cap is `0–1,000,000,000`. Zero disables Advisor extension evaluation or,
+for the Token cap, means unlimited.
+
 The activated Skill freezes a Task JSON and invokes:
 
 ```bash

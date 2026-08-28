@@ -121,22 +121,27 @@
                 <label class="field">
                   <span>主 Agent 审阅调用</span>
                   <input id="balanced-main-calls" type="number" min="1" max="99" step="1">
+                  <small class="budget-range">1–99 次</small>
                 </label>
                 <label class="field">
                   <span>下游轮次调用</span>
                   <input id="balanced-downstream-calls" type="number" min="1" max="99" step="1">
+                  <small class="budget-range">1–99 次</small>
                 </label>
                 <label class="field">
                   <span>Advisor 调用</span>
                   <input id="balanced-advisor-calls" type="number" min="0" max="99" step="1">
+                  <small class="budget-range">0–99 次；0 表示禁用扩展判断</small>
                 </label>
                 <label class="field">
                   <span>预留最终审阅</span>
                   <input id="balanced-reserved-calls" type="number" min="0" max="99" step="1">
+                  <small class="budget-range">0–主 Agent 审阅调用数</small>
                 </label>
                 <label class="field">
                   <span>总 Token 上限</span>
-                  <input id="balanced-token-budget" type="number" min="0" step="1000">
+                  <input id="balanced-token-budget" type="number" min="0" max="1000000000" step="1000">
+                  <small class="budget-range">0–10 亿；0 表示不限制</small>
                 </label>
               </div>
               <div class="balanced-runtime-status">

@@ -1,4 +1,5 @@
 export { planSkillActivation } from "./activation.js";
+export { BALANCED_BUDGET_LIMITS } from "./budget.js";
 export { BUILTIN_MODE_CATALOG } from "./catalog.js";
 export { CODEX_OVERNIGHT_CLAUDE_PROFILE, EXAMPLE_AGENTS } from "./fixtures.js";
 export { resolveEffectiveSkill } from "./resolve.js";

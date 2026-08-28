@@ -395,6 +395,7 @@ select:disabled, input:disabled { opacity: 0.58; }
 .balanced-window-grid strong { display: block; margin-top: 6px; color: var(--accent); font: 700 13px ui-monospace, monospace; }
 .balanced-budget-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 16px; }
 .balanced-budget-grid input { padding: 9px 10px; border-radius: 8px; font: 650 10px ui-monospace, monospace; }
+.budget-range { color: var(--muted); font-size: 7px; line-height: 1.4; }
 .balanced-runtime-status { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
 .balanced-runtime-status > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .balanced-runtime-status strong { font-size: 9px; }

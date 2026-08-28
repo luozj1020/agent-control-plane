@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, join, parse, resolve } from "node:path";
 
+import { BALANCED_BUDGET_LIMITS } from "../../packages/contracts/dist/index.js";
 import { diffSkillContent } from "./skill-diff.mjs";
 
 const OWNER = "agent-workflow-switch";
@@ -56,16 +57,10 @@ function sha256(content) {
 function validBalancedBudget(value) {
   if (value === undefined || value === null) return true;
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const minimums = {
-    mainReviewCalls: 1,
-    downstreamCalls: 1,
-    advisorCalls: 0,
-    reservedFinalReviewCalls: 0,
-    maxTotalTokens: 0,
-  };
   return (
-    Object.entries(minimums).every(
-      ([key, minimum]) => Number.isSafeInteger(value[key]) && value[key] >= minimum,
+    Object.entries(BALANCED_BUDGET_LIMITS).every(
+      ([key, range]) =>
+        Number.isSafeInteger(value[key]) && value[key] >= range.min && value[key] <= range.max,
     ) && value.reservedFinalReviewCalls <= value.mainReviewCalls
   );
 }
