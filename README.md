@@ -122,6 +122,13 @@ overwrite an unowned active directory. Every switch backs up the prior managed
 Skill, uses a single-writer lock and atomic directory rename, and exposes
 rollback in the UI. A restarted Codex session is required after switching.
 
+When filesystem activation is enabled, selecting a mode card is itself a switch
+operation. The first selection activates the generated Skill; later selections
+back up and atomically overwrite the current managed Skill. Selecting identical
+content is a no-op. Rapid selections are serialized and only the latest waiting
+mode is retained, so concurrent clicks cannot create competing file writers.
+When activation is disabled, mode cards change only the browser preview.
+
 ## Activation history
 
 Every successful filesystem activation now records an immutable snapshot under

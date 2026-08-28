@@ -5,6 +5,7 @@ import {
   planSkillActivation,
   resolveEffectiveSkill,
 } from "/contracts/index.js";
+import { createLatestSwitchCoordinator } from "/mode-switch-coordinator.js";
 
 const MODE_COPY = {
   overnight: "适合放置运行：持久委派下游实现，完成后回到主 Agent 审阅。",
@@ -46,6 +47,7 @@ const elements = {
   issueList: document.querySelector("#issue-list"),
   mainAgent: document.querySelector("#main-agent"),
   modeGrid: document.querySelector("#mode-grid"),
+  modeSwitchPolicy: document.querySelector("#mode-switch-policy"),
   navConfiguration: document.querySelector("#nav-configuration"),
   navHistory: document.querySelector("#nav-history"),
   operationList: document.querySelector("#operation-list"),
@@ -96,6 +98,12 @@ let activeView = "configuration";
 let historyData = null;
 let selectedHistoryId = null;
 let historyRequest = 0;
+let serverStatusLoaded = false;
+let modeSwitchState = { active: null, pending: null, running: false };
+let markServerStatusReady;
+const serverStatusReady = new Promise((resolve) => {
+  markServerStatusReady = resolve;
+});
 
 const RANGE_LABELS = Object.freeze({
   "1h": "最近 1 小时",
@@ -556,20 +564,35 @@ function initializeAgentSelectors() {
 function renderModeCards() {
   elements.modeGrid.replaceChildren();
   for (const mode of BUILTIN_MODE_CATALOG.modes) {
+    const isActive = serverStatus.writeEnabled
+      ? serverStatus.active?.mode?.id === mode.id
+      : getInstalledState()[0]?.modeId === mode.id;
+    const isApplying =
+      modeSwitchState.active === mode.id || modeSwitchState.pending === mode.id;
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `mode-card${mode.id === selectedModeId ? " selected" : ""}`;
+    button.className = `mode-card${mode.id === selectedModeId ? " selected" : ""}${isActive ? " active-installed" : ""}${isApplying ? " applying" : ""}`;
     button.dataset.mode = mode.id;
     button.setAttribute("role", "radio");
     button.setAttribute("aria-checked", String(mode.id === selectedModeId));
+    button.setAttribute("aria-busy", String(isApplying));
 
     const top = document.createElement("div");
     top.className = "mode-top";
     const name = document.createElement("strong");
     name.textContent = mode.displayName;
+    const indicators = document.createElement("span");
+    indicators.className = "mode-indicators";
+    if (isApplying || isActive) {
+      const state = document.createElement("span");
+      state.className = `mode-state${isApplying ? " applying" : ""}`;
+      state.textContent = isApplying ? "APPLYING" : "ACTIVE";
+      indicators.append(state);
+    }
     const radio = document.createElement("span");
     radio.className = "radio";
-    top.append(name, radio);
+    indicators.append(radio);
+    top.append(name, indicators);
 
     const description = document.createElement("p");
     description.textContent = MODE_COPY[mode.id] ?? mode.description;
@@ -580,6 +603,7 @@ function renderModeCards() {
       selectedModeId = mode.id;
       renderModeCards();
       refresh();
+      modeSwitchCoordinator.request(mode.id);
     });
     elements.modeGrid.append(button);
   }
@@ -804,6 +828,17 @@ function storeIsHealthy() {
 }
 
 function renderStoreStatus() {
+  if (!serverStatusLoaded) {
+    elements.modeSwitchPolicy.textContent = "正在读取激活策略";
+  } else if (serverStatus.writeEnabled && storeIsHealthy()) {
+    elements.modeSwitchPolicy.textContent = "选择即备份并激活";
+  } else if (serverStatus.writeEnabled) {
+    elements.modeSwitchPolicy.textContent = "自动切换已阻止";
+  } else if (serverStatus.health === "preview-only") {
+    elements.modeSwitchPolicy.textContent = "选择仅切换预览";
+  } else {
+    elements.modeSwitchPolicy.textContent = "激活状态不可用";
+  }
   if (serverStatus.writeEnabled) {
     if (storeIsHealthy()) {
       elements.storeStatusTitle.textContent = "文件写入已启用";
@@ -880,16 +915,21 @@ function refresh() {
 
   const installed = getInstalledState()[0];
   if (serverStatus.writeEnabled) {
-    elements.activateButton.textContent = "激活到 Codex Skill 目录";
-    elements.activationNote.textContent = installed
-      ? `文件系统当前激活：${installed.variantId}`
-      : `目标目录：${serverStatus.skillsDir}`;
+    elements.activateButton.textContent = modeSwitchState.running
+      ? `正在应用 ${modeDisplayName(modeSwitchState.active ?? modeSwitchState.pending)}`
+      : "激活到 Codex Skill 目录";
+    elements.activationNote.textContent = modeSwitchState.running
+      ? "模式写入正在串行执行；新的选择会覆盖等待中的旧选择。"
+      : installed
+        ? `文件系统当前激活：${installed.variantId}`
+        : `目标目录：${serverStatus.skillsDir}`;
   } else {
     elements.activateButton.textContent = "设为当前预览 Skill";
     elements.activationNote.textContent = installed
       ? `浏览器当前记录：${installed.variantId}`
       : "保存只影响浏览器中的预览状态。";
   }
+  if (modeSwitchState.running) elements.activateButton.disabled = true;
   renderStoreStatus();
   renderTokenChart();
 }
@@ -911,6 +951,108 @@ async function requestJson(path, options) {
   }
   return body;
 }
+
+function modeDisplayName(modeId) {
+  return BUILTIN_MODE_CATALOG.modes.find((mode) => mode.id === modeId)?.displayName ?? modeId;
+}
+
+function synchronizeControlsWithActiveSkill() {
+  const active = serverStatus.active;
+  if (!active) {
+    const previewModeId = !serverStatus.writeEnabled
+      ? getInstalledState()[0]?.modeId
+      : null;
+    if (BUILTIN_MODE_CATALOG.modes.some((mode) => mode.id === previewModeId)) {
+      selectedModeId = previewModeId;
+    }
+    return;
+  }
+  if (BUILTIN_MODE_CATALOG.modes.some((mode) => mode.id === active.mode?.id)) {
+    selectedModeId = active.mode.id;
+  }
+  if (
+    typeof active.mainAgentId === "string" &&
+    [...elements.mainAgent.options].some((option) => option.value === active.mainAgentId)
+  ) {
+    elements.mainAgent.value = active.mainAgentId;
+  }
+  const builderId = active.includedAgentIds?.find(
+    (agentId) =>
+      agentId !== active.mainAgentId &&
+      [...elements.builderAgent.options].some((option) => option.value === agentId),
+  );
+  if (builderId) elements.builderAgent.value = builderId;
+}
+
+function savePreviewSelection(modeId) {
+  const resolution = resolveEffectiveSkill({
+    profile: createProfile(modeId),
+    agents: EXAMPLE_AGENTS,
+    catalog: BUILTIN_MODE_CATALOG,
+  });
+  if (!resolution.ok) throw new Error("当前 Agent 绑定与所选模式不兼容。");
+  localStorage.setItem(
+    "agent-workflow-active-skill",
+    JSON.stringify({
+      variantId: resolution.value.id,
+      modeId,
+      relativeSkillPath: resolution.value.relativeSkillPath,
+      contentFingerprint: resolution.value.contentFingerprint,
+    }),
+  );
+}
+
+function modeActivationMessage(modeId, result) {
+  const mode = modeDisplayName(modeId);
+  switch (result.activationKind) {
+    case "activate":
+      return `${mode} Skill 已激活；重启 Codex 后生效。`;
+    case "overwrite":
+      return `已备份当前 Skill，并覆写为 ${mode}；重启 Codex 后生效。`;
+    default:
+      return `${mode} 已经是当前 Skill。`;
+  }
+}
+
+async function applyModeSwitch(modeId) {
+  await serverStatusReady;
+  try {
+    if (serverStatus.writeEnabled) {
+      if (!storeIsHealthy()) {
+        throw new Error(serverStatus.error ?? "Skill 目录当前不可写。");
+      }
+      const result = await requestJson("/api/activate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ profile: createProfile(modeId) }),
+      });
+      serverStatus = result.status;
+      if (modeId === selectedModeId) showToast(modeActivationMessage(modeId, result));
+      loadHistory();
+    } else if (serverStatus.health === "preview-only") {
+      savePreviewSelection(modeId);
+      if (modeId === selectedModeId) {
+        showToast(`${modeDisplayName(modeId)} 已切换为浏览器预览；尚未写入 Codex。`);
+      }
+    } else {
+      throw new Error(serverStatus.error ?? "无法确认 Skill 激活状态。");
+    }
+  } catch (error) {
+    if (modeId === selectedModeId) showToast(`模式切换失败：${error.message}`);
+  } finally {
+    renderModeCards();
+    refresh();
+  }
+}
+
+const modeSwitchCoordinator = createLatestSwitchCoordinator({
+  apply: applyModeSwitch,
+  onState(state) {
+    modeSwitchState = state;
+    renderModeCards();
+    refresh();
+  },
+});
 
 async function loadRuntimeUsage() {
   if (usageLoading) {
@@ -936,6 +1078,7 @@ async function loadRuntimeUsage() {
 async function loadServerStatus() {
   try {
     serverStatus = await requestJson("/api/status");
+    synchronizeControlsWithActiveSkill();
   } catch (error) {
     serverStatus = {
       writeEnabled: false,
@@ -944,7 +1087,12 @@ async function loadServerStatus() {
       backups: [],
       error: error.message,
     };
+  } finally {
+    serverStatusLoaded = true;
+    markServerStatusReady?.();
+    markServerStatusReady = null;
   }
+  renderModeCards();
   refresh();
 }
 
@@ -959,22 +1107,16 @@ elements.activateButton.addEventListener("click", async () => {
         body: JSON.stringify({ profile: createProfile() }),
       });
       serverStatus = result.status;
-      showToast(result.changed ? "Skill 已原子激活；重启 Codex 后生效。" : "当前已经是该 Skill。");
+      showToast(modeActivationMessage(selectedModeId, result));
       loadHistory();
     } catch (error) {
       showToast(`激活失败：${error.message}`);
     }
+    renderModeCards();
     refresh();
     return;
   }
-  localStorage.setItem(
-    "agent-workflow-active-skill",
-    JSON.stringify({
-      variantId: currentResolution.id,
-      relativeSkillPath: currentResolution.relativeSkillPath,
-      contentFingerprint: currentResolution.contentFingerprint,
-    }),
-  );
+  savePreviewSelection(selectedModeId);
   showToast("已保存为当前预览 Skill；尚未写入 Codex。");
   refresh();
 });
@@ -990,8 +1132,10 @@ elements.rollbackButton.addEventListener("click", async () => {
       body: JSON.stringify({ backupId: latest.backupId }),
     });
     serverStatus = result.status;
+    synchronizeControlsWithActiveSkill();
     showToast(`已回滚到 ${result.status.active.variantId}；重启 Codex 后生效。`);
     loadHistory();
+    renderModeCards();
   } catch (error) {
     showToast(`回滚失败：${error.message}`);
   } finally {
@@ -1056,6 +1200,8 @@ elements.historyRestore.addEventListener("click", async () => {
       { method: "POST" },
     );
     serverStatus = result.status;
+    synchronizeControlsWithActiveSkill();
+    renderModeCards();
     refresh();
     showToast(
       result.changed

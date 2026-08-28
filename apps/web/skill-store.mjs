@@ -644,6 +644,11 @@ export function createSkillStore(options = {}) {
               relativeSkillPath: `${ACTIVE_DIRECTORY}/${SKILL_FILE}`,
               contentFingerprint: manifest.contentFingerprint,
               activatedAt: manifest.activatedAt,
+              mode: manifest.mode,
+              profileId: manifest.profileId,
+              mainAgentId: manifest.mainAgentId,
+              targetAdapterId: manifest.targetAdapterId ?? null,
+              includedAgentIds: manifest.includedAgentIds ?? [],
             }
           : null,
         backups: await listBackups(),
@@ -671,7 +676,12 @@ export function createSkillStore(options = {}) {
         current?.variantId === variant.id &&
         current.contentFingerprint === variant.contentFingerprint
       ) {
-        return { changed: false, backupId: null, status: await status() };
+        return {
+          changed: false,
+          activationKind: "unchanged",
+          backupId: null,
+          status: await status(),
+        };
       }
 
       const prepared = await createPreparedDirectory(enabled.skillsDir, variant);
@@ -711,7 +721,12 @@ export function createSkillStore(options = {}) {
         }
         throw error;
       }
-      return { changed: true, backupId: backup?.backupId ?? null, status: await status() };
+      return {
+        changed: true,
+        activationKind: backup ? "overwrite" : "activate",
+        backupId: backup?.backupId ?? null,
+        status: await status(),
+      };
     });
   }
 

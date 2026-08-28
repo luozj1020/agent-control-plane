@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -40,6 +40,11 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /USAGE · ESTIMATED CONTEXT/);
     assert.match(html, /ACTIVATION AUDIT LOG/);
     assert.match(html, /激活记录/);
+    assert.match(html, /mode-switch-policy/);
+
+    const coordinator = await fetch(`${baseUrl}/mode-switch-coordinator.js`);
+    assert.equal(coordinator.status, 200);
+    assert.match(await coordinator.text(), /createLatestSwitchCoordinator/);
   });
 });
 
@@ -116,7 +121,9 @@ test("activation API resolves the profile on the server and writes only the mana
         assert.equal(response.status, 200);
         const body = await response.json();
         assert.equal(body.changed, true);
+        assert.equal(body.activationKind, "activate");
         assert.equal(body.status.active.variantId, "workflow-codex-overnight-claude-code");
+        assert.equal(body.status.active.mode.id, "overnight");
         assert.match(
           await readFile(join(skillsDir, "agent-workflow-active", "SKILL.md"), "utf8"),
           /# Overnight/,
@@ -124,6 +131,41 @@ test("activation API resolves the profile on the server and writes only the mana
 
         const status = await fetch(`${baseUrl}/api/status`);
         assert.equal((await status.json()).writeEnabled, true);
+      },
+      { skillsDir },
+    );
+  } finally {
+    await rm(skillsDir, { recursive: true, force: true });
+  }
+});
+
+test("failed mode overwrite preserves the currently active Skill", async () => {
+  const skillsDir = await mkdtemp(join(tmpdir(), "agent-workflow-api-switch-failure-"));
+  try {
+    await withServer(
+      async (baseUrl) => {
+        const activate = (profile) =>
+          fetch(`${baseUrl}/api/activate`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ profile }),
+          });
+        assert.equal((await activate(CODEX_OVERNIGHT_CLAUDE_PROFILE)).status, 200);
+        await writeFile(
+          join(skillsDir, ".agent-workflow-switch", "activation.lock"),
+          "occupied",
+          "utf8",
+        );
+        const balanced = {
+          ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+          id: "codex-balanced-blocked",
+          mode: { id: "balanced", version: "1.0.0" },
+        };
+        const blocked = await activate(balanced);
+        assert.equal(blocked.status, 409);
+        assert.equal((await blocked.json()).error, "store.locked");
+        const status = await (await fetch(`${baseUrl}/api/status`)).json();
+        assert.equal(status.active.mode.id, "overnight");
       },
       { skillsDir },
     );
@@ -154,6 +196,7 @@ test("rollback API restores a server-generated backup", async () => {
         const second = await activate(balanced);
         assert.equal(second.status, 200);
         const switched = await second.json();
+        assert.equal(switched.activationKind, "overwrite");
         assert.equal(switched.status.active.variantId, "workflow-codex-balanced-claude-code");
         assert.equal(switched.status.backups.length, 1);
 

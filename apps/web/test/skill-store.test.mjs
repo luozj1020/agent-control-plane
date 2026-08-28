@@ -73,6 +73,7 @@ test("activation writes an owned minimal Skill atomically", async () => {
     const result = await store.activate(variant);
 
     assert.equal(result.changed, true);
+    assert.equal(result.activationKind, "activate");
     assert.equal(result.backupId, null);
     assert.equal(
       await readFile(join(skillsDir, "agent-workflow-active", "SKILL.md"), "utf8"),
@@ -88,6 +89,20 @@ test("activation writes an owned minimal Skill atomically", async () => {
   });
 });
 
+test("activating the identical mode is unchanged and creates no duplicate history", async () => {
+  await withTempDirectory(async (skillsDir) => {
+    const store = testStore(skillsDir);
+    const overnight = resolveMode("overnight");
+    await store.activate(overnight);
+    const repeated = await store.activate(overnight);
+
+    assert.equal(repeated.changed, false);
+    assert.equal(repeated.activationKind, "unchanged");
+    assert.equal(repeated.backupId, null);
+    assert.equal((await store.history()).entries.length, 1);
+  });
+});
+
 test("switching creates a recoverable backup and rollback preserves both versions", async () => {
   await withTempDirectory(async (skillsDir) => {
     const store = testStore(skillsDir);
@@ -96,6 +111,7 @@ test("switching creates a recoverable backup and rollback preserves both version
     await store.activate(overnight);
     const switched = await store.activate(balanced);
 
+    assert.equal(switched.activationKind, "overwrite");
     assert.equal(switched.status.active.variantId, balanced.id);
     assert.equal(switched.status.backups.length, 1);
     assert.equal(switched.status.backups[0].variantId, overnight.id);
