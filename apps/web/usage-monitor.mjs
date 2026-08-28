@@ -180,6 +180,7 @@ export function createUsageMonitor(options = {}) {
   const sessionsDir = resolve(configured);
   const now = options.now ?? (() => new Date());
   const maximumFiles = options.maximumFiles ?? 5000;
+  const additionalSources = Object.freeze([...(options.sources ?? [])]);
   const cacheByPath = new Map();
   let collectionQueue = Promise.resolve();
 
@@ -197,40 +198,11 @@ export function createUsageMonitor(options = {}) {
     const endMs = Math.ceil(currentMs / config.bucketMs) * config.bucketMs;
     const startMs = endMs - config.durationMs;
     const type = await directoryType(sessionsDir);
-    if (type === "missing") {
-      return {
-        available: false,
-        source: "codex-local-sessions",
-        range,
-        generatedAt: currentTime.toISOString(),
-        reason: "sessions-directory-missing",
-        totals: emptyUsage(),
-        buckets: [],
-        models: [],
-        callCoverage: {
-          upstream: { status: "unavailable", source: "codex-local-sessions" },
-          downstream: { status: "not-connected", source: null },
-        },
-      };
-    }
-    if (type !== "directory") {
-      return {
-        available: false,
-        source: "codex-local-sessions",
-        range,
-        generatedAt: currentTime.toISOString(),
-        reason: `unsafe-sessions-${type}`,
-        totals: emptyUsage(),
-        buckets: [],
-        models: [],
-        callCoverage: {
-          upstream: { status: "unavailable", source: "codex-local-sessions" },
-          downstream: { status: "not-connected", source: null },
-        },
-      };
-    }
-
-    const files = await listRolloutFiles(sessionsDir, maximumFiles);
+    const upstreamCoverage =
+      type === "directory"
+        ? { status: "active", source: "codex-local-sessions" }
+        : { status: "unavailable", source: "codex-local-sessions" };
+    const files = type === "directory" ? await listRolloutFiles(sessionsDir, maximumFiles) : [];
     const activePaths = new Set(files);
     for (const cachedPath of cacheByPath.keys()) {
       if (!activePaths.has(cachedPath)) cacheByPath.delete(cachedPath);
@@ -243,6 +215,25 @@ export function createUsageMonitor(options = {}) {
       cacheByPath.set(path, cache);
       consideredCaches.push(cache);
     }
+
+    const sourceResults = await Promise.all(
+      additionalSources.map(async (source) => {
+        try {
+          return await source.collect({ startMs, endMs });
+        } catch {
+          return {
+            id: source.id ?? "unknown",
+            lane: source.lane ?? "downstream",
+            status: "unavailable",
+            source: source.id ?? null,
+            reason: "collector-failed",
+            attribution: "unavailable",
+            events: [],
+            diagnostics: { eventsRead: 0 },
+          };
+        }
+      }),
+    );
 
     const bucketCount = Math.ceil(config.durationMs / config.bucketMs);
     const buckets = Array.from({ length: bucketCount }, (_, index) => ({
@@ -262,22 +253,55 @@ export function createUsageMonitor(options = {}) {
         if (!bucket) continue;
         addUsage(bucket, event);
         addUsage(totals, event);
-        sessions.add(event.sessionKey);
+        if (event.sessionKey) sessions.add(event.sessionKey);
         const modelUsage = models.get(event.model) ?? emptyUsage();
         addUsage(modelUsage, event);
         models.set(event.model, modelUsage);
       }
     }
 
+    for (const result of sourceResults) {
+      if (result.status !== "active") continue;
+      for (const event of result.events ?? []) {
+        if (event.timestamp < startMs || event.timestamp >= endMs) continue;
+        const index = Math.floor((event.timestamp - startMs) / config.bucketMs);
+        const bucket = buckets[index];
+        if (!bucket) continue;
+        addUsage(bucket, event);
+        addUsage(totals, event);
+        if (event.sessionKey) sessions.add(event.sessionKey);
+        const modelUsage = models.get(event.model) ?? emptyUsage();
+        addUsage(modelUsage, event);
+        models.set(event.model, modelUsage);
+      }
+    }
+
+    const downstreamResult =
+      sourceResults.find(
+        (result) => result.lane === "downstream" && result.status === "active",
+      ) ?? sourceResults.find((result) => result.lane === "downstream");
+    const downstreamCoverage = downstreamResult
+      ? {
+          status: downstreamResult.status,
+          source: downstreamResult.source ?? downstreamResult.id ?? null,
+          ...(downstreamResult.reason ? { reason: downstreamResult.reason } : {}),
+          ...(downstreamResult.attribution
+            ? { attribution: downstreamResult.attribution }
+            : {}),
+        }
+      : { status: "not-connected", source: null };
+    const available =
+      upstreamCoverage.status === "active" || downstreamCoverage.status === "active";
+
     return {
-      available: true,
-      source: "codex-local-sessions",
+      available,
+      source: "local-agent-usage",
       range,
       generatedAt: currentTime.toISOString(),
       privacy: "usage-events-only",
       callCoverage: {
-        upstream: { status: "active", source: "codex-local-sessions" },
-        downstream: { status: "not-connected", source: null },
+        upstream: upstreamCoverage,
+        downstream: downstreamCoverage,
       },
       totals: {
         ...totals,
@@ -293,7 +317,22 @@ export function createUsageMonitor(options = {}) {
         filesDiscovered: files.length,
         filesRead: consideredCaches.length,
         parseErrors: consideredCaches.reduce((sum, cache) => sum + cache.parseErrors, 0),
+        sources: sourceResults.map((result) => ({
+          id: result.id,
+          status: result.status,
+          source: result.source,
+          reason: result.reason ?? null,
+          attribution: result.attribution ?? null,
+          eventsRead: result.diagnostics?.eventsRead ?? 0,
+          snapshotFallback: result.diagnostics?.snapshotFallback ?? false,
+        })),
       },
+      ...(!available
+        ? {
+            reason:
+              type === "missing" ? "sessions-directory-missing" : `unsafe-sessions-${type}`,
+          }
+        : {}),
     };
   }
 

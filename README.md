@@ -93,8 +93,8 @@ npm run dev
 Open `http://127.0.0.1:4173`. The current UI resolves modes and agent bindings
 through the real contracts package, previews the minimal generated `SKILL.md`,
 compares the generated token footprint of all three mode Skills, and exports the
-selected one. A separate Usage page presents actual Codex runtime token usage
-and model-call counts in an API-console style dashboard with 1 hour, 24 hour,
+selected one. A separate Usage page presents actual local-agent token usage and
+model-call counts in an API-console style dashboard with 1 hour, 24 hour,
 7 day, and 30 day ranges. Filesystem activation is disabled by default.
 
 Runtime usage is read locally from Codex session `token_count` events. The
@@ -109,12 +109,29 @@ session directory:
 AGENT_WORKFLOW_CODEX_SESSIONS_DIR=/absolute/path/to/sessions npm run dev
 ```
 
+When available, a read-only CC Switch adapter imports deduplicated Claude Code
+`session_log` rows from `~/.cc-switch/cc-switch.db` as downstream usage. It
+never writes the CC Switch database. A hot SQLite rollback journal is handled
+by querying a temporary snapshot, leaving the source database untouched. Use a
+different absolute database path or disable the adapter explicitly:
+
+```bash
+AGENT_WORKFLOW_CC_SWITCH_DB=/absolute/path/to/cc-switch.db npm run dev
+AGENT_WORKFLOW_CC_SWITCH_USAGE=off npm run dev
+```
+
 Token volume and model-call count use separate charts because they have
 different units. Upstream and downstream calls share one grouped call chart so
 delegation timing can be compared directly. Codex local session events are the
-authoritative upstream source. Until a downstream runtime adapter is connected,
-the downstream lane is explicitly marked unavailable and remains zero; the
-application never infers downstream calls from model names or message content.
+authoritative upstream source. Deduplicated Claude Code session rows imported
+by CC Switch are the downstream source. If that database is absent or
+incompatible, the downstream lane is explicitly marked unavailable; the
+application never infers calls from model names or message content.
+
+CC Switch rows currently provide agent-level attribution: they establish that
+Claude Code made a call, but do not prove which activated workflow or task
+caused it. Task-level attribution remains unavailable until dispatch and child
+sessions share a stable run identifier.
 
 To enable atomic activation, explicitly provide the absolute Codex Skill
 directory you want this application to manage:

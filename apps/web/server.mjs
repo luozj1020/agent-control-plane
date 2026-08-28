@@ -9,6 +9,7 @@ import {
   EXAMPLE_AGENTS,
   resolveEffectiveSkill,
 } from "../../packages/contracts/dist/index.js";
+import { createCcSwitchUsageSource } from "./cc-switch-usage-source.mjs";
 import { createSkillStore, SkillStoreError } from "./skill-store.mjs";
 import { createUsageMonitor } from "./usage-monitor.mjs";
 
@@ -112,8 +113,15 @@ async function serveFile(request, response, root, relativePath) {
 
 export function createAppServer(options = {}) {
   const store = options.store ?? createSkillStore({ skillsDir: options.skillsDir });
-  const usageMonitor =
-    options.usageMonitor ?? createUsageMonitor({ sessionsDir: options.sessionsDir });
+  let usageMonitor = options.usageMonitor;
+  if (!usageMonitor) {
+    const usageSources =
+      options.usageSources ??
+      (process.env.AGENT_WORKFLOW_CC_SWITCH_USAGE === "off"
+        ? []
+        : [createCcSwitchUsageSource({ databasePath: options.ccSwitchDatabasePath })]);
+    usageMonitor = createUsageMonitor({ sessionsDir: options.sessionsDir, sources: usageSources });
+  }
   return createServer(async (request, response) => {
     let requestUrl;
     let pathname;

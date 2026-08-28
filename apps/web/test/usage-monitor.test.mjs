@@ -232,6 +232,105 @@ test("range selection excludes older runtime events", async () => {
   });
 });
 
+test("combines an injected downstream source with upstream Codex usage", async () => {
+  await withSessions(async ({ file, root }) => {
+    await writeFile(
+      file,
+      jsonLines([
+        usage("2026-08-28T11:10:00.000Z", {
+          input: 10,
+          cached: 2,
+          output: 3,
+        }),
+      ]),
+      "utf8",
+    );
+    const downstream = {
+      id: "cc-switch",
+      lane: "downstream",
+      async collect() {
+        return {
+          id: "cc-switch",
+          lane: "downstream",
+          status: "active",
+          source: "cc-switch-session-log",
+          attribution: "agent-level",
+          events: [
+            {
+              timestamp: Date.parse("2026-08-28T11:20:00.000Z"),
+              sessionKey: "claude:session-a",
+              model: "claude-test",
+              lane: "downstream",
+              inputTokens: 20,
+              cachedInputTokens: 12,
+              uncachedInputTokens: 8,
+              outputTokens: 4,
+              reasoningOutputTokens: 0,
+              totalTokens: 24,
+            },
+          ],
+          diagnostics: { eventsRead: 1, snapshotFallback: true },
+        };
+      },
+    };
+    const monitor = createUsageMonitor({
+      sessionsDir: root,
+      sources: [downstream],
+      now: () => new Date("2026-08-28T12:00:00.000Z"),
+    });
+    const result = await monitor.collect("1h");
+
+    assert.equal(result.totals.totalTokens, 37);
+    assert.equal(result.totals.modelCalls, 2);
+    assert.equal(result.totals.upstreamCalls, 1);
+    assert.equal(result.totals.downstreamCalls, 1);
+    assert.equal(result.totals.sessions, 2);
+    assert.deepEqual(result.callCoverage.downstream, {
+      status: "active",
+      source: "cc-switch-session-log",
+      attribution: "agent-level",
+    });
+    assert.deepEqual(result.diagnostics.sources, [
+      {
+        id: "cc-switch",
+        status: "active",
+        source: "cc-switch-session-log",
+        reason: null,
+        attribution: "agent-level",
+        eventsRead: 1,
+        snapshotFallback: true,
+      },
+    ]);
+  });
+});
+
+test("keeps downstream usage available when the Codex directory is missing", async () => {
+  const monitor = createUsageMonitor({
+    sessionsDir: join(tmpdir(), "agent-workflow-upstream-missing"),
+    sources: [
+      {
+        id: "cc-switch",
+        lane: "downstream",
+        async collect() {
+          return {
+            id: "cc-switch",
+            lane: "downstream",
+            status: "active",
+            source: "cc-switch-session-log",
+            events: [],
+            diagnostics: { eventsRead: 0 },
+          };
+        },
+      },
+    ],
+    now: () => new Date("2026-08-28T12:00:00.000Z"),
+  });
+  const result = await monitor.collect("1h");
+  assert.equal(result.available, true);
+  assert.equal(result.callCoverage.upstream.status, "unavailable");
+  assert.equal(result.callCoverage.downstream.status, "active");
+});
+
 test("missing sessions directory is reported as unavailable", async () => {
   const monitor = createUsageMonitor({
     sessionsDir: join(tmpdir(), "agent-workflow-definitely-missing"),
