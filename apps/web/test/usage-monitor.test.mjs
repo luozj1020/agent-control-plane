@@ -293,6 +293,7 @@ test("combines an injected downstream source with upstream Codex usage", async (
     assert.deepEqual(result.diagnostics.sources, [
       {
         id: "cc-switch",
+        lane: "downstream",
         status: "active",
         source: "cc-switch-session-log",
         reason: null,

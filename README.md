@@ -109,13 +109,17 @@ session directory:
 AGENT_WORKFLOW_CODEX_SESSIONS_DIR=/absolute/path/to/sessions npm run dev
 ```
 
-When available, a read-only CC Switch adapter imports deduplicated Claude Code
-`session_log` rows from `~/.cc-switch/cc-switch.db` as downstream usage. It
-never writes the CC Switch database. A hot SQLite rollback journal is handled
-by querying a temporary snapshot, leaving the source database untouched. Use a
-different absolute database path or disable the adapter explicitly:
+Claude downstream usage is read directly and incrementally from
+`~/.claude/projects` first. A read-only CC Switch adapter imports deduplicated
+Claude Code `session_log` rows from `~/.cc-switch/cc-switch.db` only when the
+local Claude session directory is unavailable. It never writes the CC Switch
+database. A hot SQLite rollback journal is handled by querying a temporary
+snapshot, leaving the source database untouched. Override or disable either
+source explicitly:
 
 ```bash
+AGENT_WORKFLOW_CLAUDE_PROJECTS_DIR=/absolute/path/to/projects npm run dev
+AGENT_WORKFLOW_CLAUDE_USAGE=off npm run dev
 AGENT_WORKFLOW_CC_SWITCH_DB=/absolute/path/to/cc-switch.db npm run dev
 AGENT_WORKFLOW_CC_SWITCH_USAGE=off npm run dev
 ```
@@ -123,10 +127,11 @@ AGENT_WORKFLOW_CC_SWITCH_USAGE=off npm run dev
 Token volume and model-call count use separate charts because they have
 different units. Upstream and downstream calls share one grouped call chart so
 delegation timing can be compared directly. Codex local session events are the
-authoritative upstream source. Deduplicated Claude Code session rows imported
-by CC Switch are the downstream source. If that database is absent or
-incompatible, the downstream lane is explicitly marked unavailable; the
-application never infers calls from model names or message content.
+authoritative upstream source. Deduplicated Claude Code assistant usage events
+are the downstream source, with CC Switch session rows as a fallback. If both
+sources are absent or incompatible, the downstream lane is explicitly marked
+unavailable; the application never infers calls from model names or message
+content.
 
 CC Switch rows currently provide agent-level attribution: they establish that
 Claude Code made a call, but do not prove which activated workflow or task

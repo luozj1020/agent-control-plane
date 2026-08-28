@@ -319,6 +319,7 @@ export function createUsageMonitor(options = {}) {
         parseErrors: consideredCaches.reduce((sum, cache) => sum + cache.parseErrors, 0),
         sources: sourceResults.map((result) => ({
           id: result.id,
+          lane: result.lane,
           status: result.status,
           source: result.source,
           reason: result.reason ?? null,

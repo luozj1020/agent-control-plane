@@ -175,10 +175,13 @@ function setCoverage(element, lane, coverage) {
   const active = coverage?.status === "active";
   element.className = active ? "active" : "unavailable";
   if (active) {
-    element.lastChild.textContent =
-      coverage.source === "cc-switch-session-log"
-        ? `${lane} · CC Switch 会话记录已连接`
-        : `${lane} · 本地事件采集中`;
+    if (coverage.source === "cc-switch-session-log") {
+      element.lastChild.textContent = `${lane} · CC Switch 会话记录已连接`;
+    } else if (coverage.source === "claude-local-sessions") {
+      element.lastChild.textContent = `${lane} · Claude 本地会话已连接`;
+    } else {
+      element.lastChild.textContent = `${lane} · 本地事件采集中`;
+    }
   } else if (coverage?.status === "not-connected") {
     element.lastChild.textContent =
       coverage?.reason === "database-missing"
@@ -429,11 +432,11 @@ function renderRuntimeUsage(usage) {
   renderCallsChart(usage);
   elements.runtimeUpdated.textContent = `更新于 ${new Date(usage.generatedAt).toLocaleTimeString("zh-CN")}`;
   const diagnostics = usage.diagnostics ?? {};
-  const downstream = diagnostics.sources?.find((source) => source.id === "cc-switch");
+  const downstream = diagnostics.sources?.find((source) => source.lane === "downstream");
   const downstreamStatus =
     downstream?.status === "active"
-      ? `CC Switch 下游 ${formatTokens(downstream.eventsRead)} 条`
-      : "CC Switch 下游未连接";
+      ? `${downstream.source === "claude-local-sessions" ? "Claude 本地" : "CC Switch"}下游 ${formatTokens(downstream.eventsRead)} 条`
+      : "Claude 下游未连接";
   elements.runtimeDiagnostics.textContent = `${diagnostics.filesRead ?? 0} 个 Codex 会话文件 · ${downstreamStatus} · ${diagnostics.parseErrors ?? 0} 个无效事件 · 不保留消息内容`;
 }
 

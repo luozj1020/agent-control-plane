@@ -10,6 +10,8 @@ import {
   resolveEffectiveSkill,
 } from "../../packages/contracts/dist/index.js";
 import { createCcSwitchUsageSource } from "./cc-switch-usage-source.mjs";
+import { createClaudeUsageSource } from "./claude-usage-source.mjs";
+import { createPreferredUsageSource } from "./preferred-usage-source.mjs";
 import { createSkillStore, SkillStoreError } from "./skill-store.mjs";
 import { createUsageMonitor } from "./usage-monitor.mjs";
 
@@ -115,11 +117,27 @@ export function createAppServer(options = {}) {
   const store = options.store ?? createSkillStore({ skillsDir: options.skillsDir });
   let usageMonitor = options.usageMonitor;
   if (!usageMonitor) {
-    const usageSources =
-      options.usageSources ??
-      (process.env.AGENT_WORKFLOW_CC_SWITCH_USAGE === "off"
-        ? []
-        : [createCcSwitchUsageSource({ databasePath: options.ccSwitchDatabasePath })]);
+    let usageSources = options.usageSources;
+    if (!usageSources) {
+      const downstreamSources = [];
+      if (process.env.AGENT_WORKFLOW_CLAUDE_USAGE !== "off") {
+        downstreamSources.push(
+          createClaudeUsageSource({ projectsDir: options.claudeProjectsDir }),
+        );
+      }
+      if (process.env.AGENT_WORKFLOW_CC_SWITCH_USAGE !== "off") {
+        downstreamSources.push(
+          createCcSwitchUsageSource({ databasePath: options.ccSwitchDatabasePath }),
+        );
+      }
+      usageSources = [
+        createPreferredUsageSource({
+          id: "claude-downstream",
+          lane: "downstream",
+          sources: downstreamSources,
+        }),
+      ];
+    }
     usageMonitor = createUsageMonitor({ sessionsDir: options.sessionsDir, sources: usageSources });
   }
   return createServer(async (request, response) => {

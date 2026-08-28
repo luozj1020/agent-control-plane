@@ -204,7 +204,7 @@
                   <span class="runtime-live" id="runtime-live"><i></i><span id="runtime-live-text">等待打开</span></span>
                 </div>
                 <h2 id="runtime-title">Token 运行时用量</h2>
-                <p>Codex 读取本地 token_count；Claude 下游优先读取 CC Switch 的会话统计，缓存输入不会重复计算。</p>
+                <p>Codex 与 Claude 均优先读取本地会话；CC Switch 作为 Claude 下游回退，缓存输入不会重复计算。</p>
               </div>
               <span id="runtime-updated">等待首次采集</span>
             </div>
@@ -280,7 +280,7 @@
               <div class="calls-chart" id="calls-chart" aria-live="polite"></div>
               <div class="runtime-empty" id="calls-empty" hidden></div>
             </div>
-            <p class="calls-footnote">每个完成的 last_token_usage 事件计为一次上游调用；每条去重后的 Claude session_log 计为一次下游调用。当前 CC Switch 数据属于 Agent 级归因，代表 Claude Code 总活动，尚不能证明调用属于某个具体 Workflow；不会根据模型名称、提示词或进程数量推测任务关系。</p>
+            <p class="calls-footnote">每个完成的 last_token_usage 事件计为一次上游调用；每条去重后的 Claude assistant usage 计为一次下游调用。当前数据属于 Agent 级归因，代表 Claude Code 总活动，尚不能证明调用属于某个具体 Workflow；不会根据模型名称、提示词或进程数量推测任务关系。</p>
           </section>
         </section>
 
