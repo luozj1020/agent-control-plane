@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   BALANCED_BUDGET_LIMITS,
+  BALANCED_TIMING_LIMITS,
   BUILTIN_MODE_CATALOG,
   CODEX_OVERNIGHT_CLAUDE_PROFILE,
   EXAMPLE_AGENTS,
@@ -22,7 +23,7 @@ test("catalog exposes three distinct immutable mode Skill families", () => {
   assert.equal(new Set(BUILTIN_MODE_CATALOG.modes.map((mode) => mode.id)).size, 3);
   assert.equal(Object.isFrozen(BUILTIN_MODE_CATALOG), true);
   assert.deepEqual(BALANCED_BUDGET_LIMITS.mainReviewCalls, { min: 1, max: 99 });
-  assert.deepEqual(BALANCED_BUDGET_LIMITS.maxTotalTokens, { min: 0, max: 1_000_000_000 });
+  assert.deepEqual(BALANCED_TIMING_LIMITS.hardCapSeconds, { min: 60, max: 7_200 });
   assert.equal(Object.isFrozen(BUILTIN_MODE_CATALOG.modes[0]), true);
 });
 
@@ -56,7 +57,7 @@ test("Balanced resolves its tuned policy and excludes other modes", () => {
   assert.doesNotMatch(result.value.content, /Overnight|Interactive/);
 });
 
-test("Balanced embeds validated budget overrides in the external Runner command", () => {
+test("Balanced embeds validated budget and timing overrides in the external Runner command", () => {
   const profile = {
     ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
     id: "codex-balanced-budgeted",
@@ -66,7 +67,14 @@ test("Balanced embeds validated budget overrides in the external Runner command"
       downstreamCalls: 5,
       advisorCalls: 2,
       reservedFinalReviewCalls: 1,
-      maxTotalTokens: 9000000,
+    },
+    balancedTiming: {
+      contextAcquisitionSeconds: 480,
+      firstProgressSeconds: 420,
+      activeWindowSeconds: 540,
+      progressExtensionSeconds: 240,
+      growingProgressExtensionSeconds: 300,
+      hardCapSeconds: 1800,
     },
   };
   const result = resolve(profile);
@@ -74,7 +82,9 @@ test("Balanced embeds validated budget overrides in the external Runner command"
   if (!result.ok) return;
   assert.match(result.value.content, /--main-review-calls 4/);
   assert.match(result.value.content, /--downstream-calls 5/);
-  assert.match(result.value.content, /--max-total-tokens 9000000/);
+  assert.match(result.value.content, /--context-seconds 480/);
+  assert.match(result.value.content, /--growing-extension-seconds 300/);
+  assert.doesNotMatch(result.value.content, /max-total-tokens/);
 });
 
 test("Balanced rejects a budget that consumes the protected final review slot", () => {
@@ -87,7 +97,6 @@ test("Balanced rejects a budget that consumes the protected final review slot", 
       downstreamCalls: 1,
       advisorCalls: 0,
       reservedFinalReviewCalls: 2,
-      maxTotalTokens: 0,
     },
   };
   const result = resolve(profile);
@@ -106,7 +115,6 @@ test("Balanced rejects every budget field outside its product range", () => {
       downstreamCalls: 100,
       advisorCalls: 100,
       reservedFinalReviewCalls: 100,
-      maxTotalTokens: 1_000_000_001,
     },
   };
   const result = resolve(profile);
@@ -116,6 +124,26 @@ test("Balanced rejects every budget field outside its product range", () => {
   for (const key of Object.keys(profile.balancedBudget)) {
     assert(paths.has(`/profile/balancedBudget/${key}`));
   }
+});
+
+test("Balanced rejects timing overrides outside ranges or beyond the hard cap", () => {
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    id: "codex-balanced-invalid-timing",
+    mode: { id: "balanced", version: "1.0.0" },
+    balancedTiming: {
+      contextAcquisitionSeconds: 600,
+      firstProgressSeconds: 600,
+      activeWindowSeconds: 800,
+      progressExtensionSeconds: 300,
+      growingProgressExtensionSeconds: 300,
+      hardCapSeconds: 700,
+    },
+  };
+  const result = resolve(profile);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert(result.issues.some((entry) => entry.path.endsWith("hardCapSeconds")));
 });
 
 test("Balanced rejects arbitrary window configuration on the profile", () => {

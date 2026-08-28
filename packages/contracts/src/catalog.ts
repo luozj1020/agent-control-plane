@@ -43,7 +43,6 @@ const BALANCED_BUDGET: BalancedBudgetPolicy = {
   downstreamCalls: 3,
   advisorCalls: 2,
   reservedFinalReviewCalls: 1,
-  maxTotalTokens: 5_000_000,
 };
 
 const MODES: readonly ModeSkillTemplate[] = [

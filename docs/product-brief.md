@@ -82,7 +82,8 @@ template into Codex.
 - **Balanced:** the product selects a versioned, previously tuned window policy;
   downstream work runs for the policy's current window and returns to the main
   agent for review after every round. An on-demand Runner enforces context,
-  active, extension, idle, tail, and hard-cap boundaries plus call/Token budget.
+  active, extension, idle, tail, and hard-cap boundaries plus call budgets.
+  Token usage is monitored but never used as a termination budget.
   It is not one user-entered fixed window.
 - **Interactive:** the main agent remains foreground owner and collaborates with
   its native subagents. It requires native-subagent capability and does not

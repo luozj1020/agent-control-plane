@@ -50,7 +50,8 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /按模型计算消耗/);
     assert.match(html, /id="balanced-config"/);
     assert.match(html, /Balanced 运行控制/);
-    assert.match(html, /id="balanced-token-budget"/);
+    assert.match(html, /id="balanced-first-progress-window"/);
+    assert.doesNotMatch(html, /总 Token 上限/);
     assert.match(html, /USAGE · ESTIMATED CONTEXT/);
     assert.match(html, /ACTIVATION AUDIT LOG/);
     assert.match(html, /激活记录/);
@@ -140,8 +141,9 @@ test("serves Balanced policy and persisted run status", async () => {
       assert.equal(configBody.policy.id, "balanced-default");
       assert.equal(configBody.policy.contextAcquisitionSeconds, 600);
       assert.equal(configBody.budget.downstreamCalls, 3);
+      assert.equal("maxTotalTokens" in configBody.budget, false);
       assert.deepEqual(configBody.budgetLimits.mainReviewCalls, { min: 1, max: 99 });
-      assert.deepEqual(configBody.budgetLimits.maxTotalTokens, { min: 0, max: 1000000000 });
+      assert.deepEqual(configBody.timingLimits.activeWindowSeconds, { min: 30, max: 3600 });
       assert.deepEqual(configBody.adapters, [{ id: "claude-code", displayName: "Claude Code" }]);
 
       const runs = await fetch(`${baseUrl}/api/balanced/runs`);

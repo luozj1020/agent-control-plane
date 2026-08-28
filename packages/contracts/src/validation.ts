@@ -1,5 +1,5 @@
 import { BUILTIN_MODE_CATALOG } from "./catalog.js";
-import { BALANCED_BUDGET_LIMITS } from "./budget.js";
+import { BALANCED_BUDGET_LIMITS, BALANCED_TIMING_LIMITS } from "./budget.js";
 import type {
   AgentCapability,
   AgentTarget,
@@ -21,6 +21,7 @@ const PROFILE_KEYS = new Set([
   "targetAdapterId",
   "roleBindings",
   "balancedBudget",
+  "balancedTiming",
 ]);
 
 const BALANCED_BUDGET_KEYS = new Set([
@@ -28,7 +29,15 @@ const BALANCED_BUDGET_KEYS = new Set([
   "downstreamCalls",
   "advisorCalls",
   "reservedFinalReviewCalls",
-  "maxTotalTokens",
+]);
+
+const BALANCED_TIMING_KEYS = new Set([
+  "contextAcquisitionSeconds",
+  "firstProgressSeconds",
+  "activeWindowSeconds",
+  "progressExtensionSeconds",
+  "growingProgressExtensionSeconds",
+  "hardCapSeconds",
 ]);
 
 const AGENT_KINDS = new Set(["codex", "claude-code", "custom"]);
@@ -225,6 +234,63 @@ function validateBalancedBudget(value: unknown, issues: ValidationIssue[]): void
         "Reserved final-review calls cannot exceed the main-review budget.",
       ),
     );
+  }
+}
+
+function validateBalancedTiming(value: unknown, issues: ValidationIssue[]): void {
+  if (!isRecord(value)) {
+    issues.push(issue("profile.invalid", "/profile/balancedTiming", "Balanced timing must be an object."));
+    return;
+  }
+  for (const key of Object.keys(value)) {
+    if (!BALANCED_TIMING_KEYS.has(key)) {
+      issues.push(
+        issue(
+          "profile.unknown_field",
+          `/profile/balancedTiming/${key}`,
+          `Unknown Balanced timing field '${key}'.`,
+        ),
+      );
+    }
+  }
+  const integer = (key: keyof typeof BALANCED_TIMING_LIMITS) => {
+    const range = BALANCED_TIMING_LIMITS[key];
+    return (
+      Number.isSafeInteger(value[key]) &&
+      Number(value[key]) >= range.min &&
+      Number(value[key]) <= range.max
+    );
+  };
+  for (const key of Object.keys(BALANCED_TIMING_LIMITS) as Array<keyof typeof BALANCED_TIMING_LIMITS>) {
+    if (!integer(key)) {
+      const range = BALANCED_TIMING_LIMITS[key];
+      issues.push(
+        issue(
+          "profile.invalid",
+          `/profile/balancedTiming/${key}`,
+          `${key} must be an integer from ${range.min} to ${range.max}.`,
+        ),
+      );
+    }
+  }
+  if (Object.keys(BALANCED_TIMING_LIMITS).every((key) => integer(key as keyof typeof BALANCED_TIMING_LIMITS))) {
+    const hardCap = Number(value.hardCapSeconds);
+    const longestWindow = Math.max(
+      Number(value.contextAcquisitionSeconds),
+      Number(value.firstProgressSeconds),
+      Number(value.activeWindowSeconds),
+      Number(value.progressExtensionSeconds),
+      Number(value.growingProgressExtensionSeconds),
+    );
+    if (hardCap < longestWindow) {
+      issues.push(
+        issue(
+          "profile.invalid",
+          "/profile/balancedTiming/hardCapSeconds",
+          "hardCapSeconds cannot be shorter than any configured wait or extension window.",
+        ),
+      );
+    }
   }
 }
 
@@ -469,10 +535,7 @@ export function validateSkillResolutionInput(input: unknown): readonly Validatio
       !Number.isSafeInteger(budgetPolicy.reservedFinalReviewCalls) ||
       budgetPolicy.reservedFinalReviewCalls < BALANCED_BUDGET_LIMITS.reservedFinalReviewCalls.min ||
       budgetPolicy.reservedFinalReviewCalls > BALANCED_BUDGET_LIMITS.reservedFinalReviewCalls.max ||
-      budgetPolicy.reservedFinalReviewCalls > budgetPolicy.mainReviewCalls ||
-      !Number.isSafeInteger(budgetPolicy.maxTotalTokens) ||
-      budgetPolicy.maxTotalTokens < BALANCED_BUDGET_LIMITS.maxTotalTokens.min ||
-      budgetPolicy.maxTotalTokens > BALANCED_BUDGET_LIMITS.maxTotalTokens.max
+      budgetPolicy.reservedFinalReviewCalls > budgetPolicy.mainReviewCalls
     ) {
       issues.push(
         issue(
@@ -485,14 +548,28 @@ export function validateSkillResolutionInput(input: unknown): readonly Validatio
     if (profile.balancedBudget !== undefined) {
       validateBalancedBudget(profile.balancedBudget, issues);
     }
-  } else if (profile.balancedBudget !== undefined) {
-    issues.push(
-      issue(
-        "mode.incompatible_role",
-        "/profile/balancedBudget",
-        "Balanced budget configuration is valid only in Balanced mode.",
-      ),
-    );
+    if (profile.balancedTiming !== undefined) {
+      validateBalancedTiming(profile.balancedTiming, issues);
+    }
+  } else {
+    if (profile.balancedBudget !== undefined) {
+      issues.push(
+        issue(
+          "mode.incompatible_role",
+          "/profile/balancedBudget",
+          "Balanced budget configuration is valid only in Balanced mode.",
+        ),
+      );
+    }
+    if (profile.balancedTiming !== undefined) {
+      issues.push(
+        issue(
+          "mode.incompatible_role",
+          "/profile/balancedTiming",
+          "Balanced timing configuration is valid only in Balanced mode.",
+        ),
+      );
+    }
   }
 
   validateModeRoles(mode, profile, agentsById, issues);

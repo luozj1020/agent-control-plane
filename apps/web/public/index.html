@@ -110,12 +110,14 @@
                 </div>
                 <span class="compatibility" id="balanced-policy-version">balanced-default@1.0.0</span>
               </div>
-              <p class="balanced-description">时间窗口由版本化策略固定；预算写入精简 Skill，并由外部 Runner 强制执行。</p>
+              <p class="balanced-description">时间值以版本化策略为默认值；修改后会作为显式覆盖写入精简 Skill，并由外部 Runner 强制执行。</p>
               <div class="balanced-window-grid">
-                <div><span>Context</span><strong id="balanced-context-window">—</strong></div>
-                <div><span>Active</span><strong id="balanced-active-window">—</strong></div>
-                <div><span>Extension</span><strong id="balanced-extension-window">—</strong></div>
-                <div><span>Hard cap</span><strong id="balanced-hard-cap">—</strong></div>
+                <label><span>上下文等待</span><input id="balanced-context-window" type="number" step="1"><small>30–3600 秒</small></label>
+                <label><span>首次进展等待</span><input id="balanced-first-progress-window" type="number" step="1"><small>30–3600 秒</small></label>
+                <label><span>活动窗口</span><input id="balanced-active-window" type="number" step="1"><small>30–3600 秒</small></label>
+                <label><span>首次延长</span><input id="balanced-extension-window" type="number" step="1"><small>10–1800 秒</small></label>
+                <label><span>持续延长</span><input id="balanced-growing-extension-window" type="number" step="1"><small>10–1800 秒</small></label>
+                <label><span>单轮硬上限</span><input id="balanced-hard-cap" type="number" step="1"><small>60–7200 秒，且不短于其他窗口</small></label>
               </div>
               <div class="balanced-budget-grid">
                 <label class="field">
@@ -137,11 +139,6 @@
                   <span>预留最终审阅</span>
                   <input id="balanced-reserved-calls" type="number" min="0" max="99" step="1">
                   <small class="budget-range">0–主 Agent 审阅调用数</small>
-                </label>
-                <label class="field">
-                  <span>总 Token 上限</span>
-                  <input id="balanced-token-budget" type="number" min="0" max="1000000000" step="1000">
-                  <small class="budget-range">0–10 亿；0 表示不限制</small>
                 </label>
               </div>
               <div class="balanced-runtime-status">

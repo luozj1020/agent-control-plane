@@ -19,6 +19,7 @@ import { basename, isAbsolute, join, parse, resolve, sep } from "node:path";
 
 import {
   BALANCED_BUDGET_LIMITS,
+  BALANCED_TIMING_LIMITS,
   BUILTIN_MODE_CATALOG,
 } from "../../packages/contracts/dist/index.js";
 import { createBuiltInAdapterRegistry } from "./agent-adapters.mjs";
@@ -116,6 +117,7 @@ function validatePolicy(policy) {
 }
 
 function validateBudget(budget) {
+  const normalized = {};
   for (const [key, range] of Object.entries(BALANCED_BUDGET_LIMITS)) {
     if (
       !Number.isSafeInteger(budget[key]) ||
@@ -127,6 +129,7 @@ function validateBudget(budget) {
         `${key} must be an integer from ${range.min} to ${range.max}.`,
       );
     }
+    normalized[key] = budget[key];
   }
   if (budget.reservedFinalReviewCalls > budget.mainReviewCalls) {
     throw new BalancedRuntimeError(
@@ -134,7 +137,7 @@ function validateBudget(budget) {
       "Reserved final-review calls exceed the main-review budget.",
     );
   }
-  return budget;
+  return Object.freeze(normalized);
 }
 
 export function validateBalancedTask(task) {
@@ -405,7 +408,6 @@ function budgetSnapshot(records, budget) {
       main: Math.max(0, budget.mainReviewCalls - used.main),
       downstream: Math.max(0, budget.downstreamCalls - used.downstream),
       advisor: Math.max(0, budget.advisorCalls - used.advisor),
-      tokens: budget.maxTotalTokens === 0 ? null : Math.max(0, budget.maxTotalTokens - totalTokens),
     },
     totalTokens,
   };
@@ -430,13 +432,6 @@ async function checkBudgetAvailable(runDirectory, budget, role, stage) {
       409,
       snapshot,
     );
-  }
-  if (
-    role !== "main" &&
-    budget.maxTotalTokens > 0 &&
-    snapshot.totalTokens >= budget.maxTotalTokens
-  ) {
-    throw new BalancedRuntimeError("budget_exhausted", "Token budget is exhausted.", 409, snapshot);
   }
   return snapshot;
 }
@@ -482,15 +477,19 @@ function defaultAdvisor() {
   });
 }
 
-function sleep(milliseconds) {
-  return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+function raceWithTimeout(promise, milliseconds, timeoutValue) {
+  let timer;
+  const timeout = new Promise((resolveTimeout) => {
+    timer = setTimeout(() => resolveTimeout(timeoutValue), milliseconds);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 function policyReference(policy) {
   return `${policy.id}@${policy.version}`;
 }
 
-function resolvePolicy(catalog, reference) {
+function resolvePolicy(catalog, reference, overrides = {}) {
   const [id, version] = reference.split("@");
   const policy = catalog.tunedWindowPolicies.find(
     (candidate) => candidate.id === id && candidate.version === version,
@@ -498,7 +497,36 @@ function resolvePolicy(catalog, reference) {
   if (!policy) {
     throw new BalancedRuntimeError("runtime.policy_unknown", `Unknown Balanced policy '${reference}'.`);
   }
-  return validatePolicy(policy);
+  const timing = {};
+  for (const [key, range] of Object.entries(BALANCED_TIMING_LIMITS)) {
+    const value = overrides[key] ?? policy[key];
+    if (
+      overrides[key] !== undefined &&
+      (!Number.isSafeInteger(value) || value < range.min || value > range.max)
+    ) {
+      throw new BalancedRuntimeError(
+        "runtime.invalid_timing",
+        `${key} must be an integer from ${range.min} to ${range.max}.`,
+      );
+    }
+    timing[key] = value;
+  }
+  if (
+    timing.hardCapSeconds <
+    Math.max(
+      timing.contextAcquisitionSeconds,
+      timing.firstProgressSeconds,
+      timing.activeWindowSeconds,
+      timing.progressExtensionSeconds,
+      timing.growingProgressExtensionSeconds,
+    )
+  ) {
+    throw new BalancedRuntimeError(
+      "runtime.invalid_timing",
+      "hardCapSeconds cannot be shorter than any configured wait or extension window.",
+    );
+  }
+  return validatePolicy({ ...policy, ...timing });
 }
 
 function resolveBudget(catalog, overrides = {}) {
@@ -514,7 +542,6 @@ function resolveBudget(catalog, overrides = {}) {
     advisorCalls: overrides.advisorCalls ?? base.advisorCalls,
     reservedFinalReviewCalls:
       overrides.reservedFinalReviewCalls ?? base.reservedFinalReviewCalls,
-    maxTotalTokens: overrides.maxTotalTokens ?? base.maxTotalTokens,
   });
 }
 
@@ -590,7 +617,6 @@ export function createBalancedRuntime(options = {}) {
     process.env.AGENT_CONTROL_BALANCED_RUNS_DIR ??
     join(homedir(), ".agent-control-plane", "balanced-runs");
   const clock = options.clock ?? (() => Date.now());
-  const wait = options.sleep ?? sleep;
   const snapshot = options.snapshotWorktree ?? snapshotWorktree;
 
   async function createRun(input) {
@@ -611,7 +637,11 @@ export function createBalancedRuntime(options = {}) {
     if (!adapter) {
       throw new BalancedRuntimeError("runtime.adapter_unknown", `Unknown adapter '${input.adapterId}'.`);
     }
-    const policy = resolvePolicy(catalog, input.policyRef ?? "balanced-default@1.0.0");
+    const policy = resolvePolicy(
+      catalog,
+      input.policyRef ?? "balanced-default@1.0.0",
+      input.timing,
+    );
     const budget = resolveBudget(catalog, input.budget);
     const runId = `${new Date(clock()).toISOString().replace(/[:.]/g, "-").toLowerCase()}-${task.id.slice(0, 64)}-${randomUUID()}`;
     const runDirectory = join(runtimeRoot, runId);
@@ -790,7 +820,7 @@ export function createBalancedRuntime(options = {}) {
           Math.max(1, hardDeadline - now),
         ),
       );
-      evaluation.promise = Promise.race([
+      evaluation.promise = raceWithTimeout(
         Promise.resolve().then(() =>
           advisor.evaluate({
             now,
@@ -802,11 +832,12 @@ export function createBalancedRuntime(options = {}) {
             signal: abortController.signal,
           }),
         ),
-        wait(advisorTimeoutMs).then(() => ({
+        advisorTimeoutMs,
+        {
           decision: "stop",
           reason: "advisor-timeout",
-        })),
-      ]).then(
+        },
+      ).then(
         (advice) => {
           evaluation.result = { advice, finishedAt: clock() };
         },
@@ -864,7 +895,7 @@ export function createBalancedRuntime(options = {}) {
 
       while (!settled) {
         const pollMs = Math.max(10, policy.pollSeconds * 1000);
-        await Promise.race([resultPromise, wait(pollMs)]);
+        await raceWithTimeout(resultPromise, pollMs, undefined);
         if (settled) break;
         const now = clock();
         try {
@@ -896,14 +927,6 @@ export function createBalancedRuntime(options = {}) {
           idleConfirmations += 1;
         } else {
           idleConfirmations = 0;
-        }
-        const currentUsage = controller.usage();
-        const priorTokens = reservation.snapshot.totalTokens;
-        if (
-          budget.maxTotalTokens > 0 &&
-          priorTokens + currentUsage.totalTokens > budget.maxTotalTokens
-        ) {
-          terminationReason = "budget_exhausted";
         }
         if (now >= hardDeadline) terminationReason = "hard_timeout";
         if (
@@ -1108,12 +1131,6 @@ export function createBalancedRuntime(options = {}) {
       finishedAt: new Date(clock()).toISOString(),
     });
     const usage = adapterResult?.usage ?? controller?.usage?.() ?? { totalTokens: 0 };
-    if (
-      budget.maxTotalTokens > 0 &&
-      reservation.snapshot.totalTokens + (usage.totalTokens ?? 0) > budget.maxTotalTokens
-    ) {
-      terminationReason = "budget_exhausted";
-    }
     const budgetState =
       terminationReason === "budget_exhausted" ? "failed" : adapterResult?.exitCode === 0 ? "succeeded" : "failed";
     await settleBudget(runDirectory, reservation, budgetState, usage.totalTokens ?? 0);
@@ -1140,8 +1157,7 @@ export function createBalancedRuntime(options = {}) {
     const evidenceBudget = budgetSnapshot(ledger, budget);
     const revisionBudgetAvailable =
       evidenceBudget.used.downstream < budget.downstreamCalls &&
-      evidenceBudget.used.main < budget.mainReviewCalls - budget.reservedFinalReviewCalls &&
-      (budget.maxTotalTokens === 0 || evidenceBudget.totalTokens < budget.maxTotalTokens);
+      evidenceBudget.used.main < budget.mainReviewCalls - budget.reservedFinalReviewCalls;
     const allowedDecisions =
       roundStatus === "budget_exhausted"
         ? ["stop"]

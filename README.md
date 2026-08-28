@@ -51,7 +51,7 @@ It owns:
 - managed AGENTS.md/CLAUDE.md/config projections;
 - compatibility checks, activation previews, atomic writes, and backups;
 - import, export, health status, and one-click switching.
-- a versioned Balanced timing policy and configurable call/Token budget;
+- a versioned Balanced timing policy with configurable wait/extension overrides and call budgets;
 - an on-demand Balanced Runner with pluggable downstream adapters;
 - hash-bound round evidence, Revision Delta continuation, and budget receipts.
 
@@ -64,7 +64,8 @@ The selected main agent, following the activated instructions, owns:
 
 For Balanced, the Runner owns downstream invocation, execution windows,
 process-group termination, session continuation, scope enforcement, validation
-evidence, and call/Token budget enforcement. The main agent retains semantic
+evidence, and call-budget enforcement. Token usage remains observable but never
+terminates a round. The main agent retains semantic
 acceptance and never gains merge authority from a successful child exit.
 
 ## Example
@@ -114,14 +115,16 @@ Balanced uses the versioned `balanced-default@1.0.0` policy. Its defaults are a
 600-second context window, 600-second active window, 300-second progress and
 growth extensions, and an absolute 1500-second hard cap. Product-content
 changes refresh the active window; assistant text, Token use, and control-file
-activity do not. The UI exposes call and Token budgets but does not allow an
-ad-hoc replacement for the tuned timing policy.
+activity do not. The UI starts from the tuned policy and records explicit,
+bounded wait/extension overrides with the activated profile.
 
-Balanced budget ranges are enforced consistently by the UI, profile resolver,
-Skill store, and Runner: main-review and downstream calls are `1–99`, Advisor
-calls are `0–99`, reserved final reviews are `0–main-review calls`, and the
-Token cap is `0–1,000,000,000`. Zero disables Advisor extension evaluation or,
-for the Token cap, means unlimited.
+Balanced call-budget ranges are enforced consistently by the UI, profile
+resolver, Skill store, and Runner: main-review and downstream calls are `1–99`,
+Advisor calls are `0–99`, and reserved final reviews are
+`0–main-review calls`. Timing overrides cover context wait, first-progress
+wait, active window, first extension, growing extension, and the per-round hard
+cap. Downstream Token usage is recorded as evidence and shown in Usage, but it
+is not an execution budget.
 
 The activated Skill freezes a Task JSON and invokes:
 
@@ -130,7 +133,13 @@ agent-control-plane balanced run \
   --task TASK.json \
   --worktree /absolute/repository/path \
   --adapter claude-code \
-  --policy balanced-default@1.0.0
+  --policy balanced-default@1.0.0 \
+  --context-seconds 600 \
+  --first-progress-seconds 600 \
+  --active-seconds 600 \
+  --extension-seconds 300 \
+  --growing-extension-seconds 300 \
+  --hard-cap-seconds 1500
 ```
 
 Task JSON is deliberately small and shell-free:
@@ -162,8 +171,8 @@ agent-control-plane balanced review --run RUN_DIR --decision revise --revision R
 Revision consumes a main-review call and a new downstream round while
 preserving the protected final-review slot. It reuses the prior downstream
 session when the adapter supports it and refuses a stale worktree or exhausted
-budget. Failed validation or scope cannot be accepted. Token exhaustion permits
-only the reserved final stop decision.
+budget. Failed validation or scope cannot be accepted. Token volume never
+removes an available review decision.
 
 Runtime location and the Claude executable remain external configuration; no
 credentials are copied:

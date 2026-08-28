@@ -2,6 +2,7 @@ import { BUILTIN_MODE_CATALOG } from "./catalog.js";
 import type {
   AgentTarget,
   BalancedBudgetOverride,
+  BalancedTimingOverride,
   EffectiveSkillVariant,
   ModeSkillTemplate,
   Result,
@@ -42,6 +43,7 @@ function renderModeInstructions(
   balanced?: {
     readonly policy: TunedWindowPolicy;
     readonly budget: BalancedBudgetOverride;
+    readonly timing: BalancedTimingOverride;
     readonly builderId: string;
   },
 ): string {
@@ -63,9 +65,9 @@ function renderModeInstructions(
         "",
         `Use the external Balanced Runner with policy ${mode.tunedWindowPolicy.id}@${mode.tunedWindowPolicy.version}; do not simulate its timers or budgets in prose.`,
         `Policy seconds: context=${balanced.policy.contextAcquisitionSeconds}, active=${balanced.policy.activeWindowSeconds}, extension=${balanced.policy.progressExtensionSeconds}, growing-extension=${balanced.policy.growingProgressExtensionSeconds}, hard-cap=${balanced.policy.hardCapSeconds}.`,
-        `Budget: main-review=${balanced.budget.mainReviewCalls}, downstream=${balanced.budget.downstreamCalls}, advisor=${balanced.budget.advisorCalls}, reserved-final-review=${balanced.budget.reservedFinalReviewCalls}, max-total-tokens=${balanced.budget.maxTotalTokens}.`,
+        `Budget: main-review=${balanced.budget.mainReviewCalls}, downstream=${balanced.budget.downstreamCalls}, advisor=${balanced.budget.advisorCalls}, reserved-final-review=${balanced.budget.reservedFinalReviewCalls}.`,
         "Freeze a Task JSON with objective, acceptance, allowedPaths, forbiddenPaths, and validationCommands before the first round.",
-        `Run: agent-control-plane balanced run --task TASK.json --worktree ABSOLUTE_WORKTREE --adapter ${balanced.builderId} --policy ${mode.tunedWindowPolicy.id}@${mode.tunedWindowPolicy.version} --main-review-calls ${balanced.budget.mainReviewCalls} --downstream-calls ${balanced.budget.downstreamCalls} --advisor-calls ${balanced.budget.advisorCalls} --reserved-final-review-calls ${balanced.budget.reservedFinalReviewCalls} --max-total-tokens ${balanced.budget.maxTotalTokens}`,
+        `Run: agent-control-plane balanced run --task TASK.json --worktree ABSOLUTE_WORKTREE --adapter ${balanced.builderId} --policy ${mode.tunedWindowPolicy.id}@${mode.tunedWindowPolicy.version} --context-seconds ${balanced.timing.contextAcquisitionSeconds} --first-progress-seconds ${balanced.timing.firstProgressSeconds} --active-seconds ${balanced.timing.activeWindowSeconds} --extension-seconds ${balanced.timing.progressExtensionSeconds} --growing-extension-seconds ${balanced.timing.growingProgressExtensionSeconds} --hard-cap-seconds ${balanced.timing.hardCapSeconds} --main-review-calls ${balanced.budget.mainReviewCalls} --downstream-calls ${balanced.budget.downstreamCalls} --advisor-calls ${balanced.budget.advisorCalls} --reserved-final-review-calls ${balanced.budget.reservedFinalReviewCalls}`,
         "Read the returned hash-bound balanced-review.json. Decide accept, stop, or revise; a process exit is never acceptance.",
         "Record accept/stop with `agent-control-plane balanced review --run RUN_DIR --decision DECISION`.",
         "For revise, freeze a bounded Revision Delta and run `agent-control-plane balanced review --run RUN_DIR --decision revise --revision REVISION.json`.",
@@ -108,6 +110,7 @@ export function resolveEffectiveSkill(
     | {
         policy: TunedWindowPolicy;
         budget: BalancedBudgetOverride;
+        timing: BalancedTimingOverride;
         builderId: string;
       }
     | undefined;
@@ -125,14 +128,22 @@ export function resolveEffectiveSkill(
     if (!policy || !defaultBudget || builder?.target.kind !== "agent") {
       throw new Error("Validated Balanced input lost its runtime policy or builder.");
     }
+    const timing = input.profile.balancedTiming ?? {
+      contextAcquisitionSeconds: policy.contextAcquisitionSeconds,
+      firstProgressSeconds: policy.firstProgressSeconds,
+      activeWindowSeconds: policy.activeWindowSeconds,
+      progressExtensionSeconds: policy.progressExtensionSeconds,
+      growingProgressExtensionSeconds: policy.growingProgressExtensionSeconds,
+      hardCapSeconds: policy.hardCapSeconds,
+    };
     balancedRuntime = {
-      policy,
+      policy: { ...policy, ...timing },
+      timing,
       budget: input.profile.balancedBudget ?? {
         mainReviewCalls: defaultBudget.mainReviewCalls,
         downstreamCalls: defaultBudget.downstreamCalls,
         advisorCalls: defaultBudget.advisorCalls,
         reservedFinalReviewCalls: defaultBudget.reservedFinalReviewCalls,
-        maxTotalTokens: defaultBudget.maxTotalTokens,
       },
       builderId: builder.target.agentId,
     };
@@ -182,6 +193,7 @@ export function resolveEffectiveSkill(
       contentFingerprint: fingerprint(content),
       estimatedTokens: Math.ceil(content.length / 4),
       ...(balancedRuntime ? { balancedBudget: balancedRuntime.budget } : {}),
+      ...(balancedRuntime ? { balancedTiming: balancedRuntime.timing } : {}),
     },
   };
 }

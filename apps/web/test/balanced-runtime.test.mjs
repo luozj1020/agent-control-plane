@@ -50,7 +50,6 @@ function testCatalog(budget = {}) {
     downstreamCalls: 2,
     advisorCalls: 2,
     reservedFinalReviewCalls: 1,
-    maxTotalTokens: 1000,
     ...budget,
   };
   return {
@@ -147,6 +146,64 @@ test("runtime rejects budget overrides above the shared product limits", async (
         error instanceof BalancedRuntimeError &&
         error.code === "runtime.invalid_budget" &&
         error.message.includes("1 to 99"),
+    );
+  });
+});
+
+test("runtime applies bounded timing overrides to the effective round policy", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const adapter = editingAdapter();
+    const runtime = createBalancedRuntime({
+      runtimeRoot,
+      adapters: adapterRegistry(adapter),
+    });
+    const timing = {
+      contextAcquisitionSeconds: 45,
+      firstProgressSeconds: 40,
+      activeWindowSeconds: 50,
+      progressExtensionSeconds: 20,
+      growingProgressExtensionSeconds: 25,
+      hardCapSeconds: 90,
+    };
+    const result = await runtime.run({
+      task: task(),
+      worktree,
+      adapterId: adapter.id,
+      policyRef: "balanced-default@1.0.0",
+      timing,
+    });
+
+    assert.equal(result.review.roundStatus, "review_pending");
+    for (const [key, value] of Object.entries(timing)) {
+      assert.equal(result.review.timeWindowPlan[key], value);
+    }
+  });
+});
+
+test("runtime rejects a hard cap shorter than a configured wait window", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const adapter = editingAdapter();
+    const runtime = createBalancedRuntime({
+      runtimeRoot,
+      adapters: adapterRegistry(adapter),
+    });
+    await assert.rejects(
+      runtime.run({
+        task: task(),
+        worktree,
+        adapterId: adapter.id,
+        policyRef: "balanced-default@1.0.0",
+        timing: {
+          contextAcquisitionSeconds: 120,
+          firstProgressSeconds: 60,
+          activeWindowSeconds: 60,
+          progressExtensionSeconds: 30,
+          growingProgressExtensionSeconds: 30,
+          hardCapSeconds: 90,
+        },
+      }),
+      (error) =>
+        error instanceof BalancedRuntimeError && error.code === "runtime.invalid_timing",
     );
   });
 });
@@ -366,12 +423,12 @@ test("zero advisor budget disables extensions without misclassifying the round b
   });
 });
 
-test("Token exhaustion blocks acceptance and further revision rounds", async () => {
+test("downstream Token usage is observed but never used as a termination budget", async () => {
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
     const adapter = editingAdapter();
     const runtime = createBalancedRuntime({
       runtimeRoot,
-      catalog: testCatalog({ maxTotalTokens: 10 }),
+      catalog: testCatalog(),
       adapters: adapterRegistry(adapter),
     });
     const result = await runtime.run({
@@ -380,14 +437,10 @@ test("Token exhaustion blocks acceptance and further revision rounds", async () 
       adapterId: adapter.id,
       policyRef: "balanced-test@1.0.0",
     });
-    assert.equal(result.review.roundStatus, "budget_exhausted");
-    assert.deepEqual(result.review.allowedDecisions, ["stop"]);
-    await assert.rejects(
-      runtime.review({ runDirectory: result.runDirectory, decision: "accept" }),
-      (error) => error instanceof BalancedRuntimeError && error.code === "review.decision_blocked",
-    );
-    const stopped = await runtime.review({ runDirectory: result.runDirectory, decision: "stop" });
-    assert.equal(stopped.state, "stopped");
+    assert.equal(result.review.roundStatus, "review_pending");
+    assert.equal(result.review.evidence.usage.totalTokens, 15);
+    assert.equal("maxTotalTokens" in result.review.evidence.budget.limits, false);
+    assert.equal("tokens" in result.review.evidence.budget.remaining, false);
   });
 });
 

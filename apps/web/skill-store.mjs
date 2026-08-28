@@ -12,7 +12,10 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, join, parse, resolve } from "node:path";
 
-import { BALANCED_BUDGET_LIMITS } from "../../packages/contracts/dist/index.js";
+import {
+  BALANCED_BUDGET_LIMITS,
+  BALANCED_TIMING_LIMITS,
+} from "../../packages/contracts/dist/index.js";
 import { diffSkillContent } from "./skill-diff.mjs";
 
 const OWNER = "agent-workflow-switch";
@@ -65,6 +68,26 @@ function validBalancedBudget(value) {
   );
 }
 
+function validBalancedTiming(value) {
+  if (value === undefined || value === null) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (
+    !Object.entries(BALANCED_TIMING_LIMITS).every(
+      ([key, range]) =>
+        Number.isSafeInteger(value[key]) && value[key] >= range.min && value[key] <= range.max,
+    )
+  ) {
+    return false;
+  }
+  return value.hardCapSeconds >= Math.max(
+    value.contextAcquisitionSeconds,
+    value.firstProgressSeconds,
+    value.activeWindowSeconds,
+    value.progressExtensionSeconds,
+    value.growingProgressExtensionSeconds,
+  );
+}
+
 function assertVariant(variant) {
   if (
     !variant ||
@@ -74,6 +97,7 @@ function assertVariant(variant) {
     variant.content.length > 128 * 1024 ||
     typeof variant.contentFingerprint !== "string" ||
     !validBalancedBudget(variant.balancedBudget) ||
+    !validBalancedTiming(variant.balancedTiming) ||
     !Array.isArray(variant.includedModeIds) ||
     variant.includedModeIds.length !== 1
   ) {
@@ -119,6 +143,7 @@ function manifestFor(variant, now, restoredFrom) {
     targetAdapterId: variant.targetAdapterId,
     includedAgentIds: variant.includedAgentIds,
     balancedBudget: variant.balancedBudget ?? null,
+    balancedTiming: variant.balancedTiming ?? null,
     contentFingerprint: variant.contentFingerprint,
     contentSha256: sha256(variant.content),
     activatedAt: now,
@@ -383,6 +408,7 @@ export function createSkillStore(options = {}) {
         ? variant.includedAgentIds
         : [],
       balancedBudget: variant.balancedBudget ?? null,
+      balancedTiming: variant.balancedTiming ?? null,
       contentFingerprint: variant.contentFingerprint,
       contentSha256: sha256(variant.content),
       previous: details.previous
@@ -577,6 +603,7 @@ export function createSkillStore(options = {}) {
           targetAdapterId: manifest.targetAdapterId ?? null,
           includedAgentIds: manifest.includedAgentIds ?? [],
           balancedBudget: manifest.balancedBudget ?? null,
+          balancedTiming: manifest.balancedTiming ?? null,
           contentFingerprint: manifest.contentFingerprint,
           activatedAt: manifest.activatedAt,
         }
@@ -631,6 +658,11 @@ export function createSkillStore(options = {}) {
         JSON.stringify(active?.balancedBudget ?? null),
         JSON.stringify(snapshot.metadata.balancedBudget ?? null),
       ],
+      [
+        "balancedTiming",
+        JSON.stringify(active?.balancedTiming ?? null),
+        JSON.stringify(snapshot.metadata.balancedTiming ?? null),
+      ],
     ];
     return {
       entry: publicHistoryEntry(snapshot.metadata, active, state?.historyId),
@@ -671,6 +703,7 @@ export function createSkillStore(options = {}) {
               targetAdapterId: manifest.targetAdapterId ?? null,
               includedAgentIds: manifest.includedAgentIds ?? [],
               balancedBudget: manifest.balancedBudget ?? null,
+              balancedTiming: manifest.balancedTiming ?? null,
             }
           : null,
         backups: await listBackups(),
@@ -771,6 +804,7 @@ export function createSkillStore(options = {}) {
         targetAdapterId: backupManifest.targetAdapterId,
         includedAgentIds: backupManifest.includedAgentIds ?? [],
         balancedBudget: backupManifest.balancedBudget ?? undefined,
+        balancedTiming: backupManifest.balancedTiming ?? undefined,
         contentFingerprint: backupManifest.contentFingerprint,
         includedModeIds: [backupManifest.mode.id],
         content,
@@ -839,6 +873,7 @@ export function createSkillStore(options = {}) {
         targetAdapterId: snapshot.metadata.targetAdapterId ?? undefined,
         includedAgentIds: snapshot.metadata.includedAgentIds,
         balancedBudget: snapshot.metadata.balancedBudget ?? undefined,
+        balancedTiming: snapshot.metadata.balancedTiming ?? undefined,
         contentFingerprint: snapshot.metadata.contentFingerprint,
         includedModeIds: [snapshot.metadata.mode.id],
         content: snapshot.content,

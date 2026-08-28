@@ -30,7 +30,7 @@ function testStore(skillsDir) {
   });
 }
 
-function resolveMode(modeId, balancedBudget) {
+function resolveMode(modeId, balancedBudget, balancedTiming) {
   const mode = BUILTIN_MODE_CATALOG.modes.find((entry) => entry.id === modeId);
   assert(mode);
   const interactive = modeId === "interactive";
@@ -42,6 +42,7 @@ function resolveMode(modeId, balancedBudget) {
       ? [{ role: "subagent", target: { kind: "main-native" } }]
       : CODEX_OVERNIGHT_CLAUDE_PROFILE.roleBindings,
     ...(balancedBudget ? { balancedBudget } : {}),
+    ...(balancedTiming ? { balancedTiming } : {}),
   };
   const result = resolveEffectiveSkill({
     profile,
@@ -67,16 +68,16 @@ test("preview-only store rejects writes", async () => {
   );
 });
 
-test("store rejects a resolved variant with an out-of-range Balanced budget", async () => {
+test("store rejects a resolved variant with out-of-range Balanced timing", async () => {
   await withTempDirectory(async (skillsDir) => {
     const store = testStore(skillsDir);
     const balanced = resolveMode("balanced");
     await assert.rejects(
       store.activate({
         ...balanced,
-        balancedBudget: {
-          ...balanced.balancedBudget,
-          maxTotalTokens: 1_000_000_001,
+        balancedTiming: {
+          ...balanced.balancedTiming,
+          activeWindowSeconds: 3_601,
         },
       }),
       (error) => error instanceof SkillStoreError && error.code === "variant.invalid",
@@ -144,7 +145,7 @@ test("switching creates a recoverable backup and rollback preserves both version
   });
 });
 
-test("Balanced budget survives status, backup, and rollback", async () => {
+test("Balanced budget and timing survive status, backup, and rollback", async () => {
   await withTempDirectory(async (skillsDir) => {
     const store = testStore(skillsDir);
     const budget = {
@@ -152,11 +153,19 @@ test("Balanced budget survives status, backup, and rollback", async () => {
       downstreamCalls: 5,
       advisorCalls: 2,
       reservedFinalReviewCalls: 1,
-      maxTotalTokens: 9000000,
     };
-    const balanced = resolveMode("balanced", budget);
+    const timing = {
+      contextAcquisitionSeconds: 480,
+      firstProgressSeconds: 420,
+      activeWindowSeconds: 540,
+      progressExtensionSeconds: 240,
+      growingProgressExtensionSeconds: 300,
+      hardCapSeconds: 1800,
+    };
+    const balanced = resolveMode("balanced", budget, timing);
     const activated = await store.activate(balanced);
     assert.deepEqual(activated.status.active.balancedBudget, budget);
+    assert.deepEqual(activated.status.active.balancedTiming, timing);
 
     const switched = await store.activate(resolveMode("overnight"));
     const balancedBackup = switched.status.backups.find(
@@ -165,6 +174,7 @@ test("Balanced budget survives status, backup, and rollback", async () => {
     assert(balancedBackup);
     const restored = await store.rollback(balancedBackup.backupId);
     assert.deepEqual(restored.status.active.balancedBudget, budget);
+    assert.deepEqual(restored.status.active.balancedTiming, timing);
   });
 });
 

@@ -76,7 +76,11 @@ function usage() {
     "",
     "Budget options:",
     "  --main-review-calls N --downstream-calls N --advisor-calls N",
-    "  --reserved-final-review-calls N --max-total-tokens N",
+    "  --reserved-final-review-calls N",
+    "",
+    "Timing overrides (seconds):",
+    "  --context-seconds N --first-progress-seconds N --active-seconds N",
+    "  --extension-seconds N --growing-extension-seconds N --hard-cap-seconds N",
   ].join("\n");
 }
 
@@ -106,6 +110,13 @@ async function main(argv) {
       "downstream-calls",
       "advisor-calls",
       "reserved-final-review-calls",
+      "context-seconds",
+      "first-progress-seconds",
+      "active-seconds",
+      "extension-seconds",
+      "growing-extension-seconds",
+      "hard-cap-seconds",
+      // Accepted but ignored so previously activated Skills do not regain a Token cap.
       "max-total-tokens",
     ]));
     if (!options.worktree || !options.adapter) {
@@ -113,6 +124,9 @@ async function main(argv) {
         "cli.missing_argument",
         "--worktree and --adapter are required.",
       );
+    }
+    if (options["max-total-tokens"] !== undefined) {
+      integerOption(options, "max-total-tokens");
     }
     result = await runtime.run({
       task: await readTask(options.task, "Task"),
@@ -124,7 +138,14 @@ async function main(argv) {
         downstreamCalls: integerOption(options, "downstream-calls"),
         advisorCalls: integerOption(options, "advisor-calls"),
         reservedFinalReviewCalls: integerOption(options, "reserved-final-review-calls"),
-        maxTotalTokens: integerOption(options, "max-total-tokens"),
+      },
+      timing: {
+        contextAcquisitionSeconds: integerOption(options, "context-seconds"),
+        firstProgressSeconds: integerOption(options, "first-progress-seconds"),
+        activeWindowSeconds: integerOption(options, "active-seconds"),
+        progressExtensionSeconds: integerOption(options, "extension-seconds"),
+        growingProgressExtensionSeconds: integerOption(options, "growing-extension-seconds"),
+        hardCapSeconds: integerOption(options, "hard-cap-seconds"),
       },
     });
     result = {

@@ -1,5 +1,6 @@
 import {
   BALANCED_BUDGET_LIMITS,
+  BALANCED_TIMING_LIMITS,
   BUILTIN_MODE_CATALOG,
   CODEX_OVERNIGHT_CLAUDE_PROFILE,
   EXAMPLE_AGENTS,
@@ -35,13 +36,14 @@ const elements = {
   balancedContextWindow: document.querySelector("#balanced-context-window"),
   balancedDownstreamCalls: document.querySelector("#balanced-downstream-calls"),
   balancedExtensionWindow: document.querySelector("#balanced-extension-window"),
+  balancedFirstProgressWindow: document.querySelector("#balanced-first-progress-window"),
+  balancedGrowingExtensionWindow: document.querySelector("#balanced-growing-extension-window"),
   balancedHardCap: document.querySelector("#balanced-hard-cap"),
   balancedMainCalls: document.querySelector("#balanced-main-calls"),
   balancedPolicyVersion: document.querySelector("#balanced-policy-version"),
   balancedReservedCalls: document.querySelector("#balanced-reserved-calls"),
   balancedRunList: document.querySelector("#balanced-run-list"),
   balancedRuntimeSummary: document.querySelector("#balanced-runtime-summary"),
-  balancedTokenBudget: document.querySelector("#balanced-token-budget"),
   builderAgent: document.querySelector("#builder-agent"),
   builderField: document.querySelector("#builder-field"),
   builderHelp: document.querySelector("#builder-help"),
@@ -848,7 +850,17 @@ function balancedBudgetFromControls() {
     downstreamCalls: Number(elements.balancedDownstreamCalls.value),
     advisorCalls: Number(elements.balancedAdvisorCalls.value),
     reservedFinalReviewCalls: Number(elements.balancedReservedCalls.value),
-    maxTotalTokens: Number(elements.balancedTokenBudget.value),
+  };
+}
+
+function balancedTimingFromControls() {
+  return {
+    contextAcquisitionSeconds: Number(elements.balancedContextWindow.value),
+    firstProgressSeconds: Number(elements.balancedFirstProgressWindow.value),
+    activeWindowSeconds: Number(elements.balancedActiveWindow.value),
+    progressExtensionSeconds: Number(elements.balancedExtensionWindow.value),
+    growingProgressExtensionSeconds: Number(elements.balancedGrowingExtensionWindow.value),
+    hardCapSeconds: Number(elements.balancedHardCap.value),
   };
 }
 
@@ -858,7 +870,6 @@ function synchronizeBalancedBudgetConstraints({ clampReserved = false } = {}) {
     downstreamCalls: elements.balancedDownstreamCalls,
     advisorCalls: elements.balancedAdvisorCalls,
     reservedFinalReviewCalls: elements.balancedReservedCalls,
-    maxTotalTokens: elements.balancedTokenBudget,
   };
   for (const [key, input] of Object.entries(controls)) {
     const range = BALANCED_BUDGET_LIMITS[key];
@@ -880,19 +891,52 @@ function synchronizeBalancedBudgetConstraints({ clampReserved = false } = {}) {
   }
 }
 
+function synchronizeBalancedTimingConstraints({ clampHardCap = false } = {}) {
+  const controls = {
+    contextAcquisitionSeconds: elements.balancedContextWindow,
+    firstProgressSeconds: elements.balancedFirstProgressWindow,
+    activeWindowSeconds: elements.balancedActiveWindow,
+    progressExtensionSeconds: elements.balancedExtensionWindow,
+    growingProgressExtensionSeconds: elements.balancedGrowingExtensionWindow,
+    hardCapSeconds: elements.balancedHardCap,
+  };
+  for (const [key, input] of Object.entries(controls)) {
+    const range = BALANCED_TIMING_LIMITS[key];
+    input.min = String(range.min);
+    input.max = String(range.max);
+  }
+  const windowValues = Object.entries(controls)
+    .filter(([key]) => key !== "hardCapSeconds")
+    .map(([, input]) => Number(input.value));
+  if (windowValues.every(Number.isInteger)) {
+    const requiredHardCap = Math.max(
+      BALANCED_TIMING_LIMITS.hardCapSeconds.min,
+      ...windowValues,
+    );
+    elements.balancedHardCap.min = String(requiredHardCap);
+    if (clampHardCap && Number(elements.balancedHardCap.value) < requiredHardCap) {
+      elements.balancedHardCap.value = String(requiredHardCap);
+    }
+  }
+}
+
 function initializeBalancedControls() {
   if (!BALANCED_MODE || !BALANCED_POLICY || !BALANCED_BUDGET) return;
   elements.balancedPolicyVersion.textContent = `${BALANCED_POLICY.id}@${BALANCED_POLICY.version}`;
-  elements.balancedContextWindow.textContent = `${BALANCED_POLICY.contextAcquisitionSeconds}s`;
-  elements.balancedActiveWindow.textContent = `${BALANCED_POLICY.activeWindowSeconds}s`;
-  elements.balancedExtensionWindow.textContent = `${BALANCED_POLICY.progressExtensionSeconds}s`;
-  elements.balancedHardCap.textContent = `${BALANCED_POLICY.hardCapSeconds}s`;
+  elements.balancedContextWindow.value = String(BALANCED_POLICY.contextAcquisitionSeconds);
+  elements.balancedFirstProgressWindow.value = String(BALANCED_POLICY.firstProgressSeconds);
+  elements.balancedActiveWindow.value = String(BALANCED_POLICY.activeWindowSeconds);
+  elements.balancedExtensionWindow.value = String(BALANCED_POLICY.progressExtensionSeconds);
+  elements.balancedGrowingExtensionWindow.value = String(
+    BALANCED_POLICY.growingProgressExtensionSeconds,
+  );
+  elements.balancedHardCap.value = String(BALANCED_POLICY.hardCapSeconds);
   elements.balancedMainCalls.value = String(BALANCED_BUDGET.mainReviewCalls);
   elements.balancedDownstreamCalls.value = String(BALANCED_BUDGET.downstreamCalls);
   elements.balancedAdvisorCalls.value = String(BALANCED_BUDGET.advisorCalls);
   elements.balancedReservedCalls.value = String(BALANCED_BUDGET.reservedFinalReviewCalls);
-  elements.balancedTokenBudget.value = String(BALANCED_BUDGET.maxTotalTokens);
   synchronizeBalancedBudgetConstraints();
+  synchronizeBalancedTimingConstraints();
 }
 
 function applyBalancedBudgetToControls(budget) {
@@ -902,7 +946,6 @@ function applyBalancedBudgetToControls(budget) {
     ["downstreamCalls", elements.balancedDownstreamCalls],
     ["advisorCalls", elements.balancedAdvisorCalls],
     ["reservedFinalReviewCalls", elements.balancedReservedCalls],
-    ["maxTotalTokens", elements.balancedTokenBudget],
   ];
   for (const [key, input] of fields) {
     const range = BALANCED_BUDGET_LIMITS[key];
@@ -915,6 +958,29 @@ function applyBalancedBudgetToControls(budget) {
     }
   }
   synchronizeBalancedBudgetConstraints({ clampReserved: true });
+}
+
+function applyBalancedTimingToControls(timing) {
+  if (!timing || typeof timing !== "object") return;
+  const fields = [
+    ["contextAcquisitionSeconds", elements.balancedContextWindow],
+    ["firstProgressSeconds", elements.balancedFirstProgressWindow],
+    ["activeWindowSeconds", elements.balancedActiveWindow],
+    ["progressExtensionSeconds", elements.balancedExtensionWindow],
+    ["growingProgressExtensionSeconds", elements.balancedGrowingExtensionWindow],
+    ["hardCapSeconds", elements.balancedHardCap],
+  ];
+  for (const [key, input] of fields) {
+    const range = BALANCED_TIMING_LIMITS[key];
+    if (
+      Number.isInteger(timing[key]) &&
+      timing[key] >= range.min &&
+      timing[key] <= range.max
+    ) {
+      input.value = String(timing[key]);
+    }
+  }
+  synchronizeBalancedTimingConstraints({ clampHardCap: true });
 }
 
 function renderBalancedRuns() {
@@ -1041,7 +1107,10 @@ function createProfile(modeId = selectedModeId) {
           { role: "reviewer", target: { kind: "main" } },
         ],
   };
-  if (mode.kind === "balanced") profile.balancedBudget = balancedBudgetFromControls();
+  if (mode.kind === "balanced") {
+    profile.balancedBudget = balancedBudgetFromControls();
+    profile.balancedTiming = balancedTimingFromControls();
+  }
   return profile;
 }
 
@@ -1346,13 +1415,25 @@ for (const input of [
   elements.balancedDownstreamCalls,
   elements.balancedAdvisorCalls,
   elements.balancedReservedCalls,
-  elements.balancedTokenBudget,
 ]) {
   input.addEventListener("input", () => {
     synchronizeBalancedBudgetConstraints({
       clampReserved:
         input === elements.balancedMainCalls || input === elements.balancedReservedCalls,
     });
+    refresh();
+  });
+}
+for (const input of [
+  elements.balancedContextWindow,
+  elements.balancedFirstProgressWindow,
+  elements.balancedActiveWindow,
+  elements.balancedExtensionWindow,
+  elements.balancedGrowingExtensionWindow,
+  elements.balancedHardCap,
+]) {
+  input.addEventListener("input", () => {
+    synchronizeBalancedTimingConstraints({ clampHardCap: input !== elements.balancedHardCap });
     refresh();
   });
 }
@@ -1378,6 +1459,7 @@ function synchronizeControlsWithActiveSkill() {
       selectedModeId = previewModeId;
     }
     applyBalancedBudgetToControls(preview?.balancedBudget);
+    applyBalancedTimingToControls(preview?.balancedTiming);
     return;
   }
   if (BUILTIN_MODE_CATALOG.modes.some((mode) => mode.id === active.mode?.id)) {
@@ -1396,6 +1478,7 @@ function synchronizeControlsWithActiveSkill() {
   );
   if (builderId) elements.builderAgent.value = builderId;
   applyBalancedBudgetToControls(active.balancedBudget);
+  applyBalancedTimingToControls(active.balancedTiming);
 }
 
 function savePreviewSelection(modeId) {
@@ -1413,6 +1496,7 @@ function savePreviewSelection(modeId) {
       relativeSkillPath: resolution.value.relativeSkillPath,
       contentFingerprint: resolution.value.contentFingerprint,
       balancedBudget: resolution.value.balancedBudget ?? null,
+      balancedTiming: resolution.value.balancedTiming ?? null,
     }),
   );
 }

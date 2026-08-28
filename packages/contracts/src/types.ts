@@ -48,6 +48,7 @@ export interface WorkflowProfile {
   readonly targetAdapterId: string;
   readonly roleBindings: readonly RoleBinding[];
   readonly balancedBudget?: BalancedBudgetOverride;
+  readonly balancedTiming?: BalancedTimingOverride;
 }
 
 export interface TunedWindowPolicy {
@@ -78,7 +79,6 @@ export interface BalancedBudgetPolicy {
   readonly downstreamCalls: number;
   readonly advisorCalls: number;
   readonly reservedFinalReviewCalls: number;
-  readonly maxTotalTokens: number;
 }
 
 export interface BalancedBudgetOverride {
@@ -86,7 +86,15 @@ export interface BalancedBudgetOverride {
   readonly downstreamCalls: number;
   readonly advisorCalls: number;
   readonly reservedFinalReviewCalls: number;
-  readonly maxTotalTokens: number;
+}
+
+export interface BalancedTimingOverride {
+  readonly contextAcquisitionSeconds: number;
+  readonly firstProgressSeconds: number;
+  readonly activeWindowSeconds: number;
+  readonly progressExtensionSeconds: number;
+  readonly growingProgressExtensionSeconds: number;
+  readonly hardCapSeconds: number;
 }
 
 interface ModeSkillTemplateBase {
@@ -155,6 +163,7 @@ export interface EffectiveSkillVariant {
   readonly contentFingerprint: string;
   readonly estimatedTokens: number;
   readonly balancedBudget?: BalancedBudgetOverride;
+  readonly balancedTiming?: BalancedTimingOverride;
 }
 
 export interface ManagedSkillState {
