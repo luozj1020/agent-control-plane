@@ -92,7 +92,8 @@ npm run dev
 
 Open `http://127.0.0.1:4173`. The current UI resolves modes and agent bindings
 through the real contracts package, previews the minimal generated `SKILL.md`,
-and exports it. Filesystem activation is disabled by default.
+compares the generated token footprint of all three mode Skills, and exports the
+selected one. Filesystem activation is disabled by default.
 
 To enable atomic activation, explicitly provide the absolute Codex Skill
 directory you want this application to manage:

@@ -156,7 +156,7 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 42px); line-height: 1.08; letter-spa
 .configuration-column { display: grid; gap: 16px; align-content: start; }
 .preview-column { display: grid; gap: 16px; align-content: start; position: sticky; top: 20px; }
 
-.panel, .preview-panel, .plan-panel {
+.panel, .preview-panel, .plan-panel, .token-panel {
   border: 1px solid var(--line-soft);
   border-radius: var(--radius);
   background: linear-gradient(145deg, rgba(24, 28, 34, 0.88), rgba(16, 19, 23, 0.96));
@@ -243,6 +243,29 @@ pre {
 .plan-panel ol { display: grid; gap: 8px; margin: 14px 0 0; padding: 0; list-style: none; }
 .plan-panel li { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: #111419; color: #b4bdc8; font-size: 9px; }
 .operation-index { display: grid; min-width: 18px; height: 18px; place-items: center; border-radius: 5px; background: #20252c; color: var(--accent); font: 700 8px ui-monospace, monospace; }
+
+.token-panel { padding: 18px; }
+.token-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.token-heading h3 { margin: 3px 0 0; font-size: 14px; }
+.token-kicker { margin: 0; color: var(--muted); font-size: 8px; font-weight: 800; letter-spacing: 0.14em; }
+.usage-summary { display: flex; align-items: center; gap: 9px; }
+.usage-summary strong { color: var(--accent); font: 700 10px ui-monospace, monospace; }
+.usage-chip { padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: #111419; color: var(--muted); font-size: 8px; }
+.token-chart { min-height: 214px; margin-top: 14px; }
+.token-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.usage-grid-line { stroke: #292e36; stroke-width: 1; shape-rendering: crispEdges; }
+.usage-axis-label, .usage-mode-label, .usage-value { fill: var(--muted); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.usage-axis-label { font-size: 8px; }
+.usage-mode-label { font-size: 9px; font-weight: 650; }
+.usage-mode-label.selected { fill: var(--text); }
+.usage-value { fill: #aeb7c2; font-size: 8px; font-weight: 700; }
+.usage-bar { fill: #4f5763; }
+.usage-bar.selected { fill: var(--accent); filter: drop-shadow(0 0 7px rgba(216, 255, 79, 0.22)); }
+.token-legend { display: flex; gap: 16px; margin-top: 5px; color: var(--muted); font-size: 8px; }
+.token-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend-swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; background: #4f5763; }
+.legend-swatch.current { background: var(--accent); }
+.token-footnote { margin: 15px 0 0; color: var(--muted); font-size: 8px; line-height: 1.5; }
 
 .toast { position: fixed; right: 24px; bottom: 24px; z-index: 10; padding: 11px 15px; border: 1px solid #38404b; border-radius: 10px; background: #181c22; box-shadow: 0 15px 40px rgba(0,0,0,.35); font-size: 11px; opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 160ms ease, transform 160ms ease; }
 .toast.visible { opacity: 1; transform: translateY(0); }

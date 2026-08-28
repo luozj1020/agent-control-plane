@@ -33,7 +33,9 @@ test("serves the application and health endpoint", async () => {
 
     const page = await fetch(baseUrl);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /Agent Workflow Switch/);
+    const html = await page.text();
+    assert.match(html, /Agent Workflow Switch/);
+    assert.match(html, /Token 使用量/);
   });
 });
 

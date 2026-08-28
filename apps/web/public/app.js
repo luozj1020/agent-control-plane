@@ -35,6 +35,8 @@ const elements = {
   storeStatusTitle: document.querySelector("#store-status-title"),
   toast: document.querySelector("#toast"),
   tokenEstimate: document.querySelector("#token-estimate"),
+  tokenChart: document.querySelector("#token-chart"),
+  tokenChartSummary: document.querySelector("#token-chart-summary"),
   variantName: document.querySelector("#variant-name"),
 };
 
@@ -121,8 +123,8 @@ function getInstalledState() {
   return [];
 }
 
-function createProfile() {
-  const mode = BUILTIN_MODE_CATALOG.modes.find((entry) => entry.id === selectedModeId);
+function createProfile(modeId = selectedModeId) {
+  const mode = BUILTIN_MODE_CATALOG.modes.find((entry) => entry.id === modeId);
   if (!mode) throw new Error("Selected mode disappeared from the catalog.");
   const interactive = mode.kind === "interactive";
   return {
@@ -138,6 +140,113 @@ function createProfile() {
           { role: "reviewer", target: { kind: "main" } },
         ],
   };
+}
+
+function renderTokenChart() {
+  const estimates = BUILTIN_MODE_CATALOG.modes.map((mode) => {
+    const result = resolveEffectiveSkill({
+      profile: createProfile(mode.id),
+      agents: EXAMPLE_AGENTS,
+      catalog: BUILTIN_MODE_CATALOG,
+    });
+    return {
+      id: mode.id,
+      label: mode.displayName,
+      tokens: result.ok ? result.value.estimatedTokens : null,
+    };
+  });
+  const available = estimates.flatMap((entry) =>
+    entry.tokens === null ? [] : [entry.tokens],
+  );
+  const rawMaximum = Math.max(1, ...available);
+  const maximum = Math.ceil(rawMaximum / 25) * 25;
+  const selected = estimates.find((entry) => entry.id === selectedModeId);
+
+  elements.tokenChart.replaceChildren();
+  const namespace = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(namespace, "svg");
+  const width = 480;
+  const height = 214;
+  const margin = { top: 22, right: 12, bottom: 38, left: 42 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute(
+    "aria-label",
+    estimates
+      .map((entry) => `${entry.label} ${entry.tokens ?? "不可用"} tokens`)
+      .join("，"),
+  );
+
+  for (let tick = 0; tick <= 4; tick += 1) {
+    const ratio = tick / 4;
+    const y = margin.top + plotHeight - ratio * plotHeight;
+    const line = document.createElementNS(namespace, "line");
+    line.setAttribute("class", "usage-grid-line");
+    line.setAttribute("x1", String(margin.left));
+    line.setAttribute("x2", String(width - margin.right));
+    line.setAttribute("y1", String(y));
+    line.setAttribute("y2", String(y));
+    svg.append(line);
+
+    const label = document.createElementNS(namespace, "text");
+    label.setAttribute("class", "usage-axis-label");
+    label.setAttribute("x", String(margin.left - 9));
+    label.setAttribute("y", String(y + 3));
+    label.setAttribute("text-anchor", "end");
+    label.textContent = String(Math.round(maximum * ratio));
+    svg.append(label);
+  }
+
+  const groupWidth = plotWidth / estimates.length;
+  const barWidth = Math.min(58, groupWidth * 0.44);
+  estimates.forEach((estimate, index) => {
+    const tokens = estimate.tokens ?? 0;
+    const barHeight = (tokens / maximum) * plotHeight;
+    const x = margin.left + index * groupWidth + (groupWidth - barWidth) / 2;
+    const y = margin.top + plotHeight - barHeight;
+    const bar = document.createElementNS(namespace, "rect");
+    bar.setAttribute(
+      "class",
+      `usage-bar${estimate.id === selectedModeId ? " selected" : ""}`,
+    );
+    bar.setAttribute("x", String(x));
+    bar.setAttribute("y", String(y));
+    bar.setAttribute("width", String(barWidth));
+    bar.setAttribute("height", String(Math.max(0, barHeight)));
+    bar.setAttribute("rx", "5");
+    const title = document.createElementNS(namespace, "title");
+    title.textContent = `${estimate.label}: ${estimate.tokens ?? "不可用"} tokens`;
+    bar.append(title);
+    svg.append(bar);
+
+    const value = document.createElementNS(namespace, "text");
+    value.setAttribute("class", "usage-value");
+    value.setAttribute("x", String(x + barWidth / 2));
+    value.setAttribute("y", String(Math.max(12, y - 7)));
+    value.setAttribute("text-anchor", "middle");
+    value.textContent = estimate.tokens === null ? "—" : String(estimate.tokens);
+    svg.append(value);
+
+    const modeLabel = document.createElementNS(namespace, "text");
+    modeLabel.setAttribute(
+      "class",
+      `usage-mode-label${estimate.id === selectedModeId ? " selected" : ""}`,
+    );
+    modeLabel.setAttribute("x", String(x + barWidth / 2));
+    modeLabel.setAttribute("y", String(height - 13));
+    modeLabel.setAttribute("text-anchor", "middle");
+    modeLabel.textContent = estimate.label;
+    svg.append(modeLabel);
+  });
+
+  elements.tokenChart.append(svg);
+
+  elements.tokenChartSummary.textContent =
+    selected?.tokens === null || selected === undefined
+      ? "当前不可用"
+      : `当前 ≈ ${selected.tokens} tokens`;
 }
 
 function operationText(operation) {
@@ -246,6 +355,7 @@ function refresh() {
     catalog: BUILTIN_MODE_CATALOG,
   });
   if (!result.ok) {
+    renderTokenChart();
     renderFailure(result.issues);
     return;
   }
@@ -297,6 +407,7 @@ function refresh() {
       : "保存只影响浏览器中的预览状态。";
   }
   renderStoreStatus();
+  renderTokenChart();
 }
 
 function showToast(message) {
