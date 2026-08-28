@@ -45,6 +45,9 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /id="runtime-downstream-tokens"/);
     assert.match(html, /id="token-dimension"/);
     assert.match(html, /按上下游/);
+    assert.match(html, /id="runtime-lane-filter"/);
+    assert.match(html, /id="runtime-model-filter"/);
+    assert.match(html, /按模型计算消耗/);
     assert.match(html, /USAGE · ESTIMATED CONTEXT/);
     assert.match(html, /ACTIVATION AUDIT LOG/);
     assert.match(html, /激活记录/);
@@ -81,8 +84,8 @@ test("returns structured usage range errors", async () => {
 test("serves sanitized runtime usage for the requested range", async () => {
   const requested = [];
   const usageMonitor = {
-    async collect(range) {
-      requested.push(range);
+    async collect(range, filters) {
+      requested.push([range, filters]);
       return {
         available: true,
         source: "codex-local-sessions",
@@ -99,10 +102,14 @@ test("serves sanitized runtime usage for the requested range", async () => {
   };
   await withServer(
     async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/usage?range=7d`);
+      const response = await fetch(
+        `${baseUrl}/api/usage?range=7d&lane=downstream&model=claude-test`,
+      );
       assert.equal(response.status, 200);
       assert.equal((await response.json()).totals.totalTokens, 42);
-      assert.deepEqual(requested, ["7d"]);
+      assert.deepEqual(requested, [
+        ["7d", { lane: "downstream", model: "claude-test" }],
+      ]);
     },
     { usageMonitor },
   );

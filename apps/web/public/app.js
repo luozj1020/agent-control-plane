@@ -71,6 +71,10 @@ const elements = {
   runtimeLiveText: document.querySelector("#runtime-live-text"),
   runtimeLegendLane: document.querySelector("#runtime-legend-lane"),
   runtimeLegendType: document.querySelector("#runtime-legend-type"),
+  runtimeLaneFilter: document.querySelector("#runtime-lane-filter"),
+  runtimeFilterSummary: document.querySelector("#runtime-filter-summary"),
+  runtimeModelCount: document.querySelector("#runtime-model-count"),
+  runtimeModelFilter: document.querySelector("#runtime-model-filter"),
   runtimeModels: document.querySelector("#runtime-models"),
   runtimeOutput: document.querySelector("#runtime-output"),
   runtimeRange: document.querySelector("#runtime-range"),
@@ -106,6 +110,8 @@ let serverStatus = {
 let toastTimer;
 let runtimeRange = "24h";
 let runtimeTokenView = "type";
+let runtimeLane = "all";
+let runtimeModel = "";
 let latestRuntimeUsage = null;
 let usageLoading = false;
 let usageRefreshQueued = false;
@@ -125,6 +131,12 @@ const RANGE_LABELS = Object.freeze({
   "24h": "最近 24 小时",
   "7d": "最近 7 天",
   "30d": "最近 30 天",
+});
+
+const LANE_LABELS = Object.freeze({
+  all: "全部上下游",
+  upstream: "上游 · 主 Agent",
+  downstream: "下游 · Builder / subagent",
 });
 
 const compactNumber = new Intl.NumberFormat("zh-CN", {
@@ -162,6 +174,25 @@ function svgNode(name, attributes = {}) {
   const node = document.createElementNS("http://www.w3.org/2000/svg", name);
   for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
   return node;
+}
+
+function renderRuntimeFilters(modelOptions = []) {
+  elements.runtimeLaneFilter.value = runtimeLane;
+  elements.runtimeModelFilter.replaceChildren();
+  const allModels = document.createElement("option");
+  allModels.value = "";
+  allModels.textContent = "全部模型";
+  elements.runtimeModelFilter.append(allModels);
+  for (const entry of modelOptions) {
+    const option = document.createElement("option");
+    option.value = entry.model;
+    option.textContent = `${entry.model} · ${formatTokens(entry.totalTokens)}`;
+    option.title = `${entry.model} · ${exactNumber.format(entry.totalTokens ?? 0)} tokens · ${exactNumber.format(entry.modelCalls ?? 0)} 次调用`;
+    elements.runtimeModelFilter.append(option);
+  }
+  elements.runtimeModelFilter.disabled = modelOptions.length === 0;
+  elements.runtimeModelFilter.value = runtimeModel;
+  elements.runtimeFilterSummary.textContent = `${LANE_LABELS[runtimeLane]} · ${runtimeModel || "全部模型"}`;
 }
 
 function setRuntimeMetrics(totals = {}) {
@@ -407,30 +438,72 @@ function renderRuntimeChart(usage) {
   elements.runtimeChart.append(svg);
 }
 
-function renderRuntimeModels(models = []) {
+function renderRuntimeModels(models = [], totalTokens = 0) {
   elements.runtimeModels.replaceChildren();
+  elements.runtimeModelCount.textContent = `${models.length} 个模型`;
   if (models.length === 0) {
     const empty = document.createElement("span");
     empty.className = "model-empty";
-    empty.textContent = "暂无模型用量";
+    empty.textContent = "当前筛选范围内暂无模型用量";
     elements.runtimeModels.append(empty);
     return;
   }
-  for (const entry of models.slice(0, 4)) {
-    const chip = document.createElement("span");
-    chip.className = "model-chip";
-    const model = document.createElement("b");
-    model.textContent = entry.model;
-    const usage = document.createElement("em");
-    usage.textContent = formatTokens(entry.totalTokens);
-    usage.title = `${exactNumber.format(entry.totalTokens)} tokens`;
-    chip.append(model, usage);
-    elements.runtimeModels.append(chip);
+
+  const table = document.createElement("table");
+  table.className = "model-usage-table";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["模型", "数据流", "Total", "Input", "Cached", "Output", "Calls"]) {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = label;
+    headRow.append(cell);
   }
+  head.append(headRow);
+  table.append(head);
+
+  const body = document.createElement("tbody");
+  for (const entry of models) {
+    const row = document.createElement("tr");
+    const model = document.createElement("th");
+    model.scope = "row";
+    model.textContent = entry.model;
+    model.title = entry.model;
+
+    const lane = document.createElement("td");
+    const hasUpstream = (entry.upstreamCalls ?? 0) > 0;
+    const hasDownstream = (entry.downstreamCalls ?? 0) > 0;
+    lane.textContent = hasUpstream && hasDownstream ? "上下游" : hasDownstream ? "下游" : "上游";
+    lane.className = hasUpstream && hasDownstream ? "both" : hasDownstream ? "downstream" : "upstream";
+
+    const values = [
+      entry.totalTokens,
+      entry.inputTokens,
+      entry.cachedInputTokens,
+      entry.outputTokens,
+      entry.modelCalls ?? entry.requests,
+    ];
+    row.append(model, lane);
+    values.forEach((value, index) => {
+      const cell = document.createElement("td");
+      cell.textContent = formatTokens(value);
+      cell.title = exactNumber.format(value ?? 0);
+      if (index === 0 && totalTokens > 0) {
+        const share = document.createElement("small");
+        share.textContent = `${((value / totalTokens) * 100).toFixed(1)}%`;
+        cell.append(share);
+      }
+      row.append(cell);
+    });
+    body.append(row);
+  }
+  table.append(body);
+  elements.runtimeModels.append(table);
 }
 
 function renderRuntimeUsage(usage) {
   latestRuntimeUsage = usage;
+  renderRuntimeFilters(usage.modelOptions);
   if (!usage.available) {
     elements.runtimeLive.className = "runtime-live unavailable";
     elements.runtimeLiveText.textContent = "不可用";
@@ -451,7 +524,7 @@ function renderRuntimeUsage(usage) {
   elements.runtimeLiveText.textContent = "实时采集";
   setRuntimeMetrics(usage.totals);
   renderRuntimeChart(usage);
-  renderRuntimeModels(usage.models);
+  renderRuntimeModels(usage.models, usage.totals.totalTokens);
   renderCallsChart(usage);
   elements.runtimeUpdated.textContent = `更新于 ${new Date(usage.generatedAt).toLocaleTimeString("zh-CN")}`;
   const diagnostics = usage.diagnostics ?? {};
@@ -467,11 +540,13 @@ function renderRuntimeError(message) {
   latestRuntimeUsage = null;
   elements.runtimeLive.className = "runtime-live unavailable";
   elements.runtimeLiveText.textContent = "连接失败";
+  setRuntimeMetrics();
   elements.runtimeChart.replaceChildren();
   elements.runtimeEmpty.hidden = false;
   elements.runtimeEmpty.textContent = `无法读取运行时用量：${message}`;
   elements.runtimeUpdated.textContent = "将在后台重试";
   elements.runtimeDiagnostics.textContent = "连接失败 · 不读取消息内容";
+  renderRuntimeModels();
   renderCallsChart({
     available: false,
     totals: {},
@@ -1238,12 +1313,32 @@ async function loadRuntimeUsage() {
     return;
   }
   usageLoading = true;
-  const requestedRange = runtimeRange;
+  const requested = {
+    range: runtimeRange,
+    lane: runtimeLane,
+    model: runtimeModel,
+  };
+  const stillCurrent = () =>
+    requested.range === runtimeRange &&
+    requested.lane === runtimeLane &&
+    requested.model === runtimeModel;
+  const query = new URLSearchParams({ range: requested.range, lane: requested.lane });
+  if (requested.model) query.set("model", requested.model);
   try {
-    const usage = await requestJson(`/api/usage?range=${encodeURIComponent(requestedRange)}`);
-    if (requestedRange === runtimeRange) renderRuntimeUsage(usage);
+    const usage = await requestJson(`/api/usage?${query}`);
+    if (!stillCurrent()) return;
+    if (
+      requested.model &&
+      !usage.modelOptions?.some((entry) => entry.model === requested.model)
+    ) {
+      runtimeModel = "";
+      renderRuntimeFilters(usage.modelOptions);
+      usageRefreshQueued = true;
+      return;
+    }
+    renderRuntimeUsage(usage);
   } catch (error) {
-    if (requestedRange === runtimeRange) renderRuntimeError(error.message);
+    if (stillCurrent()) renderRuntimeError(error.message);
   } finally {
     usageLoading = false;
     if (usageRefreshQueued) {
@@ -1350,6 +1445,19 @@ elements.runtimeRange.addEventListener("click", (event) => {
     candidate.setAttribute("aria-pressed", String(candidate === button));
   }
   elements.runtimeWindow.textContent = RANGE_LABELS[runtimeRange];
+  loadRuntimeUsage();
+});
+
+elements.runtimeLaneFilter.addEventListener("change", () => {
+  runtimeLane = elements.runtimeLaneFilter.value;
+  runtimeModel = "";
+  renderRuntimeFilters();
+  loadRuntimeUsage();
+});
+
+elements.runtimeModelFilter.addEventListener("change", () => {
+  runtimeModel = elements.runtimeModelFilter.value;
+  elements.runtimeFilterSummary.textContent = `${LANE_LABELS[runtimeLane]} · ${runtimeModel || "全部模型"}`;
   loadRuntimeUsage();
 });
 

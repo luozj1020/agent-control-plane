@@ -80,6 +80,7 @@ test("aggregates runtime usage without retaining prompts or responses", async ()
     const result = await monitor.collect("24h");
 
     assert.equal(result.available, true);
+    assert.deepEqual(result.filters, { lane: "all", model: null });
     assert.deepEqual(result.totals, {
       inputTokens: 150,
       cachedInputTokens: 70,
@@ -103,6 +104,10 @@ test("aggregates runtime usage without retaining prompts or responses", async ()
         ["gpt-runtime-b", 60],
       ],
     );
+    assert.deepEqual(result.modelOptions, [
+      { model: "gpt-runtime-a", totalTokens: 120, modelCalls: 1 },
+      { model: "gpt-runtime-b", totalTokens: 60, modelCalls: 1 },
+    ]);
     assert.equal(
       result.buckets.reduce((sum, bucket) => sum + bucket.totalTokens, 0),
       180,
@@ -316,6 +321,34 @@ test("combines an injected downstream source with upstream Codex usage", async (
         snapshotFallback: true,
       },
     ]);
+
+    const upstream = await monitor.collect("1h", { lane: "upstream" });
+    assert.equal(upstream.totals.totalTokens, 13);
+    assert.equal(upstream.totals.upstreamCalls, 1);
+    assert.equal(upstream.totals.downstreamCalls, 0);
+    assert.deepEqual(upstream.modelOptions, [
+      { model: "unknown", totalTokens: 13, modelCalls: 1 },
+    ]);
+
+    const downstreamOnly = await monitor.collect("1h", {
+      lane: "downstream",
+      model: "claude-test",
+    });
+    assert.deepEqual(downstreamOnly.filters, {
+      lane: "downstream",
+      model: "claude-test",
+    });
+    assert.equal(downstreamOnly.totals.totalTokens, 24);
+    assert.equal(downstreamOnly.totals.upstreamCalls, 0);
+    assert.equal(downstreamOnly.totals.downstreamCalls, 1);
+    assert.deepEqual(
+      downstreamOnly.models.map((entry) => [entry.model, entry.totalTokens]),
+      [["claude-test", 24]],
+    );
+    assert.equal(
+      downstreamOnly.buckets.reduce((sum, bucket) => sum + bucket.totalTokens, 0),
+      24,
+    );
   });
 });
 
@@ -361,5 +394,13 @@ test("unknown ranges fail closed", async () => {
   await assert.rejects(
     monitor.collect("forever"),
     (error) => error.code === "usage.invalid_range" && error.status === 400,
+  );
+});
+
+test("unknown usage lanes fail closed", async () => {
+  const monitor = createUsageMonitor({ sessionsDir: tmpdir() });
+  await assert.rejects(
+    monitor.collect("24h", { lane: "sideways" }),
+    (error) => error.code === "usage.invalid_filter" && error.status === 400,
   );
 });

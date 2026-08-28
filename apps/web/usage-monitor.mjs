@@ -25,6 +25,8 @@ const EMPTY_TOTALS = Object.freeze({
   downstreamTokens: 0,
 });
 
+const USAGE_LANES = new Set(["all", "upstream", "downstream"]);
+
 function finiteToken(value) {
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
 }
@@ -49,6 +51,27 @@ function addUsage(target, event) {
 
 function emptyUsage() {
   return { ...EMPTY_TOTALS };
+}
+
+function normalizeFilters(filters = {}) {
+  const lane = filters.lane ?? "all";
+  if (!USAGE_LANES.has(lane)) {
+    const error = new Error(`Unsupported usage lane '${lane}'.`);
+    error.code = "usage.invalid_filter";
+    error.status = 400;
+    throw error;
+  }
+  const model = filters.model ?? null;
+  if (
+    model !== null &&
+    (typeof model !== "string" || model.length === 0 || model.length > 200 || model.includes("\0"))
+  ) {
+    const error = new Error("Usage model filter must be a non-empty model name.");
+    error.code = "usage.invalid_filter";
+    error.status = 400;
+    throw error;
+  }
+  return { lane, model };
 }
 
 async function directoryType(path) {
@@ -188,7 +211,7 @@ export function createUsageMonitor(options = {}) {
   const cacheByPath = new Map();
   let collectionQueue = Promise.resolve();
 
-  async function collectSnapshot(range) {
+  async function collectSnapshot(range, filters) {
     const config = RANGE_CONFIG[range];
     if (!config) {
       const error = new Error(`Unsupported usage range '${range}'.`);
@@ -196,6 +219,7 @@ export function createUsageMonitor(options = {}) {
       error.status = 400;
       throw error;
     }
+    const selected = normalizeFilters(filters);
 
     const currentTime = now();
     const currentMs = currentTime.getTime();
@@ -247,36 +271,40 @@ export function createUsageMonitor(options = {}) {
     }));
     const totals = emptyUsage();
     const models = new Map();
+    const modelOptions = new Map();
     const sessions = new Set();
+
+    function includeEvent(event) {
+      if (event.timestamp < startMs || event.timestamp >= endMs) return;
+      const lane = event.lane === "downstream" ? "downstream" : "upstream";
+      if (selected.lane !== "all" && lane !== selected.lane) return;
+      const model =
+        typeof event.model === "string" && event.model.length > 0 ? event.model : "unknown";
+      const optionUsage = modelOptions.get(model) ?? emptyUsage();
+      addUsage(optionUsage, event);
+      modelOptions.set(model, optionUsage);
+      if (selected.model !== null && model !== selected.model) return;
+      const index = Math.floor((event.timestamp - startMs) / config.bucketMs);
+      const bucket = buckets[index];
+      if (!bucket) return;
+      addUsage(bucket, event);
+      addUsage(totals, event);
+      if (event.sessionKey) sessions.add(event.sessionKey);
+      const modelUsage = models.get(model) ?? emptyUsage();
+      addUsage(modelUsage, event);
+      models.set(model, modelUsage);
+    }
 
     for (const cache of consideredCaches) {
       for (const event of cache.events) {
-        if (event.timestamp < startMs || event.timestamp >= endMs) continue;
-        const index = Math.floor((event.timestamp - startMs) / config.bucketMs);
-        const bucket = buckets[index];
-        if (!bucket) continue;
-        addUsage(bucket, event);
-        addUsage(totals, event);
-        if (event.sessionKey) sessions.add(event.sessionKey);
-        const modelUsage = models.get(event.model) ?? emptyUsage();
-        addUsage(modelUsage, event);
-        models.set(event.model, modelUsage);
+        includeEvent(event);
       }
     }
 
     for (const result of sourceResults) {
       if (result.status !== "active") continue;
       for (const event of result.events ?? []) {
-        if (event.timestamp < startMs || event.timestamp >= endMs) continue;
-        const index = Math.floor((event.timestamp - startMs) / config.bucketMs);
-        const bucket = buckets[index];
-        if (!bucket) continue;
-        addUsage(bucket, event);
-        addUsage(totals, event);
-        if (event.sessionKey) sessions.add(event.sessionKey);
-        const modelUsage = models.get(event.model) ?? emptyUsage();
-        addUsage(modelUsage, event);
-        models.set(event.model, modelUsage);
+        includeEvent(event);
       }
     }
 
@@ -301,6 +329,7 @@ export function createUsageMonitor(options = {}) {
       available,
       source: "local-agent-usage",
       range,
+      filters: selected,
       generatedAt: currentTime.toISOString(),
       privacy: "usage-events-only",
       callCoverage: {
@@ -316,6 +345,13 @@ export function createUsageMonitor(options = {}) {
       buckets,
       models: [...models.entries()]
         .map(([model, usage]) => ({ model, ...usage }))
+        .sort((left, right) => right.totalTokens - left.totalTokens),
+      modelOptions: [...modelOptions.entries()]
+        .map(([model, usage]) => ({
+          model,
+          totalTokens: usage.totalTokens,
+          modelCalls: usage.modelCalls,
+        }))
         .sort((left, right) => right.totalTokens - left.totalTokens),
       diagnostics: {
         filesDiscovered: files.length,
@@ -341,8 +377,8 @@ export function createUsageMonitor(options = {}) {
     };
   }
 
-  function collect(range = "24h") {
-    const result = collectionQueue.then(() => collectSnapshot(range));
+  function collect(range = "24h", filters = {}) {
+    const result = collectionQueue.then(() => collectSnapshot(range, filters));
     collectionQueue = result.catch(() => undefined);
     return result;
   }

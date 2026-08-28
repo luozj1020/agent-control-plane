@@ -170,7 +170,14 @@ export function createAppServer(options = {}) {
 
       if (pathname === "/api/usage" && (request.method === "GET" || request.method === "HEAD")) {
         const range = requestUrl.searchParams.get("range") ?? "24h";
-        sendJson(response, 200, await usageMonitor.collect(range), request.method === "HEAD");
+        const lane = requestUrl.searchParams.get("lane") ?? "all";
+        const model = requestUrl.searchParams.get("model") || null;
+        sendJson(
+          response,
+          200,
+          await usageMonitor.collect(range, { lane, model }),
+          request.method === "HEAD",
+        );
         return;
       }
 

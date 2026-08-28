@@ -138,6 +138,14 @@ in both totals and time buckets. The Token chart can switch between token-type
 composition (uncached input, cached input, output) and agent-lane composition
 (upstream, downstream) without mixing Token values with call counts.
 
+The Usage page also supports server-side `lane` and exact `model` filters. The
+upstream/downstream and model selectors update summary cards, both time-series
+charts, call counts, and the per-model cost table as one consistent scope. The
+model table reports total, input, cached input, output, call count, and share of
+the currently selected Token total. The local API accepts, for example,
+`/api/usage?range=30d&lane=downstream&model=claude-sonnet-4-5`; omit `model` and
+use `lane=all` for the unfiltered view.
+
 CC Switch rows currently provide agent-level attribution: they establish that
 Claude Code made a call, but do not prove which activated workflow or task
 caused it. Task-level attribution remains unavailable until dispatch and child

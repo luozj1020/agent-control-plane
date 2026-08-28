@@ -209,6 +209,24 @@
               <span id="runtime-updated">等待首次采集</span>
             </div>
 
+            <div class="runtime-filters" aria-label="用量筛选">
+              <label>
+                <span>数据流</span>
+                <select id="runtime-lane-filter">
+                  <option value="all">全部上下游</option>
+                  <option value="upstream">上游 · 主 Agent</option>
+                  <option value="downstream">下游 · Builder / subagent</option>
+                </select>
+              </label>
+              <label>
+                <span>模型</span>
+                <select id="runtime-model-filter" disabled>
+                  <option value="">全部模型</option>
+                </select>
+              </label>
+              <span class="runtime-filter-summary" id="runtime-filter-summary">全部上下游 · 全部模型</span>
+            </div>
+
             <div class="runtime-metrics">
               <article class="metric primary-metric">
                 <span>Total tokens</span>
@@ -267,8 +285,18 @@
               <div class="runtime-empty" id="runtime-empty" hidden></div>
             </div>
 
-            <div class="runtime-footer">
+            <section class="model-usage-section" aria-labelledby="model-usage-title">
+              <div class="model-usage-heading">
+                <div>
+                  <p class="token-kicker">MODEL COST</p>
+                  <h3 id="model-usage-title">按模型计算消耗</h3>
+                </div>
+                <span id="runtime-model-count">0 个模型</span>
+              </div>
               <div class="model-breakdown" id="runtime-models"></div>
+            </section>
+
+            <div class="runtime-footer">
               <span id="runtime-diagnostics">只保留 token 数值、模型与时间桶</span>
             </div>
           </section>
