@@ -91,6 +91,8 @@ test("aggregates runtime usage without retaining prompts or responses", async ()
       modelCalls: 2,
       upstreamCalls: 2,
       downstreamCalls: 0,
+      upstreamTokens: 180,
+      downstreamTokens: 0,
       sessions: 1,
       cacheRate: 70 / 150,
     });
@@ -108,9 +110,15 @@ test("aggregates runtime usage without retaining prompts or responses", async ()
     assert.equal(result.totals.modelCalls, 2);
     assert.equal(result.totals.upstreamCalls, 2);
     assert.equal(result.totals.downstreamCalls, 0);
+    assert.equal(result.totals.upstreamTokens, 180);
+    assert.equal(result.totals.downstreamTokens, 0);
     assert.equal(
       result.buckets.reduce((sum, bucket) => sum + bucket.modelCalls, 0),
       2,
+    );
+    assert.equal(
+      result.buckets.reduce((sum, bucket) => sum + bucket.upstreamTokens, 0),
+      180,
     );
     assert.deepEqual(result.callCoverage, {
       upstream: { status: "active", source: "codex-local-sessions" },
@@ -284,6 +292,12 @@ test("combines an injected downstream source with upstream Codex usage", async (
     assert.equal(result.totals.modelCalls, 2);
     assert.equal(result.totals.upstreamCalls, 1);
     assert.equal(result.totals.downstreamCalls, 1);
+    assert.equal(result.totals.upstreamTokens, 13);
+    assert.equal(result.totals.downstreamTokens, 24);
+    assert.equal(
+      result.buckets.reduce((sum, bucket) => sum + bucket.downstreamTokens, 0),
+      24,
+    );
     assert.equal(result.totals.sessions, 2);
     assert.deepEqual(result.callCoverage.downstream, {
       status: "active",

@@ -133,6 +133,11 @@ sources are absent or incompatible, the downstream lane is explicitly marked
 unavailable; the application never infers calls from model names or message
 content.
 
+The Token summary exposes `upstreamTokens` and `downstreamTokens` independently
+in both totals and time buckets. The Token chart can switch between token-type
+composition (uncached input, cached input, output) and agent-lane composition
+(upstream, downstream) without mixing Token values with call counts.
+
 CC Switch rows currently provide agent-level attribution: they establish that
 Claude Code made a call, but do not prove which activated workflow or task
 caused it. Task-level attribution remains unavailable until dispatch and child

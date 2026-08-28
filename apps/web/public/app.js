@@ -64,10 +64,13 @@ const elements = {
   runtimeCached: document.querySelector("#runtime-cached"),
   runtimeChart: document.querySelector("#runtime-chart"),
   runtimeDiagnostics: document.querySelector("#runtime-diagnostics"),
+  runtimeDownstreamTokens: document.querySelector("#runtime-downstream-tokens"),
   runtimeEmpty: document.querySelector("#runtime-empty"),
   runtimeInput: document.querySelector("#runtime-input"),
   runtimeLive: document.querySelector("#runtime-live"),
   runtimeLiveText: document.querySelector("#runtime-live-text"),
+  runtimeLegendLane: document.querySelector("#runtime-legend-lane"),
+  runtimeLegendType: document.querySelector("#runtime-legend-type"),
   runtimeModels: document.querySelector("#runtime-models"),
   runtimeOutput: document.querySelector("#runtime-output"),
   runtimeRange: document.querySelector("#runtime-range"),
@@ -77,6 +80,7 @@ const elements = {
   runtimeTotal: document.querySelector("#runtime-total"),
   runtimeUncached: document.querySelector("#runtime-uncached"),
   runtimeUpdated: document.querySelector("#runtime-updated"),
+  runtimeUpstreamTokens: document.querySelector("#runtime-upstream-tokens"),
   runtimeWindow: document.querySelector("#runtime-window"),
   skillPath: document.querySelector("#skill-path"),
   skillPreview: document.querySelector("#skill-preview"),
@@ -84,6 +88,7 @@ const elements = {
   storeStatusTitle: document.querySelector("#store-status-title"),
   toast: document.querySelector("#toast"),
   tokenEstimate: document.querySelector("#token-estimate"),
+  tokenDimension: document.querySelector("#token-dimension"),
   tokenChart: document.querySelector("#token-chart"),
   tokenChartSummary: document.querySelector("#token-chart-summary"),
   usageView: document.querySelector("#usage-view"),
@@ -100,6 +105,8 @@ let serverStatus = {
 };
 let toastTimer;
 let runtimeRange = "24h";
+let runtimeTokenView = "type";
+let latestRuntimeUsage = null;
 let usageLoading = false;
 let usageRefreshQueued = false;
 let activeView = "configuration";
@@ -163,6 +170,8 @@ function setRuntimeMetrics(totals = {}) {
   elements.runtimeInput.textContent = formatTokens(totals.inputTokens);
   elements.runtimeCached.textContent = formatTokens(totals.cachedInputTokens);
   elements.runtimeOutput.textContent = formatTokens(totals.outputTokens);
+  elements.runtimeUpstreamTokens.textContent = formatTokens(totals.upstreamTokens);
+  elements.runtimeDownstreamTokens.textContent = formatTokens(totals.downstreamTokens);
   elements.runtimeRequests.textContent = formatTokens(totals.modelCalls ?? totals.requests);
   elements.runtimeUncached.textContent = `未缓存 ${formatTokens(totals.uncachedInputTokens)}`;
   elements.runtimeCacheRate.textContent = `缓存率 ${((totals.cacheRate ?? 0) * 100).toFixed(1)}%`;
@@ -299,6 +308,9 @@ function renderCallsChart(usage) {
 
 function renderRuntimeChart(usage) {
   elements.runtimeChart.replaceChildren();
+  const laneView = runtimeTokenView === "lane";
+  elements.runtimeLegendType.hidden = laneView;
+  elements.runtimeLegendLane.hidden = !laneView;
   const buckets = usage.buckets ?? [];
   const hasUsage = buckets.some((bucket) => bucket.totalTokens > 0);
   elements.runtimeEmpty.hidden = hasUsage;
@@ -316,7 +328,7 @@ function renderRuntimeChart(usage) {
   const svg = svgNode("svg", {
     viewBox: `0 0 ${width} ${height}`,
     role: "img",
-    "aria-label": `${RANGE_LABELS[runtimeRange]} Codex token 用量时序图`,
+    "aria-label": `${RANGE_LABELS[runtimeRange]} ${laneView ? "上游和下游" : "按类型"} Token 用量时序图`,
   });
 
   for (let tick = 0; tick <= 4; tick += 1) {
@@ -347,11 +359,19 @@ function renderRuntimeChart(usage) {
   buckets.forEach((bucket, index) => {
     const x = margin.left + index * slotWidth + (slotWidth - barWidth) / 2;
     let baseline = margin.top + plotHeight;
-    const segments = [
-      ["uncached", bucket.uncachedInputTokens ?? 0],
-      ["cached", bucket.cachedInputTokens ?? 0],
-      ["output", bucket.outputTokens ?? 0],
-    ];
+    const upstreamTokens =
+      bucket.upstreamTokens ??
+      (bucket.downstreamTokens === undefined ? bucket.totalTokens ?? 0 : 0);
+    const segments = laneView
+      ? [
+          ["lane-upstream", upstreamTokens],
+          ["lane-downstream", bucket.downstreamTokens ?? 0],
+        ]
+      : [
+          ["uncached", bucket.uncachedInputTokens ?? 0],
+          ["cached", bucket.cachedInputTokens ?? 0],
+          ["output", bucket.outputTokens ?? 0],
+        ];
     const group = svgNode("g", { class: "runtime-bar-group" });
     for (const [kind, value] of segments) {
       const segmentHeight = (value / maximum) * plotHeight;
@@ -367,7 +387,9 @@ function renderRuntimeChart(usage) {
       );
     }
     const title = svgNode("title");
-    title.textContent = `${formatBucketLabel(bucket.start, runtimeRange)} · 总计 ${exactNumber.format(bucket.totalTokens)} · 未缓存输入 ${exactNumber.format(bucket.uncachedInputTokens)} · 缓存输入 ${exactNumber.format(bucket.cachedInputTokens)} · 输出 ${exactNumber.format(bucket.outputTokens)}`;
+    title.textContent = laneView
+      ? `${formatBucketLabel(bucket.start, runtimeRange)} · 总计 ${exactNumber.format(bucket.totalTokens)} · 上游 ${exactNumber.format(upstreamTokens)} · 下游 ${exactNumber.format(bucket.downstreamTokens ?? 0)}`
+      : `${formatBucketLabel(bucket.start, runtimeRange)} · 总计 ${exactNumber.format(bucket.totalTokens)} · 未缓存输入 ${exactNumber.format(bucket.uncachedInputTokens)} · 缓存输入 ${exactNumber.format(bucket.cachedInputTokens)} · 输出 ${exactNumber.format(bucket.outputTokens)}`;
     group.append(title);
     svg.append(group);
 
@@ -408,6 +430,7 @@ function renderRuntimeModels(models = []) {
 }
 
 function renderRuntimeUsage(usage) {
+  latestRuntimeUsage = usage;
   if (!usage.available) {
     elements.runtimeLive.className = "runtime-live unavailable";
     elements.runtimeLiveText.textContent = "不可用";
@@ -441,6 +464,7 @@ function renderRuntimeUsage(usage) {
 }
 
 function renderRuntimeError(message) {
+  latestRuntimeUsage = null;
   elements.runtimeLive.className = "runtime-live unavailable";
   elements.runtimeLiveText.textContent = "连接失败";
   elements.runtimeChart.replaceChildren();
@@ -1327,6 +1351,17 @@ elements.runtimeRange.addEventListener("click", (event) => {
   }
   elements.runtimeWindow.textContent = RANGE_LABELS[runtimeRange];
   loadRuntimeUsage();
+});
+
+elements.tokenDimension.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-token-view]");
+  if (!button || !elements.tokenDimension.contains(button)) return;
+  runtimeTokenView = button.dataset.tokenView;
+  for (const candidate of elements.tokenDimension.querySelectorAll("button")) {
+    candidate.classList.toggle("active", candidate === button);
+    candidate.setAttribute("aria-pressed", String(candidate === button));
+  }
+  if (latestRuntimeUsage) renderRuntimeChart(latestRuntimeUsage);
 });
 
 elements.navConfiguration.addEventListener("click", () => switchView("configuration"));

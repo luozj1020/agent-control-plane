@@ -21,6 +21,8 @@ const EMPTY_TOTALS = Object.freeze({
   modelCalls: 0,
   upstreamCalls: 0,
   downstreamCalls: 0,
+  upstreamTokens: 0,
+  downstreamTokens: 0,
 });
 
 function finiteToken(value) {
@@ -38,8 +40,10 @@ function addUsage(target, event) {
   target.modelCalls += 1;
   if (event.lane === "downstream") {
     target.downstreamCalls += 1;
+    target.downstreamTokens += event.totalTokens;
   } else {
     target.upstreamCalls += 1;
+    target.upstreamTokens += event.totalTokens;
   }
 }
 

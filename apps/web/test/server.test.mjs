@@ -41,6 +41,10 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /class="usage-view" id="usage-view" hidden/);
     assert.match(html, /模型调用数/);
     assert.match(html, /id="calls-chart"/);
+    assert.match(html, /id="runtime-upstream-tokens"/);
+    assert.match(html, /id="runtime-downstream-tokens"/);
+    assert.match(html, /id="token-dimension"/);
+    assert.match(html, /按上下游/);
     assert.match(html, /USAGE · ESTIMATED CONTEXT/);
     assert.match(html, /ACTIVATION AUDIT LOG/);
     assert.match(html, /激活记录/);

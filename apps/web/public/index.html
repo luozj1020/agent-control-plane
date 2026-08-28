@@ -230,6 +230,16 @@
                 <strong id="runtime-output">—</strong>
                 <small id="runtime-reasoning">含 reasoning —</small>
               </article>
+              <article class="metric lane-metric upstream">
+                <span>Upstream tokens</span>
+                <strong id="runtime-upstream-tokens">—</strong>
+                <small>主 Agent</small>
+              </article>
+              <article class="metric lane-metric downstream">
+                <span>Downstream tokens</span>
+                <strong id="runtime-downstream-tokens">—</strong>
+                <small>下游 Agent</small>
+              </article>
               <article class="metric">
                 <span>Model calls</span>
                 <strong id="runtime-requests">—</strong>
@@ -239,10 +249,18 @@
 
             <div class="runtime-chart-shell">
               <div class="runtime-chart-toolbar">
-                <div class="runtime-legend" aria-label="Token 图表图例">
+                <div class="runtime-legend" id="runtime-legend-type" aria-label="Token 类型图例">
                   <span><i class="uncached"></i>Uncached input</span>
                   <span><i class="cached"></i>Cached input</span>
                   <span><i class="output"></i>Output</span>
+                </div>
+                <div class="runtime-legend" id="runtime-legend-lane" aria-label="上下游 Token 图例" hidden>
+                  <span><i class="lane-upstream"></i>Upstream</span>
+                  <span><i class="lane-downstream"></i>Downstream</span>
+                </div>
+                <div class="dimension-switch" id="token-dimension" aria-label="Token 图表维度">
+                  <button class="active" type="button" data-token-view="type" aria-pressed="true">按类型</button>
+                  <button type="button" data-token-view="lane" aria-pressed="false">按上下游</button>
                 </div>
               </div>
               <div class="runtime-chart" id="runtime-chart" aria-live="polite"></div>
