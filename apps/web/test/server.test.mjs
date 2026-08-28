@@ -36,7 +36,11 @@ test("serves the application and health endpoint", async () => {
     const html = await page.text();
     assert.match(html, /Agent Workflow Switch/);
     assert.match(html, /Token 运行时用量/);
-    assert.match(html, /LOCAL RUNTIME ANALYTICS/);
+    assert.match(html, /RUNTIME ANALYTICS/);
+    assert.match(html, /id="nav-usage"/);
+    assert.match(html, /class="usage-view" id="usage-view" hidden/);
+    assert.match(html, /模型调用数/);
+    assert.match(html, /id="calls-chart"/);
     assert.match(html, /USAGE · ESTIMATED CONTEXT/);
     assert.match(html, /ACTIVATION AUDIT LOG/);
     assert.match(html, /激活记录/);
@@ -82,6 +86,10 @@ test("serves sanitized runtime usage for the requested range", async () => {
         totals: { totalTokens: 42 },
         buckets: [],
         models: [],
+        callCoverage: {
+          upstream: { status: "active" },
+          downstream: { status: "not-connected" },
+        },
       };
     },
   };

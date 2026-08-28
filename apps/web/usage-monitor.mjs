@@ -18,6 +18,9 @@ const EMPTY_TOTALS = Object.freeze({
   reasoningOutputTokens: 0,
   totalTokens: 0,
   requests: 0,
+  modelCalls: 0,
+  upstreamCalls: 0,
+  downstreamCalls: 0,
 });
 
 function finiteToken(value) {
@@ -32,6 +35,12 @@ function addUsage(target, event) {
   target.reasoningOutputTokens += event.reasoningOutputTokens;
   target.totalTokens += event.totalTokens;
   target.requests += 1;
+  target.modelCalls += 1;
+  if (event.lane === "downstream") {
+    target.downstreamCalls += 1;
+  } else {
+    target.upstreamCalls += 1;
+  }
 }
 
 function emptyUsage() {
@@ -90,6 +99,7 @@ function extractUsageEvent(record, currentModel, sessionKey) {
     timestamp,
     sessionKey,
     model: currentModel ?? "unknown",
+    lane: "upstream",
     inputTokens,
     cachedInputTokens,
     uncachedInputTokens: inputTokens - cachedInputTokens,
@@ -197,6 +207,10 @@ export function createUsageMonitor(options = {}) {
         totals: emptyUsage(),
         buckets: [],
         models: [],
+        callCoverage: {
+          upstream: { status: "unavailable", source: "codex-local-sessions" },
+          downstream: { status: "not-connected", source: null },
+        },
       };
     }
     if (type !== "directory") {
@@ -209,6 +223,10 @@ export function createUsageMonitor(options = {}) {
         totals: emptyUsage(),
         buckets: [],
         models: [],
+        callCoverage: {
+          upstream: { status: "unavailable", source: "codex-local-sessions" },
+          downstream: { status: "not-connected", source: null },
+        },
       };
     }
 
@@ -257,6 +275,10 @@ export function createUsageMonitor(options = {}) {
       range,
       generatedAt: currentTime.toISOString(),
       privacy: "usage-events-only",
+      callCoverage: {
+        upstream: { status: "active", source: "codex-local-sessions" },
+        downstream: { status: "not-connected", source: null },
+      },
       totals: {
         ...totals,
         sessions: sessions.size,

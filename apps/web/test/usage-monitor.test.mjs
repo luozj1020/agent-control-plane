@@ -88,6 +88,9 @@ test("aggregates runtime usage without retaining prompts or responses", async ()
       reasoningOutputTokens: 7,
       totalTokens: 180,
       requests: 2,
+      modelCalls: 2,
+      upstreamCalls: 2,
+      downstreamCalls: 0,
       sessions: 1,
       cacheRate: 70 / 150,
     });
@@ -102,6 +105,17 @@ test("aggregates runtime usage without retaining prompts or responses", async ()
       result.buckets.reduce((sum, bucket) => sum + bucket.totalTokens, 0),
       180,
     );
+    assert.equal(result.totals.modelCalls, 2);
+    assert.equal(result.totals.upstreamCalls, 2);
+    assert.equal(result.totals.downstreamCalls, 0);
+    assert.equal(
+      result.buckets.reduce((sum, bucket) => sum + bucket.modelCalls, 0),
+      2,
+    );
+    assert.deepEqual(result.callCoverage, {
+      upstream: { status: "active", source: "codex-local-sessions" },
+      downstream: { status: "not-connected", source: null },
+    });
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE_PROMPT_SENTINEL/);
   });
 });

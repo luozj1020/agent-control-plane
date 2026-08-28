@@ -26,6 +26,10 @@
             <span class="nav-icon">◆</span>
             Skill 配置
           </button>
+          <button class="nav-item" id="nav-usage" type="button">
+            <span class="nav-icon">▥</span>
+            用量监测
+          </button>
           <button class="nav-item" type="button" disabled>
             <span class="nav-icon">◎</span>
             Agent 目标
@@ -60,71 +64,6 @@
             <button class="button primary" id="export-button" type="button">导出 SKILL.md</button>
           </div>
         </header>
-
-        <section class="runtime-panel" id="configuration-runtime" aria-labelledby="runtime-title">
-          <div class="runtime-heading">
-            <div>
-              <div class="runtime-title-row">
-                <p class="eyebrow">LOCAL RUNTIME ANALYTICS</p>
-                <span class="runtime-live" id="runtime-live"><i></i><span id="runtime-live-text">正在连接</span></span>
-              </div>
-              <h2 id="runtime-title">Token 运行时用量</h2>
-              <p>从 Codex 本地会话的用量事件增量汇总，不读取或展示提示词与回复内容。</p>
-            </div>
-            <div class="range-switch" id="runtime-range" aria-label="Token 用量时间范围">
-              <button type="button" data-range="1h" aria-pressed="false">1H</button>
-              <button type="button" class="active" data-range="24h" aria-pressed="true">24H</button>
-              <button type="button" data-range="7d" aria-pressed="false">7D</button>
-              <button type="button" data-range="30d" aria-pressed="false">30D</button>
-            </div>
-          </div>
-
-          <div class="runtime-metrics">
-            <article class="metric primary-metric">
-              <span>Total tokens</span>
-              <strong id="runtime-total">—</strong>
-              <small id="runtime-window">最近 24 小时</small>
-            </article>
-            <article class="metric">
-              <span>Input</span>
-              <strong id="runtime-input">—</strong>
-              <small id="runtime-uncached">未缓存 —</small>
-            </article>
-            <article class="metric">
-              <span>Cached input</span>
-              <strong id="runtime-cached">—</strong>
-              <small id="runtime-cache-rate">缓存率 —</small>
-            </article>
-            <article class="metric">
-              <span>Output</span>
-              <strong id="runtime-output">—</strong>
-              <small id="runtime-reasoning">含 reasoning —</small>
-            </article>
-            <article class="metric">
-              <span>Requests</span>
-              <strong id="runtime-requests">—</strong>
-              <small id="runtime-sessions">会话 —</small>
-            </article>
-          </div>
-
-          <div class="runtime-chart-shell">
-            <div class="runtime-chart-toolbar">
-              <div class="runtime-legend" aria-label="图表图例">
-                <span><i class="uncached"></i>Uncached input</span>
-                <span><i class="cached"></i>Cached input</span>
-                <span><i class="output"></i>Output</span>
-              </div>
-              <span id="runtime-updated">等待首次采集</span>
-            </div>
-            <div class="runtime-chart" id="runtime-chart" aria-live="polite"></div>
-            <div class="runtime-empty" id="runtime-empty" hidden></div>
-          </div>
-
-          <div class="runtime-footer">
-            <div class="model-breakdown" id="runtime-models"></div>
-            <span id="runtime-diagnostics">只保留 token 数值、模型与时间桶</span>
-          </div>
-        </section>
 
         <section class="workspace-grid" id="configuration-workspace">
           <div class="configuration-column">
@@ -240,6 +179,109 @@
               <ol id="operation-list"></ol>
             </section>
           </aside>
+        </section>
+
+        <section class="usage-view" id="usage-view" hidden>
+          <header class="usage-topbar">
+            <div>
+              <p class="eyebrow">RUNTIME ANALYTICS</p>
+              <h1>用量监测</h1>
+              <p class="subtitle">分别查看 Token 消耗和模型调用次数；消息内容始终留在本地会话文件中。</p>
+            </div>
+            <div class="range-switch" id="runtime-range" aria-label="用量监测时间范围">
+              <button type="button" data-range="1h" aria-pressed="false">1H</button>
+              <button type="button" class="active" data-range="24h" aria-pressed="true">24H</button>
+              <button type="button" data-range="7d" aria-pressed="false">7D</button>
+              <button type="button" data-range="30d" aria-pressed="false">30D</button>
+            </div>
+          </header>
+
+          <section class="runtime-panel" id="usage-runtime" aria-labelledby="runtime-title">
+            <div class="runtime-heading">
+              <div>
+                <div class="runtime-title-row">
+                  <p class="eyebrow">TOKEN USAGE</p>
+                  <span class="runtime-live" id="runtime-live"><i></i><span id="runtime-live-text">等待打开</span></span>
+                </div>
+                <h2 id="runtime-title">Token 运行时用量</h2>
+                <p>从 Codex 本地 token_count 事件增量汇总，缓存输入不会被重复计算。</p>
+              </div>
+              <span id="runtime-updated">等待首次采集</span>
+            </div>
+
+            <div class="runtime-metrics">
+              <article class="metric primary-metric">
+                <span>Total tokens</span>
+                <strong id="runtime-total">—</strong>
+                <small id="runtime-window">最近 24 小时</small>
+              </article>
+              <article class="metric">
+                <span>Input</span>
+                <strong id="runtime-input">—</strong>
+                <small id="runtime-uncached">未缓存 —</small>
+              </article>
+              <article class="metric">
+                <span>Cached input</span>
+                <strong id="runtime-cached">—</strong>
+                <small id="runtime-cache-rate">缓存率 —</small>
+              </article>
+              <article class="metric">
+                <span>Output</span>
+                <strong id="runtime-output">—</strong>
+                <small id="runtime-reasoning">含 reasoning —</small>
+              </article>
+              <article class="metric">
+                <span>Model calls</span>
+                <strong id="runtime-requests">—</strong>
+                <small id="runtime-sessions">会话 —</small>
+              </article>
+            </div>
+
+            <div class="runtime-chart-shell">
+              <div class="runtime-chart-toolbar">
+                <div class="runtime-legend" aria-label="Token 图表图例">
+                  <span><i class="uncached"></i>Uncached input</span>
+                  <span><i class="cached"></i>Cached input</span>
+                  <span><i class="output"></i>Output</span>
+                </div>
+              </div>
+              <div class="runtime-chart" id="runtime-chart" aria-live="polite"></div>
+              <div class="runtime-empty" id="runtime-empty" hidden></div>
+            </div>
+
+            <div class="runtime-footer">
+              <div class="model-breakdown" id="runtime-models"></div>
+              <span id="runtime-diagnostics">只保留 token 数值、模型与时间桶</span>
+            </div>
+          </section>
+
+          <section class="calls-panel" aria-labelledby="calls-title">
+            <div class="calls-heading">
+              <div>
+                <p class="token-kicker">MODEL CALLS</p>
+                <h2 id="calls-title">模型调用数</h2>
+                <p>上游与下游使用同一时间轴；Token 用量保留在上方独立图表。</p>
+              </div>
+              <div class="call-totals">
+                <div><span>全部</span><strong id="calls-total">—</strong></div>
+                <div><span>上游</span><strong id="calls-upstream">—</strong></div>
+                <div><span>下游</span><strong id="calls-downstream">—</strong></div>
+              </div>
+            </div>
+            <div class="call-coverage">
+              <span id="coverage-upstream"><i></i>上游采集状态未知</span>
+              <span id="coverage-downstream"><i></i>下游采集状态未知</span>
+            </div>
+            <div class="calls-chart-shell">
+              <div class="runtime-legend" aria-label="模型调用图表图例">
+                <span><i class="calls-upstream"></i>上游 · 主 Agent</span>
+                <span><i class="calls-downstream"></i>下游 · Builder / subagent</span>
+              </div>
+              <div class="calls-chart" id="calls-chart" aria-live="polite"></div>
+              <div class="runtime-empty" id="calls-empty" hidden></div>
+            </div>
+            <p class="calls-footnote">每个完成的 last_token_usage 事件计为一次上游模型调用。下游采集器未连接时显示为不可用，不会根据模型名称、提示词或进程数量推测调用。</p>
+          </section>
         </section>
 
         <section class="history-view" id="history-view" hidden>

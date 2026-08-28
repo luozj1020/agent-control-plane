@@ -93,9 +93,9 @@ npm run dev
 Open `http://127.0.0.1:4173`. The current UI resolves modes and agent bindings
 through the real contracts package, previews the minimal generated `SKILL.md`,
 compares the generated token footprint of all three mode Skills, and exports the
-selected one. It also presents actual Codex runtime token usage in an API-console
-style dashboard with 1 hour, 24 hour, 7 day, and 30 day ranges. Filesystem
-activation is disabled by default.
+selected one. A separate Usage page presents actual Codex runtime token usage
+and model-call counts in an API-console style dashboard with 1 hour, 24 hour,
+7 day, and 30 day ranges. Filesystem activation is disabled by default.
 
 Runtime usage is read locally from Codex session `token_count` events. The
 collector incrementally reads only appended JSONL bytes and retains only event
@@ -108,6 +108,13 @@ session directory:
 ```bash
 AGENT_WORKFLOW_CODEX_SESSIONS_DIR=/absolute/path/to/sessions npm run dev
 ```
+
+Token volume and model-call count use separate charts because they have
+different units. Upstream and downstream calls share one grouped call chart so
+delegation timing can be compared directly. Codex local session events are the
+authoritative upstream source. Until a downstream runtime adapter is connected,
+the downstream lane is explicitly marked unavailable and remains zero; the
+application never infers downstream calls from model names or message content.
 
 To enable atomic activation, explicitly provide the absolute Codex Skill
 directory you want this application to manage:

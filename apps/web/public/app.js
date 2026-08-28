@@ -22,9 +22,15 @@ const elements = {
   compatibilityBadge: document.querySelector("#compatibility-badge"),
   copyButton: document.querySelector("#copy-button"),
   exportButton: document.querySelector("#export-button"),
-  configurationRuntime: document.querySelector("#configuration-runtime"),
   configurationTopbar: document.querySelector("#configuration-topbar"),
   configurationWorkspace: document.querySelector("#configuration-workspace"),
+  callsChart: document.querySelector("#calls-chart"),
+  callsDownstream: document.querySelector("#calls-downstream"),
+  callsEmpty: document.querySelector("#calls-empty"),
+  callsTotal: document.querySelector("#calls-total"),
+  callsUpstream: document.querySelector("#calls-upstream"),
+  coverageDownstream: document.querySelector("#coverage-downstream"),
+  coverageUpstream: document.querySelector("#coverage-upstream"),
   historyActiveBadge: document.querySelector("#history-active-badge"),
   historyCount: document.querySelector("#history-count"),
   historyDetail: document.querySelector("#history-detail"),
@@ -50,6 +56,7 @@ const elements = {
   modeSwitchPolicy: document.querySelector("#mode-switch-policy"),
   navConfiguration: document.querySelector("#nav-configuration"),
   navHistory: document.querySelector("#nav-history"),
+  navUsage: document.querySelector("#nav-usage"),
   operationList: document.querySelector("#operation-list"),
   restartBadge: document.querySelector("#restart-badge"),
   rollbackButton: document.querySelector("#rollback-button"),
@@ -79,6 +86,7 @@ const elements = {
   tokenEstimate: document.querySelector("#token-estimate"),
   tokenChart: document.querySelector("#token-chart"),
   tokenChartSummary: document.querySelector("#token-chart-summary"),
+  usageView: document.querySelector("#usage-view"),
   variantName: document.querySelector("#variant-name"),
 };
 
@@ -155,12 +163,129 @@ function setRuntimeMetrics(totals = {}) {
   elements.runtimeInput.textContent = formatTokens(totals.inputTokens);
   elements.runtimeCached.textContent = formatTokens(totals.cachedInputTokens);
   elements.runtimeOutput.textContent = formatTokens(totals.outputTokens);
-  elements.runtimeRequests.textContent = formatTokens(totals.requests);
+  elements.runtimeRequests.textContent = formatTokens(totals.modelCalls ?? totals.requests);
   elements.runtimeUncached.textContent = `未缓存 ${formatTokens(totals.uncachedInputTokens)}`;
   elements.runtimeCacheRate.textContent = `缓存率 ${((totals.cacheRate ?? 0) * 100).toFixed(1)}%`;
   elements.runtimeReasoning.textContent = `含 reasoning ${formatTokens(totals.reasoningOutputTokens)}`;
   elements.runtimeSessions.textContent = `会话 ${formatTokens(totals.sessions)}`;
   elements.runtimeWindow.textContent = RANGE_LABELS[runtimeRange];
+}
+
+function setCoverage(element, lane, coverage) {
+  const active = coverage?.status === "active";
+  element.className = active ? "active" : "unavailable";
+  if (active) {
+    element.lastChild.textContent = `${lane} · 本地事件采集中`;
+  } else if (coverage?.status === "not-connected") {
+    element.lastChild.textContent = `${lane} · 未连接采集器`;
+  } else {
+    element.lastChild.textContent = `${lane} · 数据源不可用`;
+  }
+}
+
+function renderCallsChart(usage) {
+  const totals = usage.totals ?? {};
+  const available = usage.available !== false;
+  elements.callsTotal.textContent = formatTokens(
+    available ? (totals.modelCalls ?? totals.requests) : undefined,
+  );
+  elements.callsUpstream.textContent = formatTokens(
+    available ? totals.upstreamCalls : undefined,
+  );
+  elements.callsDownstream.textContent = formatTokens(
+    available ? totals.downstreamCalls : undefined,
+  );
+  setCoverage(elements.coverageUpstream, "上游", usage.callCoverage?.upstream);
+  setCoverage(elements.coverageDownstream, "下游", usage.callCoverage?.downstream);
+  elements.callsChart.replaceChildren();
+
+  const buckets = usage.buckets ?? [];
+  const hasCalls = buckets.some((bucket) => (bucket.modelCalls ?? bucket.requests) > 0);
+  elements.callsEmpty.hidden = hasCalls;
+  if (!hasCalls) {
+    elements.callsEmpty.textContent = available
+      ? "所选时间范围内暂无模型调用"
+      : "模型调用数据源不可用";
+    return;
+  }
+
+  const width = 1120;
+  const height = 230;
+  const margin = { top: 14, right: 16, bottom: 38, left: 54 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const rawMaximum = Math.max(
+    ...buckets.flatMap((bucket) => [bucket.upstreamCalls ?? 0, bucket.downstreamCalls ?? 0]),
+  );
+  const maximum = Math.max(4, Math.ceil(rawMaximum / 4) * 4);
+  const svg = svgNode("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    role: "img",
+    "aria-label": `${RANGE_LABELS[runtimeRange]}上游和下游模型调用次数`,
+  });
+
+  for (let tick = 0; tick <= 4; tick += 1) {
+    const ratio = tick / 4;
+    const y = margin.top + plotHeight - ratio * plotHeight;
+    svg.append(
+      svgNode("line", {
+        class: "runtime-grid-line",
+        x1: margin.left,
+        x2: width - margin.right,
+        y1: y,
+        y2: y,
+      }),
+    );
+    const label = svgNode("text", {
+      class: "runtime-axis-label",
+      x: margin.left - 10,
+      y: y + 3,
+      "text-anchor": "end",
+    });
+    label.textContent = exactNumber.format((maximum * tick) / 4);
+    svg.append(label);
+  }
+
+  const slotWidth = plotWidth / buckets.length;
+  const barWidth = Math.max(3, Math.min(16, slotWidth * 0.28));
+  const labelEvery = Math.max(1, Math.ceil(buckets.length / 6));
+  buckets.forEach((bucket, index) => {
+    const center = margin.left + index * slotWidth + slotWidth / 2;
+    const group = svgNode("g", { class: "calls-group" });
+    const series = [
+      ["upstream", bucket.upstreamCalls ?? 0, center - barWidth - 1],
+      ["downstream", bucket.downstreamCalls ?? 0, center + 1],
+    ];
+    for (const [lane, value, x] of series) {
+      const barHeight = (value / maximum) * plotHeight;
+      group.append(
+        svgNode("rect", {
+          class: `calls-bar ${lane}`,
+          x,
+          y: margin.top + plotHeight - barHeight,
+          width: barWidth,
+          height: Math.max(0, barHeight),
+          rx: 2,
+        }),
+      );
+    }
+    const title = svgNode("title");
+    title.textContent = `${formatBucketLabel(bucket.start, runtimeRange)} · 上游 ${bucket.upstreamCalls ?? 0} 次 · 下游 ${bucket.downstreamCalls ?? 0} 次`;
+    group.append(title);
+    svg.append(group);
+
+    if (index % labelEvery === 0 || index === buckets.length - 1) {
+      const label = svgNode("text", {
+        class: "runtime-axis-label",
+        x: center,
+        y: height - 13,
+        "text-anchor": "middle",
+      });
+      label.textContent = formatBucketLabel(bucket.start, runtimeRange);
+      svg.append(label);
+    }
+  });
+  elements.callsChart.append(svg);
 }
 
 function renderRuntimeChart(usage) {
@@ -285,6 +410,7 @@ function renderRuntimeUsage(usage) {
         ? "未找到 Codex 本地会话目录"
         : "本地用量数据源不可用";
     renderRuntimeModels();
+    renderCallsChart(usage);
     elements.runtimeUpdated.textContent = "未采集数据";
     elements.runtimeDiagnostics.textContent = "数据源不可用 · 不读取消息内容";
     return;
@@ -294,6 +420,7 @@ function renderRuntimeUsage(usage) {
   setRuntimeMetrics(usage.totals);
   renderRuntimeChart(usage);
   renderRuntimeModels(usage.models);
+  renderCallsChart(usage);
   elements.runtimeUpdated.textContent = `更新于 ${new Date(usage.generatedAt).toLocaleTimeString("zh-CN")}`;
   const diagnostics = usage.diagnostics ?? {};
   elements.runtimeDiagnostics.textContent = `${diagnostics.filesRead ?? 0} 个本地会话文件 · ${diagnostics.parseErrors ?? 0} 个无效事件 · 不保留消息内容`;
@@ -307,6 +434,15 @@ function renderRuntimeError(message) {
   elements.runtimeEmpty.textContent = `无法读取运行时用量：${message}`;
   elements.runtimeUpdated.textContent = "将在后台重试";
   elements.runtimeDiagnostics.textContent = "连接失败 · 不读取消息内容";
+  renderCallsChart({
+    available: false,
+    totals: {},
+    buckets: [],
+    callCoverage: {
+      upstream: { status: "unavailable" },
+      downstream: { status: "not-connected" },
+    },
+  });
 }
 
 function formatHistoryDate(value) {
@@ -337,13 +473,17 @@ function historyActionLabel(action) {
 function switchView(view) {
   activeView = view;
   const configuration = view === "configuration";
+  const usage = view === "usage";
+  const history = view === "history";
   elements.configurationTopbar.hidden = !configuration;
-  elements.configurationRuntime.hidden = !configuration;
   elements.configurationWorkspace.hidden = !configuration;
-  elements.historyView.hidden = configuration;
+  elements.usageView.hidden = !usage;
+  elements.historyView.hidden = !history;
   elements.navConfiguration.classList.toggle("active", configuration);
-  elements.navHistory.classList.toggle("active", !configuration);
-  if (!configuration) loadHistory({ selectEntry: true });
+  elements.navUsage.classList.toggle("active", usage);
+  elements.navHistory.classList.toggle("active", history);
+  if (usage) loadRuntimeUsage();
+  if (history) loadHistory({ selectEntry: true });
 }
 
 function renderHistoryList() {
@@ -1176,6 +1316,7 @@ elements.runtimeRange.addEventListener("click", (event) => {
 });
 
 elements.navConfiguration.addEventListener("click", () => switchView("configuration"));
+elements.navUsage.addEventListener("click", () => switchView("usage"));
 elements.navHistory.addEventListener("click", () => switchView("history"));
 elements.historyRefresh.addEventListener("click", () =>
   loadHistory({ selectEntry: activeView === "history" }),
@@ -1216,15 +1357,14 @@ elements.historyRestore.addEventListener("click", async () => {
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) loadRuntimeUsage();
+  if (!document.hidden && activeView === "usage") loadRuntimeUsage();
 });
 
 initializeAgentSelectors();
 renderModeCards();
 refresh();
 loadServerStatus();
-loadRuntimeUsage();
 loadHistory();
 window.setInterval(() => {
-  if (!document.hidden) loadRuntimeUsage();
+  if (!document.hidden && activeView === "usage") loadRuntimeUsage();
 }, 5000);
