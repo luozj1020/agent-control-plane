@@ -121,3 +121,21 @@ The application owns only `agent-workflow-active/` and its hidden
 overwrite an unowned active directory. Every switch backs up the prior managed
 Skill, uses a single-writer lock and atomic directory rename, and exposes
 rollback in the UI. A restarted Codex session is required after switching.
+
+## Activation history
+
+Every successful filesystem activation now records an immutable snapshot under
+the product-owned `.agent-workflow-switch/history/` directory. The Activation
+History page provides:
+
+- a chronological audit log of real Skill writes and restores;
+- active mode, profile, main agent, adapter, fingerprint, and timestamp metadata;
+- a field-level configuration comparison;
+- a line-by-line `SKILL.md` restore preview from the current version to the
+  selected snapshot;
+- restoration of any recorded snapshot, with the current Skill backed up first;
+- SHA-256 validation before snapshots are listed, compared, or restored.
+
+Browser-only preview selections do not create audit records. History writes and
+restores use the same ownership checks, local single-writer lock, atomic rename,
+and cross-origin mutation protection as normal activation.

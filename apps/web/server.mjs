@@ -148,6 +148,32 @@ export function createAppServer(options = {}) {
         return;
       }
 
+      if (pathname === "/api/history" && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(response, 200, await store.history(), request.method === "HEAD");
+        return;
+      }
+
+      const historyDetail = pathname.match(/^\/api\/history\/([^/]+)$/);
+      if (historyDetail && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(
+          response,
+          200,
+          await store.historyDetail(historyDetail[1]),
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      const historyRestore = pathname.match(/^\/api\/history\/([^/]+)\/restore$/);
+      if (historyRestore && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        sendJson(response, 200, await store.restoreHistory(historyRestore[1]));
+        return;
+      }
+
       if (pathname === "/api/activate" && request.method === "POST") {
         if (!trustedMutationOrigin(request)) {
           sendJson(response, 403, { error: "request.untrusted_origin" });

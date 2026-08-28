@@ -21,11 +21,33 @@ const elements = {
   compatibilityBadge: document.querySelector("#compatibility-badge"),
   copyButton: document.querySelector("#copy-button"),
   exportButton: document.querySelector("#export-button"),
+  configurationRuntime: document.querySelector("#configuration-runtime"),
+  configurationTopbar: document.querySelector("#configuration-topbar"),
+  configurationWorkspace: document.querySelector("#configuration-workspace"),
+  historyActiveBadge: document.querySelector("#history-active-badge"),
+  historyCount: document.querySelector("#history-count"),
+  historyDetail: document.querySelector("#history-detail"),
+  historyDetailTitle: document.querySelector("#history-detail-title"),
+  historyDiffSummary: document.querySelector("#history-diff-summary"),
+  historyEmpty: document.querySelector("#history-empty"),
+  historyFieldDiff: document.querySelector("#history-field-diff"),
+  historyIntegrity: document.querySelector("#history-integrity"),
+  historyList: document.querySelector("#history-list"),
+  historyMeta: document.querySelector("#history-meta"),
+  historyPlaceholder: document.querySelector("#history-placeholder"),
+  historyRefresh: document.querySelector("#history-refresh"),
+  historyRestore: document.querySelector("#history-restore"),
+  historyRestoreNote: document.querySelector("#history-restore-note"),
+  historySkillDiff: document.querySelector("#history-skill-diff"),
+  historyStatus: document.querySelector("#history-status"),
+  historyView: document.querySelector("#history-view"),
   includedAgents: document.querySelector("#included-agents"),
   includedModes: document.querySelector("#included-modes"),
   issueList: document.querySelector("#issue-list"),
   mainAgent: document.querySelector("#main-agent"),
   modeGrid: document.querySelector("#mode-grid"),
+  navConfiguration: document.querySelector("#nav-configuration"),
+  navHistory: document.querySelector("#nav-history"),
   operationList: document.querySelector("#operation-list"),
   restartBadge: document.querySelector("#restart-badge"),
   rollbackButton: document.querySelector("#rollback-button"),
@@ -70,6 +92,10 @@ let toastTimer;
 let runtimeRange = "24h";
 let usageLoading = false;
 let usageRefreshQueued = false;
+let activeView = "configuration";
+let historyData = null;
+let selectedHistoryId = null;
+let historyRequest = 0;
 
 const RANGE_LABELS = Object.freeze({
   "1h": "最近 1 小时",
@@ -273,6 +299,239 @@ function renderRuntimeError(message) {
   elements.runtimeEmpty.textContent = `无法读取运行时用量：${message}`;
   elements.runtimeUpdated.textContent = "将在后台重试";
   elements.runtimeDiagnostics.textContent = "连接失败 · 不读取消息内容";
+}
+
+function formatHistoryDate(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "时间未知";
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function historyActionLabel(action) {
+  switch (action) {
+    case "activate":
+      return "配置激活";
+    case "restore-history":
+      return "历史恢复";
+    case "restore-backup":
+      return "备份回滚";
+    default:
+      return action;
+  }
+}
+
+function switchView(view) {
+  activeView = view;
+  const configuration = view === "configuration";
+  elements.configurationTopbar.hidden = !configuration;
+  elements.configurationRuntime.hidden = !configuration;
+  elements.configurationWorkspace.hidden = !configuration;
+  elements.historyView.hidden = configuration;
+  elements.navConfiguration.classList.toggle("active", configuration);
+  elements.navHistory.classList.toggle("active", !configuration);
+  if (!configuration) loadHistory({ selectEntry: true });
+}
+
+function renderHistoryList() {
+  elements.historyList.replaceChildren();
+  const entries = historyData?.entries ?? [];
+  elements.historyCount.hidden = entries.length === 0;
+  elements.historyCount.textContent = String(entries.length);
+
+  if (!historyData?.available) {
+    elements.historyEmpty.hidden = false;
+    elements.historyEmpty.textContent =
+      historyData?.reason === "preview-only"
+        ? "激活记录只追踪真实文件写入。设置 AGENT_WORKFLOW_SKILLS_DIR 并激活 Skill 后，记录会出现在这里。"
+        : "激活记录当前不可用。";
+    elements.historyStatus.textContent = "文件写入未启用";
+    elements.historyIntegrity.textContent = "预览模式";
+    elements.historyIntegrity.classList.remove("error");
+    return;
+  }
+
+  elements.historyStatus.textContent = `${entries.length} 条不可变快照`;
+  const corrupt = historyData.corruptEntries ?? 0;
+  elements.historyIntegrity.textContent = corrupt === 0 ? "完整性通过" : `${corrupt} 条损坏记录`;
+  elements.historyIntegrity.classList.toggle("error", corrupt > 0);
+  elements.historyEmpty.hidden = entries.length > 0;
+  if (entries.length === 0) {
+    elements.historyEmpty.textContent = "尚无真实激活记录。完成一次文件系统激活后将在这里建立首个快照。";
+    return;
+  }
+
+  for (const entry of entries) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `history-entry${entry.historyId === selectedHistoryId ? " selected" : ""}${entry.action.startsWith("restore") ? " restore" : ""}`;
+    button.dataset.historyId = entry.historyId;
+
+    const icon = document.createElement("span");
+    icon.className = "history-entry-icon";
+    icon.textContent = entry.action.startsWith("restore") ? "↺" : "◆";
+    const main = document.createElement("span");
+    main.className = "history-entry-main";
+    const title = document.createElement("strong");
+    title.textContent = entry.variantId;
+    const time = document.createElement("span");
+    time.textContent = `${historyActionLabel(entry.action)} · ${formatHistoryDate(entry.recordedAt)}`;
+    const mode = document.createElement("code");
+    mode.textContent = `${entry.mode.id}@${entry.mode.version}`;
+    main.append(title, time, mode);
+    const state = document.createElement("span");
+    state.className = `history-entry-state${entry.isActive ? " active" : ""}`;
+    state.textContent = entry.isActive ? "当前" : "快照";
+    button.append(icon, main, state);
+    button.addEventListener("click", () => selectHistoryEntry(entry.historyId));
+    elements.historyList.append(button);
+  }
+}
+
+function renderHistoryMeta(entry) {
+  elements.historyMeta.replaceChildren();
+  const values = [
+    ["Mode", `${entry.mode.id}@${entry.mode.version}`],
+    ["Main agent", entry.mainAgentId],
+    ["Profile", entry.profileId],
+    ["Activated", formatHistoryDate(entry.activatedAt)],
+  ];
+  for (const [label, value] of values) {
+    const item = document.createElement("div");
+    const name = document.createElement("span");
+    name.textContent = label;
+    const content = document.createElement("strong");
+    content.textContent = value ?? "—";
+    content.title = value ?? "—";
+    item.append(name, content);
+    elements.historyMeta.append(item);
+  }
+}
+
+function renderFieldChanges(changes) {
+  elements.historyFieldDiff.replaceChildren();
+  if (changes.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "field-diff-empty";
+    empty.textContent = "配置元数据与当前版本一致。";
+    elements.historyFieldDiff.append(empty);
+    return;
+  }
+  for (const change of changes) {
+    const row = document.createElement("div");
+    row.className = "field-diff";
+    const field = document.createElement("span");
+    field.textContent = change.field;
+    const current = document.createElement("code");
+    current.textContent = change.current ?? "∅";
+    current.title = current.textContent;
+    const arrow = document.createElement("i");
+    arrow.textContent = "→";
+    const historical = document.createElement("code");
+    historical.textContent = change.historical ?? "∅";
+    historical.title = historical.textContent;
+    row.append(field, current, arrow, historical);
+    elements.historyFieldDiff.append(row);
+  }
+}
+
+function renderSkillDiff(diff) {
+  elements.historySkillDiff.replaceChildren();
+  if (!diff.available) {
+    const unavailable = document.createElement("div");
+    unavailable.className = "diff-unavailable";
+    unavailable.textContent = "该快照过大，无法在浏览器中生成安全的逐行差异。";
+    elements.historySkillDiff.append(unavailable);
+    elements.historyDiffSummary.textContent = "差异过大";
+    return;
+  }
+  elements.historyDiffSummary.textContent = `+${diff.summary.added} / −${diff.summary.removed}`;
+  for (const line of diff.lines) {
+    const row = document.createElement("div");
+    row.className = `diff-line ${line.kind}`;
+    const currentNumber = document.createElement("span");
+    currentNumber.className = "diff-number";
+    currentNumber.textContent = line.currentLine ?? "";
+    const snapshotNumber = document.createElement("span");
+    snapshotNumber.className = "diff-number";
+    snapshotNumber.textContent = line.snapshotLine ?? "";
+    const marker = document.createElement("span");
+    marker.className = "diff-marker";
+    marker.textContent = line.kind === "add" ? "+" : line.kind === "remove" ? "−" : "";
+    const content = document.createElement("span");
+    content.className = "diff-text";
+    content.textContent = line.text || " ";
+    row.append(currentNumber, snapshotNumber, marker, content);
+    elements.historySkillDiff.append(row);
+  }
+}
+
+function renderHistoryDetail(detail) {
+  elements.historyPlaceholder.hidden = true;
+  elements.historyDetail.hidden = false;
+  elements.historyDetailTitle.textContent = detail.entry.variantId;
+  elements.historyActiveBadge.hidden = !detail.entry.matchesActive;
+  elements.historyActiveBadge.textContent = detail.entry.isActive ? "当前激活" : "内容已激活";
+  renderHistoryMeta(detail.entry);
+  renderFieldChanges(detail.fieldChanges);
+  renderSkillDiff(detail.diff);
+  elements.historyRestore.disabled = detail.entry.matchesActive;
+  elements.historyRestoreNote.textContent = detail.entry.matchesActive
+    ? "该快照已经是当前激活版本，无需恢复。"
+    : "恢复前会自动备份当前受管 Skill，并新增一条审计记录。";
+}
+
+async function selectHistoryEntry(historyId) {
+  selectedHistoryId = historyId;
+  renderHistoryList();
+  const request = ++historyRequest;
+  elements.historyPlaceholder.hidden = false;
+  elements.historyPlaceholder.querySelector("strong").textContent = "正在生成恢复差异";
+  elements.historyPlaceholder.querySelector("p").textContent = "校验快照完整性并与当前 SKILL.md 对比。";
+  elements.historyDetail.hidden = true;
+  try {
+    const detail = await requestJson(`/api/history/${encodeURIComponent(historyId)}`);
+    if (request !== historyRequest || selectedHistoryId !== historyId) return;
+    renderHistoryDetail(detail);
+  } catch (error) {
+    if (request !== historyRequest) return;
+    elements.historyPlaceholder.hidden = false;
+    elements.historyPlaceholder.querySelector("strong").textContent = "无法读取快照";
+    elements.historyPlaceholder.querySelector("p").textContent = error.message;
+  }
+}
+
+async function loadHistory(options = {}) {
+  const request = ++historyRequest;
+  elements.historyRefresh.disabled = true;
+  try {
+    const data = await requestJson("/api/history");
+    if (request !== historyRequest) return;
+    historyData = data;
+    if (!data.entries.some((entry) => entry.historyId === selectedHistoryId)) {
+      selectedHistoryId = data.entries.find((entry) => entry.isActive)?.historyId ?? data.entries[0]?.historyId ?? null;
+    }
+    renderHistoryList();
+    if (options.selectEntry && selectedHistoryId) await selectHistoryEntry(selectedHistoryId);
+    if (!selectedHistoryId) {
+      elements.historyDetail.hidden = true;
+      elements.historyPlaceholder.hidden = false;
+    }
+  } catch (error) {
+    if (request !== historyRequest) return;
+    historyData = { available: false, entries: [], reason: "request-failed" };
+    renderHistoryList();
+    elements.historyStatus.textContent = error.message;
+    elements.historyIntegrity.textContent = "读取失败";
+    elements.historyIntegrity.classList.add("error");
+  } finally {
+    elements.historyRefresh.disabled = false;
+  }
 }
 
 function option(value, label) {
@@ -701,6 +960,7 @@ elements.activateButton.addEventListener("click", async () => {
       });
       serverStatus = result.status;
       showToast(result.changed ? "Skill 已原子激活；重启 Codex 后生效。" : "当前已经是该 Skill。");
+      loadHistory();
     } catch (error) {
       showToast(`激活失败：${error.message}`);
     }
@@ -731,6 +991,7 @@ elements.rollbackButton.addEventListener("click", async () => {
     });
     serverStatus = result.status;
     showToast(`已回滚到 ${result.status.active.variantId}；重启 Codex 后生效。`);
+    loadHistory();
   } catch (error) {
     showToast(`回滚失败：${error.message}`);
   } finally {
@@ -770,6 +1031,44 @@ elements.runtimeRange.addEventListener("click", (event) => {
   loadRuntimeUsage();
 });
 
+elements.navConfiguration.addEventListener("click", () => switchView("configuration"));
+elements.navHistory.addEventListener("click", () => switchView("history"));
+elements.historyRefresh.addEventListener("click", () =>
+  loadHistory({ selectEntry: activeView === "history" }),
+);
+elements.historyRestore.addEventListener("click", async () => {
+  if (!selectedHistoryId || !historyData) return;
+  const entry = historyData.entries.find(
+    (candidate) => candidate.historyId === selectedHistoryId,
+  );
+  if (!entry || entry.matchesActive) return;
+  if (
+    !window.confirm(
+      `恢复 ${entry.variantId}？\n\n当前受管 Skill 会先自动备份，恢复操作也会写入激活记录。`,
+    )
+  ) {
+    return;
+  }
+  elements.historyRestore.disabled = true;
+  try {
+    const result = await requestJson(
+      `/api/history/${encodeURIComponent(selectedHistoryId)}/restore`,
+      { method: "POST" },
+    );
+    serverStatus = result.status;
+    refresh();
+    showToast(
+      result.changed
+        ? `已恢复 ${result.status.active.variantId}；重启 Codex 后生效。`
+        : "该快照已经是当前激活版本。",
+    );
+    await loadHistory({ selectEntry: true });
+  } catch (error) {
+    showToast(`恢复失败：${error.message}`);
+    elements.historyRestore.disabled = false;
+  }
+});
+
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) loadRuntimeUsage();
 });
@@ -779,6 +1078,7 @@ renderModeCards();
 refresh();
 loadServerStatus();
 loadRuntimeUsage();
+loadHistory();
 window.setInterval(() => {
   if (!document.hidden) loadRuntimeUsage();
 }, 5000);

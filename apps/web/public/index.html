@@ -22,7 +22,7 @@
         </div>
 
         <nav aria-label="主要导航">
-          <button class="nav-item active" type="button">
+          <button class="nav-item active" id="nav-configuration" type="button">
             <span class="nav-icon">◆</span>
             Skill 配置
           </button>
@@ -31,10 +31,10 @@
             Agent 目标
             <span class="soon">即将推出</span>
           </button>
-          <button class="nav-item" type="button" disabled>
+          <button class="nav-item" id="nav-history" type="button">
             <span class="nav-icon">↺</span>
             激活记录
-            <span class="soon">即将推出</span>
+            <span class="nav-count" id="history-count" hidden>0</span>
           </button>
         </nav>
 
@@ -48,7 +48,7 @@
       </aside>
 
       <main>
-        <header class="topbar">
+        <header class="topbar" id="configuration-topbar">
           <div>
             <p class="eyebrow">WORKFLOW SKILL MANAGER</p>
             <h1>配置当前 Codex 工作流</h1>
@@ -61,7 +61,7 @@
           </div>
         </header>
 
-        <section class="runtime-panel" aria-labelledby="runtime-title">
+        <section class="runtime-panel" id="configuration-runtime" aria-labelledby="runtime-title">
           <div class="runtime-heading">
             <div>
               <div class="runtime-title-row">
@@ -126,7 +126,7 @@
           </div>
         </section>
 
-        <section class="workspace-grid">
+        <section class="workspace-grid" id="configuration-workspace">
           <div class="configuration-column">
             <section class="panel">
               <div class="panel-heading">
@@ -239,6 +239,70 @@
               <ol id="operation-list"></ol>
             </section>
           </aside>
+        </section>
+
+        <section class="history-view" id="history-view" hidden>
+          <header class="history-topbar">
+            <div>
+              <p class="eyebrow">ACTIVATION AUDIT LOG</p>
+              <h1>激活记录</h1>
+              <p class="subtitle">查看每次真实文件激活的不可变快照，并安全恢复任意历史版本。</p>
+            </div>
+            <button class="button ghost" id="history-refresh" type="button">刷新记录</button>
+          </header>
+
+          <div class="history-layout">
+            <section class="history-list-panel">
+              <div class="history-panel-heading">
+                <div>
+                  <h2>配置时间线</h2>
+                  <span id="history-status">正在读取本地记录</span>
+                </div>
+                <span class="history-integrity" id="history-integrity">完整性检查中</span>
+              </div>
+              <div class="history-list" id="history-list"></div>
+              <div class="history-empty" id="history-empty" hidden></div>
+            </section>
+
+            <section class="history-detail-panel">
+              <div class="history-placeholder" id="history-placeholder">
+                <span class="history-placeholder-icon">↺</span>
+                <strong>选择一条激活记录</strong>
+                <p>这里将显示当前配置恢复到该快照时产生的字段和 SKILL.md 差异。</p>
+              </div>
+              <div id="history-detail" hidden>
+                <div class="history-detail-heading">
+                  <div>
+                    <p class="token-kicker">RESTORE PREVIEW</p>
+                    <h2 id="history-detail-title">—</h2>
+                  </div>
+                  <span class="compatibility" id="history-active-badge" hidden>当前激活</span>
+                </div>
+                <div class="history-meta" id="history-meta"></div>
+
+                <div class="history-section-heading">
+                  <h3>配置字段变化</h3>
+                  <span>当前 → 历史快照</span>
+                </div>
+                <div class="field-diff-list" id="history-field-diff"></div>
+
+                <div class="history-section-heading diff-heading">
+                  <h3>SKILL.md 差异</h3>
+                  <div class="diff-legend">
+                    <span class="added">新增</span>
+                    <span class="removed">移除</span>
+                    <strong id="history-diff-summary">—</strong>
+                  </div>
+                </div>
+                <div class="skill-diff" id="history-skill-diff"></div>
+
+                <div class="history-restore-bar">
+                  <p id="history-restore-note">恢复前会自动备份当前受管 Skill。</p>
+                  <button class="button primary" id="history-restore" type="button">恢复此快照</button>
+                </div>
+              </div>
+            </section>
+          </div>
         </section>
       </main>
     </div>

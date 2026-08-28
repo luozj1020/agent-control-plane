@@ -6,13 +6,14 @@ const required = [
   new URL("../server.mjs", import.meta.url),
   new URL("../skill-store.mjs", import.meta.url),
   new URL("../usage-monitor.mjs", import.meta.url),
+  new URL("../skill-diff.mjs", import.meta.url),
   new URL("../public/index.html", import.meta.url),
   new URL("../public/app.js", import.meta.url),
   new URL("../public/styles.css", import.meta.url),
 ];
 
 await Promise.all(required.map((file) => access(file)));
-for (const script of [required[0], required[1], required[2], required[4]]) {
+for (const script of [required[0], required[1], required[2], required[3], required[5]]) {
   const result = spawnSync(process.execPath, ["--check", fileURLToPath(script)], {
     encoding: "utf8",
   });

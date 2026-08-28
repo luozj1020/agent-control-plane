@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -110,6 +110,106 @@ test("switching creates a recoverable backup and rollback preserves both version
   });
 });
 
+test("activation history persists immutable snapshots and restores any entry", async () => {
+  await withTempDirectory(async (skillsDir) => {
+    const store = testStore(skillsDir);
+    const overnight = resolveMode("overnight");
+    const balanced = resolveMode("balanced");
+    await store.activate(overnight);
+    await store.activate(balanced);
+
+    const history = await store.history();
+    assert.equal(history.available, true);
+    assert.equal(history.entries.length, 2);
+    assert.equal(history.entries.filter((entry) => entry.isActive).length, 1);
+    const overnightEntry = history.entries.find((entry) => entry.variantId === overnight.id);
+    assert(overnightEntry);
+
+    const detail = await store.historyDetail(overnightEntry.historyId);
+    assert.equal(detail.entry.variantId, overnight.id);
+    assert.equal(detail.diff.available, true);
+    assert(detail.diff.summary.added > 0);
+    assert(detail.diff.summary.removed > 0);
+    assert(detail.fieldChanges.some((change) => change.field === "mode"));
+
+    const restored = await store.restoreHistory(overnightEntry.historyId);
+    assert.equal(restored.changed, true);
+    assert.equal(restored.status.active.variantId, overnight.id);
+    assert.equal(
+      await readFile(join(skillsDir, "agent-workflow-active", "SKILL.md"), "utf8"),
+      overnight.content,
+    );
+
+    const reopened = testStore(skillsDir);
+    const persisted = await reopened.history();
+    assert.equal(persisted.entries.length, 3);
+    assert.equal(persisted.entries.filter((entry) => entry.isActive).length, 1);
+    const restoreEvent = persisted.entries.find(
+      (entry) => entry.action === "restore-history",
+    );
+    assert(restoreEvent);
+    assert.equal(restoreEvent.sourceHistoryId, overnightEntry.historyId);
+  });
+});
+
+test("history lookup refuses a replaced symlink root", async () => {
+  await withTempDirectory(async (skillsDir) => {
+    const store = testStore(skillsDir);
+    await store.activate(resolveMode("overnight"));
+    const historyRoot = join(skillsDir, ".agent-workflow-switch", "history");
+    await rm(historyRoot, { recursive: true });
+    await symlink(skillsDir, historyRoot, "dir");
+
+    await assert.rejects(
+      store.history(),
+      (error) => error instanceof SkillStoreError && error.code === "history.corrupt_root",
+    );
+  });
+});
+
+test("activation refuses an unsafe history root without changing the active Skill", async () => {
+  await withTempDirectory(async (skillsDir) => {
+    const store = testStore(skillsDir);
+    const overnight = resolveMode("overnight");
+    await store.activate(overnight);
+    const historyRoot = join(skillsDir, ".agent-workflow-switch", "history");
+    await rm(historyRoot, { recursive: true });
+    await writeFile(historyRoot, "unsafe", "utf8");
+
+    await assert.rejects(
+      store.activate(resolveMode("balanced")),
+      (error) => error instanceof SkillStoreError && error.code === "store.unsafe_directory",
+    );
+    assert.equal(
+      await readFile(join(skillsDir, "agent-workflow-active", "SKILL.md"), "utf8"),
+      overnight.content,
+    );
+  });
+});
+
+test("history integrity failures are reported without exposing corrupt content", async () => {
+  await withTempDirectory(async (skillsDir) => {
+    const store = testStore(skillsDir);
+    await store.activate(resolveMode("overnight"));
+    const history = await store.history();
+    const historyId = history.entries[0].historyId;
+    await writeFile(
+      join(skillsDir, ".agent-workflow-switch", "history", historyId, "SKILL.md"),
+      "tampered",
+      "utf8",
+    );
+
+    const afterTamper = await store.history();
+    assert.equal(afterTamper.entries.length, 0);
+    assert.equal(afterTamper.corruptEntries, 1);
+    await assert.rejects(
+      store.historyDetail(historyId),
+      (error) =>
+        error instanceof SkillStoreError && error.code === "history.content_mismatch",
+    );
+  });
+});
+
 test("activation refuses to overwrite an unowned Skill directory", async () => {
   await withTempDirectory(async (skillsDir) => {
     const active = join(skillsDir, "agent-workflow-active");
@@ -189,6 +289,16 @@ test("rollback rejects path-like backup identifiers", async () => {
     await assert.rejects(
       store.rollback("../outside"),
       (error) => error instanceof SkillStoreError && error.code === "rollback.invalid_id",
+    );
+  });
+});
+
+test("history restore rejects path-like identifiers", async () => {
+  await withTempDirectory(async (skillsDir) => {
+    const store = testStore(skillsDir);
+    await assert.rejects(
+      store.restoreHistory("../outside"),
+      (error) => error instanceof SkillStoreError && error.code === "history.invalid_id",
     );
   });
 });

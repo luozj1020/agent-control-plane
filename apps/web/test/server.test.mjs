@@ -38,6 +38,8 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /Token 运行时用量/);
     assert.match(html, /LOCAL RUNTIME ANALYTICS/);
     assert.match(html, /USAGE · ESTIMATED CONTEXT/);
+    assert.match(html, /ACTIVATION AUDIT LOG/);
+    assert.match(html, /激活记录/);
   });
 });
 
@@ -171,6 +173,76 @@ test("rollback API restores a server-generated backup", async () => {
   } finally {
     await rm(skillsDir, { recursive: true, force: true });
   }
+});
+
+test("history API exposes diffs and restores a selected immutable snapshot", async () => {
+  const skillsDir = await mkdtemp(join(tmpdir(), "agent-workflow-api-history-"));
+  try {
+    await withServer(
+      async (baseUrl) => {
+        const activate = (profile) =>
+          fetch(`${baseUrl}/api/activate`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ profile }),
+          });
+        assert.equal((await activate(CODEX_OVERNIGHT_CLAUDE_PROFILE)).status, 200);
+        const balanced = {
+          ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+          id: "codex-balanced-history",
+          mode: { id: "balanced", version: "1.0.0" },
+        };
+        assert.equal((await activate(balanced)).status, 200);
+
+        const historyResponse = await fetch(`${baseUrl}/api/history`);
+        assert.equal(historyResponse.status, 200);
+        const history = await historyResponse.json();
+        assert.equal(history.entries.length, 2);
+        const overnight = history.entries.find((entry) => entry.mode.id === "overnight");
+        assert(overnight);
+
+        const detailResponse = await fetch(
+          `${baseUrl}/api/history/${encodeURIComponent(overnight.historyId)}`,
+        );
+        assert.equal(detailResponse.status, 200);
+        const detail = await detailResponse.json();
+        assert.equal(detail.diff.direction, "current-to-snapshot");
+        assert(detail.diff.summary.added > 0);
+        assert(detail.fieldChanges.some((change) => change.field === "mode"));
+
+        const restore = await fetch(
+          `${baseUrl}/api/history/${encodeURIComponent(overnight.historyId)}/restore`,
+          { method: "POST" },
+        );
+        assert.equal(restore.status, 200);
+        assert.equal((await restore.json()).status.active.variantId, overnight.variantId);
+        assert.equal((await (await fetch(`${baseUrl}/api/history`)).json()).entries.length, 3);
+      },
+      { skillsDir },
+    );
+  } finally {
+    await rm(skillsDir, { recursive: true, force: true });
+  }
+});
+
+test("history restore rejects cross-origin requests", async () => {
+  const store = {
+    status: async () => ({ writeEnabled: true }),
+    history: async () => ({ available: true, entries: [] }),
+    restoreHistory: async () => {
+      throw new Error("must not be called");
+    },
+  };
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/history/snapshot/restore`, {
+        method: "POST",
+        headers: { origin: "https://malicious.example" },
+      });
+      assert.equal(response.status, 403);
+    },
+    { store },
+  );
 });
 
 test("mutation API rejects cross-origin requests", async () => {
