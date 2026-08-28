@@ -12,6 +12,7 @@ import {
 import { createCcSwitchUsageSource } from "./cc-switch-usage-source.mjs";
 import { createClaudeUsageSource } from "./claude-usage-source.mjs";
 import { createPreferredUsageSource } from "./preferred-usage-source.mjs";
+import { createBalancedRuntime } from "./balanced-runtime.mjs";
 import { createSkillStore, SkillStoreError } from "./skill-store.mjs";
 import { createUsageMonitor } from "./usage-monitor.mjs";
 
@@ -115,6 +116,9 @@ async function serveFile(request, response, root, relativePath) {
 
 export function createAppServer(options = {}) {
   const store = options.store ?? createSkillStore({ skillsDir: options.skillsDir });
+  const balancedRuntime = options.balancedRuntime ?? createBalancedRuntime({
+    runtimeRoot: options.balancedRuntimeRoot,
+  });
   let usageMonitor = options.usageMonitor;
   if (!usageMonitor) {
     let usageSources = options.usageSources;
@@ -176,6 +180,42 @@ export function createAppServer(options = {}) {
           response,
           200,
           await usageMonitor.collect(range, { lane, model }),
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      if (pathname === "/api/balanced/config" && (request.method === "GET" || request.method === "HEAD")) {
+        const mode = BUILTIN_MODE_CATALOG.modes.find((candidate) => candidate.kind === "balanced");
+        const policy = BUILTIN_MODE_CATALOG.tunedWindowPolicies.find(
+          (candidate) =>
+            candidate.id === mode?.tunedWindowPolicy.id &&
+            candidate.version === mode?.tunedWindowPolicy.version,
+        );
+        const budget = BUILTIN_MODE_CATALOG.balancedBudgetPolicies.find(
+          (candidate) =>
+            candidate.id === mode?.budgetPolicy.id && candidate.version === mode?.budgetPolicy.version,
+        );
+        sendJson(
+          response,
+          200,
+          {
+            mode: mode ? { id: mode.id, version: mode.version } : null,
+            policy,
+            budget,
+            adapters: EXAMPLE_AGENTS.filter((agent) => agent.capabilities.includes("bounded-execution"))
+              .map((agent) => ({ id: agent.id, displayName: agent.displayName })),
+          },
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      if (pathname === "/api/balanced/runs" && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(
+          response,
+          200,
+          { runs: await balancedRuntime.listRuns() },
           request.method === "HEAD",
         );
         return;

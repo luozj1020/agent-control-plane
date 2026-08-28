@@ -1,11 +1,13 @@
 import { BUILTIN_MODE_CATALOG } from "./catalog.js";
 import type {
   AgentTarget,
+  BalancedBudgetOverride,
   EffectiveSkillVariant,
   ModeSkillTemplate,
   Result,
   RoleBinding,
   SkillResolutionInput,
+  TunedWindowPolicy,
 } from "./types.js";
 import { validateSkillResolutionInput } from "./validation.js";
 
@@ -35,7 +37,14 @@ function targetLabel(binding: RoleBinding, agents: ReadonlyMap<string, AgentTarg
   return lineSafe(agents.get(binding.target.agentId)?.displayName ?? binding.target.agentId);
 }
 
-function renderModeInstructions(mode: ModeSkillTemplate): string {
+function renderModeInstructions(
+  mode: ModeSkillTemplate,
+  balanced?: {
+    readonly policy: TunedWindowPolicy;
+    readonly budget: BalancedBudgetOverride;
+    readonly builderId: string;
+  },
+): string {
   switch (mode.kind) {
     case "overnight":
       return [
@@ -48,13 +57,19 @@ function renderModeInstructions(mode: ModeSkillTemplate): string {
         "5. Stop when accepted or when a genuine semantic choice requires the user.",
       ].join("\n");
     case "balanced":
+      if (!balanced) throw new Error("Balanced runtime configuration is missing.");
       return [
         "## Workflow",
         "",
-        `Use tuned window policy ${mode.tunedWindowPolicy.id}@${mode.tunedWindowPolicy.version}.`,
-        "After each bounded downstream round, review the result in the main-agent context.",
-        "Accept, stop, or dispatch a narrowed continuation using the same policy version.",
-        "Do not replace the tuned policy with an arbitrary user-entered duration.",
+        `Use the external Balanced Runner with policy ${mode.tunedWindowPolicy.id}@${mode.tunedWindowPolicy.version}; do not simulate its timers or budgets in prose.`,
+        `Policy seconds: context=${balanced.policy.contextAcquisitionSeconds}, active=${balanced.policy.activeWindowSeconds}, extension=${balanced.policy.progressExtensionSeconds}, growing-extension=${balanced.policy.growingProgressExtensionSeconds}, hard-cap=${balanced.policy.hardCapSeconds}.`,
+        `Budget: main-review=${balanced.budget.mainReviewCalls}, downstream=${balanced.budget.downstreamCalls}, advisor=${balanced.budget.advisorCalls}, reserved-final-review=${balanced.budget.reservedFinalReviewCalls}, max-total-tokens=${balanced.budget.maxTotalTokens}.`,
+        "Freeze a Task JSON with objective, acceptance, allowedPaths, forbiddenPaths, and validationCommands before the first round.",
+        `Run: agent-control-plane balanced run --task TASK.json --worktree ABSOLUTE_WORKTREE --adapter ${balanced.builderId} --policy ${mode.tunedWindowPolicy.id}@${mode.tunedWindowPolicy.version} --main-review-calls ${balanced.budget.mainReviewCalls} --downstream-calls ${balanced.budget.downstreamCalls} --advisor-calls ${balanced.budget.advisorCalls} --reserved-final-review-calls ${balanced.budget.reservedFinalReviewCalls} --max-total-tokens ${balanced.budget.maxTotalTokens}`,
+        "Read the returned hash-bound balanced-review.json. Decide accept, stop, or revise; a process exit is never acceptance.",
+        "Record accept/stop with `agent-control-plane balanced review --run RUN_DIR --decision DECISION`.",
+        "For revise, freeze a bounded Revision Delta and run `agent-control-plane balanced review --run RUN_DIR --decision revise --revision REVISION.json`.",
+        "If the Runner is unavailable or reports runtime_blocked, budget_exhausted, scope_violation, or validation_failed, do not bypass it with an unmanaged downstream call.",
       ].join("\n");
     case "interactive":
       return [
@@ -89,6 +104,39 @@ export function resolveEffectiveSkill(
     binding.target.kind === "agent" ? [binding.target.agentId] : [],
   );
   const includedAgentIds = [...new Set([main.id, ...externalAgentIds])];
+  let balancedRuntime:
+    | {
+        policy: TunedWindowPolicy;
+        budget: BalancedBudgetOverride;
+        builderId: string;
+      }
+    | undefined;
+  if (mode.kind === "balanced") {
+    const policy = catalog.tunedWindowPolicies.find(
+      (candidate) =>
+        candidate.id === mode.tunedWindowPolicy.id &&
+        candidate.version === mode.tunedWindowPolicy.version,
+    );
+    const defaultBudget = catalog.balancedBudgetPolicies.find(
+      (candidate) =>
+        candidate.id === mode.budgetPolicy.id && candidate.version === mode.budgetPolicy.version,
+    );
+    const builder = input.profile.roleBindings.find((binding) => binding.role === "builder");
+    if (!policy || !defaultBudget || builder?.target.kind !== "agent") {
+      throw new Error("Validated Balanced input lost its runtime policy or builder.");
+    }
+    balancedRuntime = {
+      policy,
+      budget: input.profile.balancedBudget ?? {
+        mainReviewCalls: defaultBudget.mainReviewCalls,
+        downstreamCalls: defaultBudget.downstreamCalls,
+        advisorCalls: defaultBudget.advisorCalls,
+        reservedFinalReviewCalls: defaultBudget.reservedFinalReviewCalls,
+        maxTotalTokens: defaultBudget.maxTotalTokens,
+      },
+      builderId: builder.target.agentId,
+    };
+  }
   const bindingLines = input.profile.roleBindings.map(
     (binding) => `- ${binding.role}: ${targetLabel(binding, agents)}`,
   );
@@ -109,7 +157,7 @@ export function resolveEffectiveSkill(
     "",
     mode.description,
     "",
-    renderModeInstructions(mode),
+    renderModeInstructions(mode, balancedRuntime),
     "",
     "## Active bindings",
     "",
@@ -133,6 +181,7 @@ export function resolveEffectiveSkill(
       content,
       contentFingerprint: fingerprint(content),
       estimatedTokens: Math.ceil(content.length / 4),
+      ...(balancedRuntime ? { balancedBudget: balancedRuntime.budget } : {}),
     },
   };
 }

@@ -47,7 +47,50 @@ test("Balanced resolves its tuned policy and excludes other modes", () => {
   if (!result.ok) return;
 
   assert.match(result.value.content, /balanced-default@1\.0\.0/);
+  assert.match(result.value.content, /agent-control-plane balanced run/);
+  assert.match(result.value.content, /context=600, active=600/);
+  assert.match(result.value.content, /main-review=3, downstream=3, advisor=2/);
   assert.doesNotMatch(result.value.content, /Overnight|Interactive/);
+});
+
+test("Balanced embeds validated budget overrides in the external Runner command", () => {
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    id: "codex-balanced-budgeted",
+    mode: { id: "balanced", version: "1.0.0" },
+    balancedBudget: {
+      mainReviewCalls: 4,
+      downstreamCalls: 5,
+      advisorCalls: 2,
+      reservedFinalReviewCalls: 1,
+      maxTotalTokens: 9000000,
+    },
+  };
+  const result = resolve(profile);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.match(result.value.content, /--main-review-calls 4/);
+  assert.match(result.value.content, /--downstream-calls 5/);
+  assert.match(result.value.content, /--max-total-tokens 9000000/);
+});
+
+test("Balanced rejects a budget that consumes the protected final review slot", () => {
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    id: "codex-balanced-invalid-budget",
+    mode: { id: "balanced", version: "1.0.0" },
+    balancedBudget: {
+      mainReviewCalls: 1,
+      downstreamCalls: 1,
+      advisorCalls: 0,
+      reservedFinalReviewCalls: 2,
+      maxTotalTokens: 0,
+    },
+  };
+  const result = resolve(profile);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert(result.issues.some((entry) => entry.path.endsWith("reservedFinalReviewCalls")));
 });
 
 test("Balanced rejects arbitrary window configuration on the profile", () => {

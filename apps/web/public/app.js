@@ -13,9 +13,34 @@ const MODE_COPY = {
   interactive: "主 Agent 保持前台，使用自身原生 subagent 并行协作。",
 };
 
+const BALANCED_MODE = BUILTIN_MODE_CATALOG.modes.find((mode) => mode.kind === "balanced");
+const BALANCED_POLICY = BUILTIN_MODE_CATALOG.tunedWindowPolicies.find(
+  (policy) =>
+    policy.id === BALANCED_MODE?.tunedWindowPolicy.id &&
+    policy.version === BALANCED_MODE?.tunedWindowPolicy.version,
+);
+const BALANCED_BUDGET = BUILTIN_MODE_CATALOG.balancedBudgetPolicies.find(
+  (budget) =>
+    budget.id === BALANCED_MODE?.budgetPolicy.id && budget.version === BALANCED_MODE?.budgetPolicy.version,
+);
+
 const elements = {
   activateButton: document.querySelector("#activate-button"),
   activationNote: document.querySelector("#activation-note"),
+  activationStep: document.querySelector("#activation-step"),
+  balancedActiveWindow: document.querySelector("#balanced-active-window"),
+  balancedAdvisorCalls: document.querySelector("#balanced-advisor-calls"),
+  balancedConfig: document.querySelector("#balanced-config"),
+  balancedContextWindow: document.querySelector("#balanced-context-window"),
+  balancedDownstreamCalls: document.querySelector("#balanced-downstream-calls"),
+  balancedExtensionWindow: document.querySelector("#balanced-extension-window"),
+  balancedHardCap: document.querySelector("#balanced-hard-cap"),
+  balancedMainCalls: document.querySelector("#balanced-main-calls"),
+  balancedPolicyVersion: document.querySelector("#balanced-policy-version"),
+  balancedReservedCalls: document.querySelector("#balanced-reserved-calls"),
+  balancedRunList: document.querySelector("#balanced-run-list"),
+  balancedRuntimeSummary: document.querySelector("#balanced-runtime-summary"),
+  balancedTokenBudget: document.querySelector("#balanced-token-budget"),
   builderAgent: document.querySelector("#builder-agent"),
   builderField: document.querySelector("#builder-field"),
   builderHelp: document.querySelector("#builder-help"),
@@ -119,6 +144,8 @@ let activeView = "configuration";
 let historyData = null;
 let selectedHistoryId = null;
 let historyRequest = 0;
+let balancedRuns = [];
+let balancedRunsAvailable = true;
 let serverStatusLoaded = false;
 let modeSwitchState = { active: null, pending: null, running: false };
 let markServerStatusReady;
@@ -814,6 +841,81 @@ function initializeAgentSelectors() {
   for (const agent of builders) elements.builderAgent.append(option(agent.id, agent.displayName));
 }
 
+function balancedBudgetFromControls() {
+  return {
+    mainReviewCalls: Number(elements.balancedMainCalls.value),
+    downstreamCalls: Number(elements.balancedDownstreamCalls.value),
+    advisorCalls: Number(elements.balancedAdvisorCalls.value),
+    reservedFinalReviewCalls: Number(elements.balancedReservedCalls.value),
+    maxTotalTokens: Number(elements.balancedTokenBudget.value),
+  };
+}
+
+function initializeBalancedControls() {
+  if (!BALANCED_MODE || !BALANCED_POLICY || !BALANCED_BUDGET) return;
+  elements.balancedPolicyVersion.textContent = `${BALANCED_POLICY.id}@${BALANCED_POLICY.version}`;
+  elements.balancedContextWindow.textContent = `${BALANCED_POLICY.contextAcquisitionSeconds}s`;
+  elements.balancedActiveWindow.textContent = `${BALANCED_POLICY.activeWindowSeconds}s`;
+  elements.balancedExtensionWindow.textContent = `${BALANCED_POLICY.progressExtensionSeconds}s`;
+  elements.balancedHardCap.textContent = `${BALANCED_POLICY.hardCapSeconds}s`;
+  elements.balancedMainCalls.value = String(BALANCED_BUDGET.mainReviewCalls);
+  elements.balancedDownstreamCalls.value = String(BALANCED_BUDGET.downstreamCalls);
+  elements.balancedAdvisorCalls.value = String(BALANCED_BUDGET.advisorCalls);
+  elements.balancedReservedCalls.value = String(BALANCED_BUDGET.reservedFinalReviewCalls);
+  elements.balancedTokenBudget.value = String(BALANCED_BUDGET.maxTotalTokens);
+}
+
+function applyBalancedBudgetToControls(budget) {
+  if (!budget || typeof budget !== "object") return;
+  const fields = [
+    ["mainReviewCalls", elements.balancedMainCalls],
+    ["downstreamCalls", elements.balancedDownstreamCalls],
+    ["advisorCalls", elements.balancedAdvisorCalls],
+    ["reservedFinalReviewCalls", elements.balancedReservedCalls],
+    ["maxTotalTokens", elements.balancedTokenBudget],
+  ];
+  for (const [key, input] of fields) {
+    if (Number.isInteger(budget[key]) && budget[key] >= 0) input.value = String(budget[key]);
+  }
+}
+
+function renderBalancedRuns() {
+  elements.balancedRunList.replaceChildren();
+  elements.balancedRuntimeSummary.textContent =
+    !balancedRunsAvailable
+      ? "运行记录不可用"
+      : balancedRuns.length === 0
+        ? "尚无运行记录"
+        : `${balancedRuns.length} 个持久化运行`;
+  for (const run of balancedRuns.slice(0, 3)) {
+    const item = document.createElement("div");
+    item.className = "balanced-run";
+    const id = document.createElement("code");
+    id.textContent = run.taskId ?? run.runId;
+    id.title = run.runId;
+    const state = document.createElement("b");
+    state.textContent = run.state;
+    const budget = document.createElement("small");
+    const used = run.budgetState?.used ?? {};
+    const limits = run.budgetState?.limits ?? {};
+    budget.textContent = `轮次 ${run.rounds ?? 0} · 下游 ${used.downstream ?? 0}/${limits.downstreamCalls ?? 0} · 审阅 ${used.main ?? 0}/${limits.mainReviewCalls ?? 0} · Token ${formatTokens(run.budgetState?.totalTokens ?? 0)}`;
+    item.append(id, state, budget);
+    elements.balancedRunList.append(item);
+  }
+}
+
+async function loadBalancedRuns() {
+  try {
+    const result = await requestJson("/api/balanced/runs");
+    balancedRuns = result.runs ?? [];
+    balancedRunsAvailable = true;
+  } catch {
+    balancedRuns = [];
+    balancedRunsAvailable = false;
+  }
+  renderBalancedRuns();
+}
+
 function renderModeCards() {
   elements.modeGrid.replaceChildren();
   for (const mode of BUILTIN_MODE_CATALOG.modes) {
@@ -888,7 +990,7 @@ function createProfile(modeId = selectedModeId) {
   const mode = BUILTIN_MODE_CATALOG.modes.find((entry) => entry.id === modeId);
   if (!mode) throw new Error("Selected mode disappeared from the catalog.");
   const interactive = mode.kind === "interactive";
-  return {
+  const profile = {
     ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
     id: `${elements.mainAgent.value}-${mode.id}-${interactive ? "native" : elements.builderAgent.value}`,
     displayName: `${elements.mainAgent.selectedOptions[0]?.textContent ?? elements.mainAgent.value} ${mode.displayName}`,
@@ -901,6 +1003,8 @@ function createProfile(modeId = selectedModeId) {
           { role: "reviewer", target: { kind: "main" } },
         ],
   };
+  if (mode.kind === "balanced") profile.balancedBudget = balancedBudgetFromControls();
+  return profile;
 }
 
 function renderTokenChart() {
@@ -1115,11 +1219,14 @@ function renderStoreStatus() {
 
 function refresh() {
   const interactive = selectedModeId === "interactive";
+  const balanced = selectedModeId === "balanced";
   elements.builderAgent.disabled = interactive;
   elements.builderField.classList.toggle("native-mode", interactive);
   elements.builderHelp.textContent = interactive
     ? "Interactive 使用主 Agent 原生 subagent"
     : "接收实现任务的外部 Agent";
+  elements.balancedConfig.hidden = !balanced;
+  elements.activationStep.textContent = balanced ? "04" : "03";
 
   const result = resolveEffectiveSkill({
     profile: createProfile(),
@@ -1196,6 +1303,15 @@ function showToast(message) {
 
 elements.mainAgent.addEventListener("change", refresh);
 elements.builderAgent.addEventListener("change", refresh);
+for (const input of [
+  elements.balancedMainCalls,
+  elements.balancedDownstreamCalls,
+  elements.balancedAdvisorCalls,
+  elements.balancedReservedCalls,
+  elements.balancedTokenBudget,
+]) {
+  input.addEventListener("input", refresh);
+}
 async function requestJson(path, options) {
   const response = await fetch(path, options);
   const body = await response.json();
@@ -1212,12 +1328,12 @@ function modeDisplayName(modeId) {
 function synchronizeControlsWithActiveSkill() {
   const active = serverStatus.active;
   if (!active) {
-    const previewModeId = !serverStatus.writeEnabled
-      ? getInstalledState()[0]?.modeId
-      : null;
+    const preview = !serverStatus.writeEnabled ? getInstalledState()[0] : null;
+    const previewModeId = preview?.modeId;
     if (BUILTIN_MODE_CATALOG.modes.some((mode) => mode.id === previewModeId)) {
       selectedModeId = previewModeId;
     }
+    applyBalancedBudgetToControls(preview?.balancedBudget);
     return;
   }
   if (BUILTIN_MODE_CATALOG.modes.some((mode) => mode.id === active.mode?.id)) {
@@ -1235,6 +1351,7 @@ function synchronizeControlsWithActiveSkill() {
       [...elements.builderAgent.options].some((option) => option.value === agentId),
   );
   if (builderId) elements.builderAgent.value = builderId;
+  applyBalancedBudgetToControls(active.balancedBudget);
 }
 
 function savePreviewSelection(modeId) {
@@ -1251,6 +1368,7 @@ function savePreviewSelection(modeId) {
       modeId,
       relativeSkillPath: resolution.value.relativeSkillPath,
       contentFingerprint: resolution.value.contentFingerprint,
+      balancedBudget: resolution.value.balancedBudget ?? null,
     }),
   );
 }
@@ -1518,10 +1636,15 @@ document.addEventListener("visibilitychange", () => {
 });
 
 initializeAgentSelectors();
+initializeBalancedControls();
 renderModeCards();
 refresh();
 loadServerStatus();
 loadHistory();
+loadBalancedRuns();
 window.setInterval(() => {
   if (!document.hidden && activeView === "usage") loadRuntimeUsage();
+  if (!document.hidden && activeView === "configuration" && selectedModeId === "balanced") {
+    loadBalancedRuns();
+  }
 }, 5000);

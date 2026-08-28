@@ -27,7 +27,8 @@ template into Codex.
 
 ## Product invariants
 
-1. The product is a configuration switcher, not an agent runtime or workflow
+1. The product is primarily a configuration switcher. Balanced may invoke one
+   on-demand, bounded local Runner; it is never an always-running workflow
    daemon.
 2. Overnight, Balanced, and Interactive are versioned product-owned mode
    templates. The product compiles them into agent-specific Skills,
@@ -48,6 +49,9 @@ template into Codex.
    product may reference a provider profile but does not copy raw secrets.
 10. Removing the application must not leave Codex, Claude Code, or another agent
    unusable; the last known-good configuration remains recoverable.
+11. Balanced timing and budgets are enforced by tools, not natural-language
+    claims. Product-content hashes are the only window-refresh authority.
+12. A downstream exit never authorizes semantic acceptance or merge.
 
 ## Configuration model
 
@@ -77,7 +81,9 @@ template into Codex.
   bounded revisions until accepted or genuinely blocked.
 - **Balanced:** the product selects a versioned, previously tuned window policy;
   downstream work runs for the policy's current window and returns to the main
-  agent for review after every round. It is not one user-entered fixed window.
+  agent for review after every round. An on-demand Runner enforces context,
+  active, extension, idle, tail, and hard-cap boundaries plus call/Token budget.
+  It is not one user-entered fixed window.
 - **Interactive:** the main agent remains foreground owner and collaborates with
   its native subagents. It requires native-subagent capability and does not
   imply external Claude delegation.
@@ -118,7 +124,8 @@ total number of modes and supported agents in the product catalog.
 
 ## Explicit non-goals
 
-- Running or supervising Codex, Claude Code, or model processes.
-- Owning task histories, worktrees, agent messages, or execution leases.
+- Running or supervising the main Codex process or Interactive native
+  subagents. Balanced owns only the downstream child it explicitly launches.
+- Owning general chat histories or arbitrary worktrees outside a Balanced run.
 - Acting as a model gateway or storing API credentials.
 - Keeping a second always-running orchestrator after profile activation.

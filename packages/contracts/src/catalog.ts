@@ -1,6 +1,7 @@
 import type {
   ModeSkillCatalog,
   ModeSkillTemplate,
+  BalancedBudgetPolicy,
   TunedWindowPolicy,
 } from "./types.js";
 
@@ -20,8 +21,29 @@ const BALANCED_POLICY: TunedWindowPolicy = {
   version: "1.0.0",
   contextAcquisitionSeconds: 600,
   activeWindowSeconds: 600,
+  firstProgressSeconds: 600,
   progressExtensionSeconds: 300,
+  growingProgressExtensionSeconds: 300,
   hardCapSeconds: 1500,
+  noOutputSeconds: 0,
+  productIdleSeconds: 600,
+  productIdleConfirmations: 2,
+  completionGraceSeconds: 20,
+  tailSeconds: 90,
+  advisorLeadSeconds: 60,
+  advisorCallTimeoutSeconds: 90,
+  pollSeconds: 5,
+};
+
+const BALANCED_BUDGET: BalancedBudgetPolicy = {
+  schemaVersion: 1,
+  id: "balanced-standard",
+  version: "1.0.0",
+  mainReviewCalls: 3,
+  downstreamCalls: 3,
+  advisorCalls: 2,
+  reservedFinalReviewCalls: 1,
+  maxTotalTokens: 5_000_000,
 };
 
 const MODES: readonly ModeSkillTemplate[] = [
@@ -47,6 +69,7 @@ const MODES: readonly ModeSkillTemplate[] = [
     requiredMainCapabilities: ["external-delegation", "semantic-review"],
     builderCapabilities: ["bounded-execution"],
     tunedWindowPolicy: { id: BALANCED_POLICY.id, version: BALANCED_POLICY.version },
+    budgetPolicy: { id: BALANCED_BUDGET.id, version: BALANCED_BUDGET.version },
     reviewPolicy: "review-after-each-round",
   },
   {
@@ -66,4 +89,5 @@ export const BUILTIN_MODE_CATALOG: ModeSkillCatalog = deepFreeze({
   schemaVersion: 1,
   modes: MODES,
   tunedWindowPolicies: [BALANCED_POLICY],
+  balancedBudgetPolicies: [BALANCED_BUDGET],
 });

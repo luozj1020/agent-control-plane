@@ -48,6 +48,9 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /id="runtime-lane-filter"/);
     assert.match(html, /id="runtime-model-filter"/);
     assert.match(html, /按模型计算消耗/);
+    assert.match(html, /id="balanced-config"/);
+    assert.match(html, /Balanced 运行控制/);
+    assert.match(html, /id="balanced-token-budget"/);
     assert.match(html, /USAGE · ESTIMATED CONTEXT/);
     assert.match(html, /ACTIVATION AUDIT LOG/);
     assert.match(html, /激活记录/);
@@ -112,6 +115,38 @@ test("serves sanitized runtime usage for the requested range", async () => {
       ]);
     },
     { usageMonitor },
+  );
+});
+
+test("serves Balanced policy and persisted run status", async () => {
+  const balancedRuntime = {
+    async listRuns() {
+      return [
+        {
+          runId: "run-test",
+          taskId: "task-test",
+          state: "review_pending",
+          rounds: 1,
+          budgetState: { used: { downstream: 1 }, totalTokens: 42 },
+        },
+      ];
+    },
+  };
+  await withServer(
+    async (baseUrl) => {
+      const config = await fetch(`${baseUrl}/api/balanced/config`);
+      assert.equal(config.status, 200);
+      const configBody = await config.json();
+      assert.equal(configBody.policy.id, "balanced-default");
+      assert.equal(configBody.policy.contextAcquisitionSeconds, 600);
+      assert.equal(configBody.budget.downstreamCalls, 3);
+      assert.deepEqual(configBody.adapters, [{ id: "claude-code", displayName: "Claude Code" }]);
+
+      const runs = await fetch(`${baseUrl}/api/balanced/runs`);
+      assert.equal(runs.status, 200);
+      assert.equal((await runs.json()).runs[0].state, "review_pending");
+    },
+    { balancedRuntime },
   );
 });
 

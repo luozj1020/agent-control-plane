@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 
 const scripts = [
   new URL("../server.mjs", import.meta.url),
+  new URL("../balanced-runtime.mjs", import.meta.url),
+  new URL("../balanced-cli.mjs", import.meta.url),
+  new URL("../agent-adapters.mjs", import.meta.url),
   new URL("../skill-store.mjs", import.meta.url),
   new URL("../usage-monitor.mjs", import.meta.url),
   new URL("../cc-switch-usage-source.mjs", import.meta.url),

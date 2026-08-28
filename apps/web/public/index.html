@@ -102,10 +102,56 @@
               </div>
             </section>
 
-            <section class="panel activation-panel">
+            <section class="panel balanced-config" id="balanced-config" hidden>
               <div class="panel-heading">
                 <div>
                   <span class="step">03</span>
+                  <h2>Balanced 运行控制</h2>
+                </div>
+                <span class="compatibility" id="balanced-policy-version">balanced-default@1.0.0</span>
+              </div>
+              <p class="balanced-description">时间窗口由版本化策略固定；预算写入精简 Skill，并由外部 Runner 强制执行。</p>
+              <div class="balanced-window-grid">
+                <div><span>Context</span><strong id="balanced-context-window">—</strong></div>
+                <div><span>Active</span><strong id="balanced-active-window">—</strong></div>
+                <div><span>Extension</span><strong id="balanced-extension-window">—</strong></div>
+                <div><span>Hard cap</span><strong id="balanced-hard-cap">—</strong></div>
+              </div>
+              <div class="balanced-budget-grid">
+                <label class="field">
+                  <span>主 Agent 审阅调用</span>
+                  <input id="balanced-main-calls" type="number" min="1" max="99" step="1">
+                </label>
+                <label class="field">
+                  <span>下游轮次调用</span>
+                  <input id="balanced-downstream-calls" type="number" min="1" max="99" step="1">
+                </label>
+                <label class="field">
+                  <span>Advisor 调用</span>
+                  <input id="balanced-advisor-calls" type="number" min="0" max="99" step="1">
+                </label>
+                <label class="field">
+                  <span>预留最终审阅</span>
+                  <input id="balanced-reserved-calls" type="number" min="0" max="99" step="1">
+                </label>
+                <label class="field">
+                  <span>总 Token 上限</span>
+                  <input id="balanced-token-budget" type="number" min="0" step="1000">
+                </label>
+              </div>
+              <div class="balanced-runtime-status">
+                <div>
+                  <strong>最近运行</strong>
+                  <span id="balanced-runtime-summary">尚无运行记录</span>
+                </div>
+                <div class="balanced-run-list" id="balanced-run-list"></div>
+              </div>
+            </section>
+
+            <section class="panel activation-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="step" id="activation-step">03</span>
                   <h2>激活预览</h2>
                 </div>
                 <span class="compatibility" id="compatibility-badge">正在校验</span>

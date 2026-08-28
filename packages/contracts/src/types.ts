@@ -47,6 +47,7 @@ export interface WorkflowProfile {
   readonly mode: VersionedRef;
   readonly targetAdapterId: string;
   readonly roleBindings: readonly RoleBinding[];
+  readonly balancedBudget?: BalancedBudgetOverride;
 }
 
 export interface TunedWindowPolicy {
@@ -55,8 +56,37 @@ export interface TunedWindowPolicy {
   readonly version: string;
   readonly contextAcquisitionSeconds: number;
   readonly activeWindowSeconds: number;
+  readonly firstProgressSeconds: number;
   readonly progressExtensionSeconds: number;
+  readonly growingProgressExtensionSeconds: number;
   readonly hardCapSeconds: number;
+  readonly noOutputSeconds: number;
+  readonly productIdleSeconds: number;
+  readonly productIdleConfirmations: number;
+  readonly completionGraceSeconds: number;
+  readonly tailSeconds: number;
+  readonly advisorLeadSeconds: number;
+  readonly advisorCallTimeoutSeconds: number;
+  readonly pollSeconds: number;
+}
+
+export interface BalancedBudgetPolicy {
+  readonly schemaVersion: typeof SCHEMA_VERSION;
+  readonly id: string;
+  readonly version: string;
+  readonly mainReviewCalls: number;
+  readonly downstreamCalls: number;
+  readonly advisorCalls: number;
+  readonly reservedFinalReviewCalls: number;
+  readonly maxTotalTokens: number;
+}
+
+export interface BalancedBudgetOverride {
+  readonly mainReviewCalls: number;
+  readonly downstreamCalls: number;
+  readonly advisorCalls: number;
+  readonly reservedFinalReviewCalls: number;
+  readonly maxTotalTokens: number;
 }
 
 interface ModeSkillTemplateBase {
@@ -79,6 +109,7 @@ export interface BalancedSkillTemplate extends ModeSkillTemplateBase {
   readonly kind: "balanced";
   readonly builderCapabilities: readonly AgentCapability[];
   readonly tunedWindowPolicy: VersionedRef;
+  readonly budgetPolicy: VersionedRef;
   readonly reviewPolicy: "review-after-each-round";
 }
 
@@ -97,6 +128,7 @@ export interface ModeSkillCatalog {
   readonly schemaVersion: typeof SCHEMA_VERSION;
   readonly modes: readonly ModeSkillTemplate[];
   readonly tunedWindowPolicies: readonly TunedWindowPolicy[];
+  readonly balancedBudgetPolicies: readonly BalancedBudgetPolicy[];
 }
 
 export interface SecretReference {
@@ -122,6 +154,7 @@ export interface EffectiveSkillVariant {
   readonly content: string;
   readonly contentFingerprint: string;
   readonly estimatedTokens: number;
+  readonly balancedBudget?: BalancedBudgetOverride;
 }
 
 export interface ManagedSkillState {
@@ -157,6 +190,7 @@ export type ValidationIssueCode =
   | "activation.duplicate_variant"
   | "activation.path_unsafe"
   | "mode.incompatible_role"
+  | "mode.policy_invalid"
   | "mode.policy_unknown"
   | "mode.unknown"
   | "profile.duplicate_role"

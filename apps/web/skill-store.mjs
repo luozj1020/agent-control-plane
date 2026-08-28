@@ -53,6 +53,23 @@ function sha256(content) {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
+function validBalancedBudget(value) {
+  if (value === undefined || value === null) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const minimums = {
+    mainReviewCalls: 1,
+    downstreamCalls: 1,
+    advisorCalls: 0,
+    reservedFinalReviewCalls: 0,
+    maxTotalTokens: 0,
+  };
+  return (
+    Object.entries(minimums).every(
+      ([key, minimum]) => Number.isSafeInteger(value[key]) && value[key] >= minimum,
+    ) && value.reservedFinalReviewCalls <= value.mainReviewCalls
+  );
+}
+
 function assertVariant(variant) {
   if (
     !variant ||
@@ -61,6 +78,7 @@ function assertVariant(variant) {
     variant.content.length === 0 ||
     variant.content.length > 128 * 1024 ||
     typeof variant.contentFingerprint !== "string" ||
+    !validBalancedBudget(variant.balancedBudget) ||
     !Array.isArray(variant.includedModeIds) ||
     variant.includedModeIds.length !== 1
   ) {
@@ -105,6 +123,7 @@ function manifestFor(variant, now, restoredFrom) {
     mainAgentId: variant.mainAgentId,
     targetAdapterId: variant.targetAdapterId,
     includedAgentIds: variant.includedAgentIds,
+    balancedBudget: variant.balancedBudget ?? null,
     contentFingerprint: variant.contentFingerprint,
     contentSha256: sha256(variant.content),
     activatedAt: now,
@@ -368,6 +387,7 @@ export function createSkillStore(options = {}) {
       includedAgentIds: Array.isArray(variant.includedAgentIds)
         ? variant.includedAgentIds
         : [],
+      balancedBudget: variant.balancedBudget ?? null,
       contentFingerprint: variant.contentFingerprint,
       contentSha256: sha256(variant.content),
       previous: details.previous
@@ -561,6 +581,7 @@ export function createSkillStore(options = {}) {
           mainAgentId: manifest.mainAgentId,
           targetAdapterId: manifest.targetAdapterId ?? null,
           includedAgentIds: manifest.includedAgentIds ?? [],
+          balancedBudget: manifest.balancedBudget ?? null,
           contentFingerprint: manifest.contentFingerprint,
           activatedAt: manifest.activatedAt,
         }
@@ -610,6 +631,11 @@ export function createSkillStore(options = {}) {
       ["profileId", active?.profileId ?? null, snapshot.metadata.profileId],
       ["mainAgentId", active?.mainAgentId ?? null, snapshot.metadata.mainAgentId],
       ["targetAdapterId", active?.targetAdapterId ?? null, snapshot.metadata.targetAdapterId],
+      [
+        "balancedBudget",
+        JSON.stringify(active?.balancedBudget ?? null),
+        JSON.stringify(snapshot.metadata.balancedBudget ?? null),
+      ],
     ];
     return {
       entry: publicHistoryEntry(snapshot.metadata, active, state?.historyId),
@@ -649,6 +675,7 @@ export function createSkillStore(options = {}) {
               mainAgentId: manifest.mainAgentId,
               targetAdapterId: manifest.targetAdapterId ?? null,
               includedAgentIds: manifest.includedAgentIds ?? [],
+              balancedBudget: manifest.balancedBudget ?? null,
             }
           : null,
         backups: await listBackups(),
@@ -748,6 +775,7 @@ export function createSkillStore(options = {}) {
         mainAgentId: backupManifest.mainAgentId,
         targetAdapterId: backupManifest.targetAdapterId,
         includedAgentIds: backupManifest.includedAgentIds ?? [],
+        balancedBudget: backupManifest.balancedBudget ?? undefined,
         contentFingerprint: backupManifest.contentFingerprint,
         includedModeIds: [backupManifest.mode.id],
         content,
@@ -815,6 +843,7 @@ export function createSkillStore(options = {}) {
         mainAgentId: snapshot.metadata.mainAgentId,
         targetAdapterId: snapshot.metadata.targetAdapterId ?? undefined,
         includedAgentIds: snapshot.metadata.includedAgentIds,
+        balancedBudget: snapshot.metadata.balancedBudget ?? undefined,
         contentFingerprint: snapshot.metadata.contentFingerprint,
         includedModeIds: [snapshot.metadata.mode.id],
         content: snapshot.content,

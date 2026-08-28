@@ -30,7 +30,7 @@ function testStore(skillsDir) {
   });
 }
 
-function resolveMode(modeId) {
+function resolveMode(modeId, balancedBudget) {
   const mode = BUILTIN_MODE_CATALOG.modes.find((entry) => entry.id === modeId);
   assert(mode);
   const interactive = modeId === "interactive";
@@ -41,6 +41,7 @@ function resolveMode(modeId) {
     roleBindings: interactive
       ? [{ role: "subagent", target: { kind: "main-native" } }]
       : CODEX_OVERNIGHT_CLAUDE_PROFILE.roleBindings,
+    ...(balancedBudget ? { balancedBudget } : {}),
   };
   const result = resolveEffectiveSkill({
     profile,
@@ -123,6 +124,30 @@ test("switching creates a recoverable backup and rollback preserves both version
       overnight.content,
     );
     assert(restored.status.backups.some((entry) => entry.variantId === balanced.id));
+  });
+});
+
+test("Balanced budget survives status, backup, and rollback", async () => {
+  await withTempDirectory(async (skillsDir) => {
+    const store = testStore(skillsDir);
+    const budget = {
+      mainReviewCalls: 4,
+      downstreamCalls: 5,
+      advisorCalls: 2,
+      reservedFinalReviewCalls: 1,
+      maxTotalTokens: 9000000,
+    };
+    const balanced = resolveMode("balanced", budget);
+    const activated = await store.activate(balanced);
+    assert.deepEqual(activated.status.active.balancedBudget, budget);
+
+    const switched = await store.activate(resolveMode("overnight"));
+    const balancedBackup = switched.status.backups.find(
+      (entry) => entry.variantId === balanced.id,
+    );
+    assert(balancedBackup);
+    const restored = await store.rollback(balancedBackup.backupId);
+    assert.deepEqual(restored.status.active.balancedBudget, budget);
   });
 });
 

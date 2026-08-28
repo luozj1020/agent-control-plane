@@ -19,6 +19,15 @@ const PROFILE_KEYS = new Set([
   "mode",
   "targetAdapterId",
   "roleBindings",
+  "balancedBudget",
+]);
+
+const BALANCED_BUDGET_KEYS = new Set([
+  "mainReviewCalls",
+  "downstreamCalls",
+  "advisorCalls",
+  "reservedFinalReviewCalls",
+  "maxTotalTokens",
 ]);
 
 const AGENT_KINDS = new Set(["codex", "claude-code", "custom"]);
@@ -167,6 +176,51 @@ function validateModeRoles(
   }
 }
 
+function validateBalancedBudget(value: unknown, issues: ValidationIssue[]): void {
+  if (!isRecord(value)) {
+    issues.push(issue("profile.invalid", "/profile/balancedBudget", "Balanced budget must be an object."));
+    return;
+  }
+  for (const key of Object.keys(value)) {
+    if (!BALANCED_BUDGET_KEYS.has(key)) {
+      issues.push(
+        issue(
+          "profile.unknown_field",
+          `/profile/balancedBudget/${key}`,
+          `Unknown Balanced budget field '${key}'.`,
+        ),
+      );
+    }
+  }
+  const integer = (key: string, minimum: number) =>
+    Number.isSafeInteger(value[key]) && Number(value[key]) >= minimum;
+  if (
+    !integer("mainReviewCalls", 1) ||
+    !integer("downstreamCalls", 1) ||
+    !integer("advisorCalls", 0) ||
+    !integer("reservedFinalReviewCalls", 0) ||
+    !integer("maxTotalTokens", 0)
+  ) {
+    issues.push(
+      issue(
+        "profile.invalid",
+        "/profile/balancedBudget",
+        "Balanced budget values must be non-negative integers with at least one main review and downstream call.",
+      ),
+    );
+    return;
+  }
+  if (Number(value.reservedFinalReviewCalls) > Number(value.mainReviewCalls)) {
+    issues.push(
+      issue(
+        "profile.invalid",
+        "/profile/balancedBudget/reservedFinalReviewCalls",
+        "Reserved final-review calls cannot exceed the main-review budget.",
+      ),
+    );
+  }
+}
+
 export function validateSkillResolutionInput(input: unknown): readonly ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   findRawSecrets(input, "", issues);
@@ -310,7 +364,8 @@ export function validateSkillResolutionInput(input: unknown): readonly Validatio
   if (
     !isRecord(rawCatalog) ||
     !Array.isArray(rawCatalog.modes) ||
-    !Array.isArray(rawCatalog.tunedWindowPolicies)
+    !Array.isArray(rawCatalog.tunedWindowPolicies) ||
+    !Array.isArray(rawCatalog.balancedBudgetPolicies)
   ) {
     issues.push(issue("profile.invalid", "/catalog", "Mode catalog is invalid."));
     return issues;
@@ -337,12 +392,12 @@ export function validateSkillResolutionInput(input: unknown): readonly Validatio
     return issues;
   }
   if (mode.kind === "balanced") {
-    const policyExists = catalog.tunedWindowPolicies.some(
+    const policy = catalog.tunedWindowPolicies.find(
       (policy) =>
         policy.id === mode.tunedWindowPolicy.id &&
         policy.version === mode.tunedWindowPolicy.version,
     );
-    if (!policyExists) {
+    if (!policy) {
       issues.push(
         issue(
           "mode.policy_unknown",
@@ -350,7 +405,82 @@ export function validateSkillResolutionInput(input: unknown): readonly Validatio
           `Balanced policy '${mode.tunedWindowPolicy.id}@${mode.tunedWindowPolicy.version}' is missing.`,
         ),
       );
+    } else {
+      const positiveFields = [
+        "contextAcquisitionSeconds",
+        "activeWindowSeconds",
+        "firstProgressSeconds",
+        "progressExtensionSeconds",
+        "growingProgressExtensionSeconds",
+        "hardCapSeconds",
+        "productIdleSeconds",
+        "completionGraceSeconds",
+        "tailSeconds",
+        "advisorLeadSeconds",
+        "advisorCallTimeoutSeconds",
+        "pollSeconds",
+      ] as const;
+      if (
+        positiveFields.some((key) => !Number.isFinite(policy[key]) || policy[key] <= 0) ||
+        !Number.isFinite(policy.noOutputSeconds) ||
+        policy.noOutputSeconds < 0 ||
+        !Number.isSafeInteger(policy.productIdleConfirmations) ||
+        policy.productIdleConfirmations < 1 ||
+        policy.hardCapSeconds < policy.contextAcquisitionSeconds
+      ) {
+        issues.push(
+          issue(
+            "mode.policy_invalid",
+            "/catalog/tunedWindowPolicies",
+            `Balanced policy '${mode.tunedWindowPolicy.id}@${mode.tunedWindowPolicy.version}' is invalid.`,
+          ),
+        );
+      }
     }
+    const budgetPolicy = catalog.balancedBudgetPolicies.find(
+      (policy) =>
+        policy.id === mode.budgetPolicy.id && policy.version === mode.budgetPolicy.version,
+    );
+    if (!budgetPolicy) {
+      issues.push(
+        issue(
+          "mode.policy_unknown",
+          "/catalog/balancedBudgetPolicies",
+          `Balanced budget policy '${mode.budgetPolicy.id}@${mode.budgetPolicy.version}' is missing.`,
+        ),
+      );
+    } else if (
+      !Number.isSafeInteger(budgetPolicy.mainReviewCalls) ||
+      budgetPolicy.mainReviewCalls < 1 ||
+      !Number.isSafeInteger(budgetPolicy.downstreamCalls) ||
+      budgetPolicy.downstreamCalls < 1 ||
+      !Number.isSafeInteger(budgetPolicy.advisorCalls) ||
+      budgetPolicy.advisorCalls < 0 ||
+      !Number.isSafeInteger(budgetPolicy.reservedFinalReviewCalls) ||
+      budgetPolicy.reservedFinalReviewCalls < 0 ||
+      budgetPolicy.reservedFinalReviewCalls > budgetPolicy.mainReviewCalls ||
+      !Number.isSafeInteger(budgetPolicy.maxTotalTokens) ||
+      budgetPolicy.maxTotalTokens < 0
+    ) {
+      issues.push(
+        issue(
+          "mode.policy_invalid",
+          "/catalog/balancedBudgetPolicies",
+          `Balanced budget policy '${mode.budgetPolicy.id}@${mode.budgetPolicy.version}' is invalid.`,
+        ),
+      );
+    }
+    if (profile.balancedBudget !== undefined) {
+      validateBalancedBudget(profile.balancedBudget, issues);
+    }
+  } else if (profile.balancedBudget !== undefined) {
+    issues.push(
+      issue(
+        "mode.incompatible_role",
+        "/profile/balancedBudget",
+        "Balanced budget configuration is valid only in Balanced mode.",
+      ),
+    );
   }
 
   validateModeRoles(mode, profile, agentsById, issues);

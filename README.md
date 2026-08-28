@@ -35,8 +35,10 @@ not asking a large Skill to route among three embedded modes.
 ## Product boundary
 
 The application manages external configuration and owns the versioned workflow
-templates that it projects into coding agents. It does not become an agent
-runtime or supervise model processes.
+templates that it projects into coding agents. Balanced additionally uses an
+on-demand local Runner invoked by the active main agent. It is not a daemon:
+the Runner exists only for one bounded downstream round and owns that child
+process, its timers, budget ledger, evidence, and termination.
 
 It owns:
 
@@ -49,14 +51,21 @@ It owns:
 - managed AGENTS.md/CLAUDE.md/config projections;
 - compatibility checks, activation previews, atomic writes, and backups;
 - import, export, health status, and one-click switching.
+- a versioned Balanced timing policy and configurable call/Token budget;
+- an on-demand Balanced Runner with pluggable downstream adapters;
+- hash-bound round evidence, Revision Delta continuation, and budget receipts.
 
 The selected main agent, following the activated instructions, owns:
 
 - task planning and intent freeze;
 - native or external subagent coordination;
-- downstream agent invocation;
-- execution state, recovery, evidence, and review;
+- starting the Balanced Runner when the active Skill requires it;
 - completion and revision decisions.
+
+For Balanced, the Runner owns downstream invocation, execution windows,
+process-group termination, session continuation, scope enforcement, validation
+evidence, and call/Token budget enforcement. The main agent retains semantic
+acceptance and never gains merge authority from a successful child exit.
 
 ## Example
 
@@ -72,7 +81,8 @@ Target           selected repository
 ```
 
 After activation, the user starts `codex` as usual. No separate orchestration
-daemon is required.
+daemon is required; Balanced starts its foreground Runner only when a task is
+delegated.
 
 ## Status
 
@@ -82,11 +92,12 @@ target-file projections.
 
 ## Run the local preview
 
-Node.js 24 and a global TypeScript compiler are currently required. No package
-installation is needed for this dependency-free milestone.
+Node.js 24 and a global TypeScript compiler are currently required. Link the
+local CLI once so an activated Skill can invoke it from any repository:
 
 ```bash
 npm run build
+npm link
 npm run dev
 ```
 
@@ -96,6 +107,65 @@ compares the generated token footprint of all three mode Skills, and exports the
 selected one. A separate Usage page presents actual local-agent token usage and
 model-call counts in an API-console style dashboard with 1 hour, 24 hour,
 7 day, and 30 day ranges. Filesystem activation is disabled by default.
+
+## Balanced Runner
+
+Balanced uses the versioned `balanced-default@1.0.0` policy. Its defaults are a
+600-second context window, 600-second active window, 300-second progress and
+growth extensions, and an absolute 1500-second hard cap. Product-content
+changes refresh the active window; assistant text, Token use, and control-file
+activity do not. The UI exposes call and Token budgets but does not allow an
+ad-hoc replacement for the tuned timing policy.
+
+The activated Skill freezes a Task JSON and invokes:
+
+```bash
+agent-control-plane balanced run \
+  --task TASK.json \
+  --worktree /absolute/repository/path \
+  --adapter claude-code \
+  --policy balanced-default@1.0.0
+```
+
+Task JSON is deliberately small and shell-free:
+
+```json
+{
+  "id": "task-id",
+  "objective": "Implement the requested bounded change",
+  "acceptance": ["Exact externally observable result"],
+  "allowedPaths": ["src/**", "test/**"],
+  "forbiddenPaths": [".env", "secrets/**"],
+  "validationCommands": [["npm", "test"]],
+  "allowNoChanges": false
+}
+```
+
+Every round is persisted under
+`~/.agent-control-plane/balanced-runs/<run-id>/`. The Runner records the frozen
+contract hash, full product-content baseline/final digests, changed paths,
+validation exit codes, normalized downstream usage, an append-only call budget
+ledger, and `balanced-review.json`. Review is explicit and hash-bound:
+
+```bash
+agent-control-plane balanced review --run RUN_DIR --decision accept
+agent-control-plane balanced review --run RUN_DIR --decision stop
+agent-control-plane balanced review --run RUN_DIR --decision revise --revision REVISION.json
+```
+
+Revision consumes a main-review call and a new downstream round while
+preserving the protected final-review slot. It reuses the prior downstream
+session when the adapter supports it and refuses a stale worktree or exhausted
+budget. Failed validation or scope cannot be accepted. Token exhaustion permits
+only the reserved final stop decision.
+
+Runtime location and the Claude executable remain external configuration; no
+credentials are copied:
+
+```bash
+AGENT_CONTROL_BALANCED_RUNS_DIR=/absolute/runtime/root agent-control-plane balanced list
+AGENT_CONTROL_CLAUDE_COMMAND=/absolute/path/to/claude agent-control-plane balanced run ...
+```
 
 Runtime usage is read locally from Codex session `token_count` events. The
 collector incrementally reads only appended JSONL bytes and retains only event
