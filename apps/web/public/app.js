@@ -29,6 +29,24 @@ const elements = {
   operationList: document.querySelector("#operation-list"),
   restartBadge: document.querySelector("#restart-badge"),
   rollbackButton: document.querySelector("#rollback-button"),
+  runtimeCacheRate: document.querySelector("#runtime-cache-rate"),
+  runtimeCached: document.querySelector("#runtime-cached"),
+  runtimeChart: document.querySelector("#runtime-chart"),
+  runtimeDiagnostics: document.querySelector("#runtime-diagnostics"),
+  runtimeEmpty: document.querySelector("#runtime-empty"),
+  runtimeInput: document.querySelector("#runtime-input"),
+  runtimeLive: document.querySelector("#runtime-live"),
+  runtimeLiveText: document.querySelector("#runtime-live-text"),
+  runtimeModels: document.querySelector("#runtime-models"),
+  runtimeOutput: document.querySelector("#runtime-output"),
+  runtimeRange: document.querySelector("#runtime-range"),
+  runtimeReasoning: document.querySelector("#runtime-reasoning"),
+  runtimeRequests: document.querySelector("#runtime-requests"),
+  runtimeSessions: document.querySelector("#runtime-sessions"),
+  runtimeTotal: document.querySelector("#runtime-total"),
+  runtimeUncached: document.querySelector("#runtime-uncached"),
+  runtimeUpdated: document.querySelector("#runtime-updated"),
+  runtimeWindow: document.querySelector("#runtime-window"),
   skillPath: document.querySelector("#skill-path"),
   skillPreview: document.querySelector("#skill-preview"),
   storeStatusDetail: document.querySelector("#store-status-detail"),
@@ -49,6 +67,213 @@ let serverStatus = {
   backups: [],
 };
 let toastTimer;
+let runtimeRange = "24h";
+let usageLoading = false;
+let usageRefreshQueued = false;
+
+const RANGE_LABELS = Object.freeze({
+  "1h": "最近 1 小时",
+  "24h": "最近 24 小时",
+  "7d": "最近 7 天",
+  "30d": "最近 30 天",
+});
+
+const compactNumber = new Intl.NumberFormat("zh-CN", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+const exactNumber = new Intl.NumberFormat("zh-CN");
+
+function formatTokens(value) {
+  return Number.isFinite(value) ? compactNumber.format(value) : "—";
+}
+
+function formatAxis(value) {
+  if (value === 0) return "0";
+  return compactNumber.format(value);
+}
+
+function niceMaximum(value) {
+  if (!Number.isFinite(value) || value <= 0) return 1;
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  const normalized = value / magnitude;
+  const ceiling = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return ceiling * magnitude;
+}
+
+function formatBucketLabel(timestamp, range) {
+  const date = new Date(timestamp);
+  if (range === "1h" || range === "24h") {
+    return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  }
+  return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+}
+
+function svgNode(name, attributes = {}) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
+  return node;
+}
+
+function setRuntimeMetrics(totals = {}) {
+  elements.runtimeTotal.textContent = formatTokens(totals.totalTokens);
+  elements.runtimeTotal.title = exactNumber.format(totals.totalTokens ?? 0);
+  elements.runtimeInput.textContent = formatTokens(totals.inputTokens);
+  elements.runtimeCached.textContent = formatTokens(totals.cachedInputTokens);
+  elements.runtimeOutput.textContent = formatTokens(totals.outputTokens);
+  elements.runtimeRequests.textContent = formatTokens(totals.requests);
+  elements.runtimeUncached.textContent = `未缓存 ${formatTokens(totals.uncachedInputTokens)}`;
+  elements.runtimeCacheRate.textContent = `缓存率 ${((totals.cacheRate ?? 0) * 100).toFixed(1)}%`;
+  elements.runtimeReasoning.textContent = `含 reasoning ${formatTokens(totals.reasoningOutputTokens)}`;
+  elements.runtimeSessions.textContent = `会话 ${formatTokens(totals.sessions)}`;
+  elements.runtimeWindow.textContent = RANGE_LABELS[runtimeRange];
+}
+
+function renderRuntimeChart(usage) {
+  elements.runtimeChart.replaceChildren();
+  const buckets = usage.buckets ?? [];
+  const hasUsage = buckets.some((bucket) => bucket.totalTokens > 0);
+  elements.runtimeEmpty.hidden = hasUsage;
+  if (!hasUsage) {
+    elements.runtimeEmpty.textContent = "所选时间范围内暂无 token 用量";
+    return;
+  }
+
+  const width = 1120;
+  const height = 270;
+  const margin = { top: 16, right: 16, bottom: 38, left: 54 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const maximum = niceMaximum(Math.max(...buckets.map((bucket) => bucket.totalTokens)));
+  const svg = svgNode("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    role: "img",
+    "aria-label": `${RANGE_LABELS[runtimeRange]} Codex token 用量时序图`,
+  });
+
+  for (let tick = 0; tick <= 4; tick += 1) {
+    const ratio = tick / 4;
+    const y = margin.top + plotHeight - ratio * plotHeight;
+    svg.append(
+      svgNode("line", {
+        class: "runtime-grid-line",
+        x1: margin.left,
+        x2: width - margin.right,
+        y1: y,
+        y2: y,
+      }),
+    );
+    const label = svgNode("text", {
+      class: "runtime-axis-label",
+      x: margin.left - 10,
+      y: y + 3,
+      "text-anchor": "end",
+    });
+    label.textContent = formatAxis((maximum * tick) / 4);
+    svg.append(label);
+  }
+
+  const slotWidth = plotWidth / buckets.length;
+  const barWidth = Math.max(3, Math.min(22, slotWidth * 0.66));
+  const labelEvery = Math.max(1, Math.ceil(buckets.length / 6));
+  buckets.forEach((bucket, index) => {
+    const x = margin.left + index * slotWidth + (slotWidth - barWidth) / 2;
+    let baseline = margin.top + plotHeight;
+    const segments = [
+      ["uncached", bucket.uncachedInputTokens ?? 0],
+      ["cached", bucket.cachedInputTokens ?? 0],
+      ["output", bucket.outputTokens ?? 0],
+    ];
+    const group = svgNode("g", { class: "runtime-bar-group" });
+    for (const [kind, value] of segments) {
+      const segmentHeight = (value / maximum) * plotHeight;
+      baseline -= segmentHeight;
+      group.append(
+        svgNode("rect", {
+          class: `runtime-bar ${kind}`,
+          x,
+          y: baseline,
+          width: barWidth,
+          height: Math.max(0, segmentHeight),
+        }),
+      );
+    }
+    const title = svgNode("title");
+    title.textContent = `${formatBucketLabel(bucket.start, runtimeRange)} · 总计 ${exactNumber.format(bucket.totalTokens)} · 未缓存输入 ${exactNumber.format(bucket.uncachedInputTokens)} · 缓存输入 ${exactNumber.format(bucket.cachedInputTokens)} · 输出 ${exactNumber.format(bucket.outputTokens)}`;
+    group.append(title);
+    svg.append(group);
+
+    if (index % labelEvery === 0 || index === buckets.length - 1) {
+      const label = svgNode("text", {
+        class: "runtime-axis-label",
+        x: x + barWidth / 2,
+        y: height - 13,
+        "text-anchor": "middle",
+      });
+      label.textContent = formatBucketLabel(bucket.start, runtimeRange);
+      svg.append(label);
+    }
+  });
+  elements.runtimeChart.append(svg);
+}
+
+function renderRuntimeModels(models = []) {
+  elements.runtimeModels.replaceChildren();
+  if (models.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "model-empty";
+    empty.textContent = "暂无模型用量";
+    elements.runtimeModels.append(empty);
+    return;
+  }
+  for (const entry of models.slice(0, 4)) {
+    const chip = document.createElement("span");
+    chip.className = "model-chip";
+    const model = document.createElement("b");
+    model.textContent = entry.model;
+    const usage = document.createElement("em");
+    usage.textContent = formatTokens(entry.totalTokens);
+    usage.title = `${exactNumber.format(entry.totalTokens)} tokens`;
+    chip.append(model, usage);
+    elements.runtimeModels.append(chip);
+  }
+}
+
+function renderRuntimeUsage(usage) {
+  if (!usage.available) {
+    elements.runtimeLive.className = "runtime-live unavailable";
+    elements.runtimeLiveText.textContent = "不可用";
+    setRuntimeMetrics();
+    elements.runtimeChart.replaceChildren();
+    elements.runtimeEmpty.hidden = false;
+    elements.runtimeEmpty.textContent =
+      usage.reason === "sessions-directory-missing"
+        ? "未找到 Codex 本地会话目录"
+        : "本地用量数据源不可用";
+    renderRuntimeModels();
+    elements.runtimeUpdated.textContent = "未采集数据";
+    elements.runtimeDiagnostics.textContent = "数据源不可用 · 不读取消息内容";
+    return;
+  }
+  elements.runtimeLive.className = "runtime-live";
+  elements.runtimeLiveText.textContent = "实时采集";
+  setRuntimeMetrics(usage.totals);
+  renderRuntimeChart(usage);
+  renderRuntimeModels(usage.models);
+  elements.runtimeUpdated.textContent = `更新于 ${new Date(usage.generatedAt).toLocaleTimeString("zh-CN")}`;
+  const diagnostics = usage.diagnostics ?? {};
+  elements.runtimeDiagnostics.textContent = `${diagnostics.filesRead ?? 0} 个本地会话文件 · ${diagnostics.parseErrors ?? 0} 个无效事件 · 不保留消息内容`;
+}
+
+function renderRuntimeError(message) {
+  elements.runtimeLive.className = "runtime-live unavailable";
+  elements.runtimeLiveText.textContent = "连接失败";
+  elements.runtimeChart.replaceChildren();
+  elements.runtimeEmpty.hidden = false;
+  elements.runtimeEmpty.textContent = `无法读取运行时用量：${message}`;
+  elements.runtimeUpdated.textContent = "将在后台重试";
+  elements.runtimeDiagnostics.textContent = "连接失败 · 不读取消息内容";
+}
 
 function option(value, label) {
   const element = document.createElement("option");
@@ -428,6 +653,27 @@ async function requestJson(path, options) {
   return body;
 }
 
+async function loadRuntimeUsage() {
+  if (usageLoading) {
+    usageRefreshQueued = true;
+    return;
+  }
+  usageLoading = true;
+  const requestedRange = runtimeRange;
+  try {
+    const usage = await requestJson(`/api/usage?range=${encodeURIComponent(requestedRange)}`);
+    if (requestedRange === runtimeRange) renderRuntimeUsage(usage);
+  } catch (error) {
+    if (requestedRange === runtimeRange) renderRuntimeError(error.message);
+  } finally {
+    usageLoading = false;
+    if (usageRefreshQueued) {
+      usageRefreshQueued = false;
+      loadRuntimeUsage();
+    }
+  }
+}
+
 async function loadServerStatus() {
   try {
     serverStatus = await requestJson("/api/status");
@@ -512,7 +758,27 @@ elements.exportButton.addEventListener("click", () => {
   showToast("已导出 SKILL.md。");
 });
 
+elements.runtimeRange.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-range]");
+  if (!button || !elements.runtimeRange.contains(button)) return;
+  runtimeRange = button.dataset.range;
+  for (const candidate of elements.runtimeRange.querySelectorAll("button")) {
+    candidate.classList.toggle("active", candidate === button);
+    candidate.setAttribute("aria-pressed", String(candidate === button));
+  }
+  elements.runtimeWindow.textContent = RANGE_LABELS[runtimeRange];
+  loadRuntimeUsage();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) loadRuntimeUsage();
+});
+
 initializeAgentSelectors();
 renderModeCards();
 refresh();
 loadServerStatus();
+loadRuntimeUsage();
+window.setInterval(() => {
+  if (!document.hidden) loadRuntimeUsage();
+}, 5000);

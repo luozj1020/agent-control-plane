@@ -93,7 +93,21 @@ npm run dev
 Open `http://127.0.0.1:4173`. The current UI resolves modes and agent bindings
 through the real contracts package, previews the minimal generated `SKILL.md`,
 compares the generated token footprint of all three mode Skills, and exports the
-selected one. Filesystem activation is disabled by default.
+selected one. It also presents actual Codex runtime token usage in an API-console
+style dashboard with 1 hour, 24 hour, 7 day, and 30 day ranges. Filesystem
+activation is disabled by default.
+
+Runtime usage is read locally from Codex session `token_count` events. The
+collector incrementally reads only appended JSONL bytes and retains only event
+time, model, and token counters in memory; prompt and response content is never
+returned by the API or shown in the UI. Input totals include cached input, so the
+dashboard displays cached and uncached portions separately without double
+counting. The default source is `~/.codex/sessions`. To use another absolute
+session directory:
+
+```bash
+AGENT_WORKFLOW_CODEX_SESSIONS_DIR=/absolute/path/to/sessions npm run dev
+```
 
 To enable atomic activation, explicitly provide the absolute Codex Skill
 directory you want this application to manage:

@@ -35,8 +35,58 @@ test("serves the application and health endpoint", async () => {
     assert.equal(page.status, 200);
     const html = await page.text();
     assert.match(html, /Agent Workflow Switch/);
-    assert.match(html, /Token 使用量/);
+    assert.match(html, /Token 运行时用量/);
+    assert.match(html, /LOCAL RUNTIME ANALYTICS/);
+    assert.match(html, /USAGE · ESTIMATED CONTEXT/);
   });
+});
+
+test("returns structured usage range errors", async () => {
+  const usageMonitor = {
+    async collect() {
+      const error = new Error("Unsupported usage range 'forever'.");
+      error.code = "usage.invalid_range";
+      error.status = 400;
+      throw error;
+    },
+  };
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/usage?range=forever`);
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), {
+        error: "usage.invalid_range",
+        message: "Unsupported usage range 'forever'.",
+      });
+    },
+    { usageMonitor },
+  );
+});
+
+test("serves sanitized runtime usage for the requested range", async () => {
+  const requested = [];
+  const usageMonitor = {
+    async collect(range) {
+      requested.push(range);
+      return {
+        available: true,
+        source: "codex-local-sessions",
+        range,
+        totals: { totalTokens: 42 },
+        buckets: [],
+        models: [],
+      };
+    },
+  };
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/usage?range=7d`);
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).totals.totalTokens, 42);
+      assert.deepEqual(requested, ["7d"]);
+    },
+    { usageMonitor },
+  );
 });
 
 test("activation API is disabled unless an absolute Skill directory is configured", async () => {

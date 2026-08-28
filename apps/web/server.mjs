@@ -10,6 +10,7 @@ import {
   resolveEffectiveSkill,
 } from "../../packages/contracts/dist/index.js";
 import { createSkillStore, SkillStoreError } from "./skill-store.mjs";
+import { createUsageMonitor } from "./usage-monitor.mjs";
 
 const PUBLIC_ROOT = fileURLToPath(new URL("./public/", import.meta.url));
 const CONTRACTS_ROOT = fileURLToPath(
@@ -111,10 +112,14 @@ async function serveFile(request, response, root, relativePath) {
 
 export function createAppServer(options = {}) {
   const store = options.store ?? createSkillStore({ skillsDir: options.skillsDir });
+  const usageMonitor =
+    options.usageMonitor ?? createUsageMonitor({ sessionsDir: options.sessionsDir });
   return createServer(async (request, response) => {
+    let requestUrl;
     let pathname;
     try {
-      pathname = decodeURIComponent(new URL(request.url ?? "/", "http://local").pathname);
+      requestUrl = new URL(request.url ?? "/", "http://local");
+      pathname = decodeURIComponent(requestUrl.pathname);
     } catch {
       response.writeHead(400, securityHeaders("text/plain; charset=utf-8"));
       response.end("Invalid URL");
@@ -134,6 +139,12 @@ export function createAppServer(options = {}) {
 
       if (pathname === "/api/status" && (request.method === "GET" || request.method === "HEAD")) {
         sendJson(response, 200, await store.status(), request.method === "HEAD");
+        return;
+      }
+
+      if (pathname === "/api/usage" && (request.method === "GET" || request.method === "HEAD")) {
+        const range = requestUrl.searchParams.get("range") ?? "24h";
+        sendJson(response, 200, await usageMonitor.collect(range), request.method === "HEAD");
         return;
       }
 
@@ -167,6 +178,10 @@ export function createAppServer(options = {}) {
       }
     } catch (error) {
       if (error instanceof SkillStoreError) {
+        sendJson(response, error.status, { error: error.code, message: error.message });
+        return;
+      }
+      if (typeof error?.status === "number" && typeof error?.code === "string") {
         sendJson(response, error.status, { error: error.code, message: error.message });
         return;
       }

@@ -61,6 +61,71 @@
           </div>
         </header>
 
+        <section class="runtime-panel" aria-labelledby="runtime-title">
+          <div class="runtime-heading">
+            <div>
+              <div class="runtime-title-row">
+                <p class="eyebrow">LOCAL RUNTIME ANALYTICS</p>
+                <span class="runtime-live" id="runtime-live"><i></i><span id="runtime-live-text">正在连接</span></span>
+              </div>
+              <h2 id="runtime-title">Token 运行时用量</h2>
+              <p>从 Codex 本地会话的用量事件增量汇总，不读取或展示提示词与回复内容。</p>
+            </div>
+            <div class="range-switch" id="runtime-range" aria-label="Token 用量时间范围">
+              <button type="button" data-range="1h" aria-pressed="false">1H</button>
+              <button type="button" class="active" data-range="24h" aria-pressed="true">24H</button>
+              <button type="button" data-range="7d" aria-pressed="false">7D</button>
+              <button type="button" data-range="30d" aria-pressed="false">30D</button>
+            </div>
+          </div>
+
+          <div class="runtime-metrics">
+            <article class="metric primary-metric">
+              <span>Total tokens</span>
+              <strong id="runtime-total">—</strong>
+              <small id="runtime-window">最近 24 小时</small>
+            </article>
+            <article class="metric">
+              <span>Input</span>
+              <strong id="runtime-input">—</strong>
+              <small id="runtime-uncached">未缓存 —</small>
+            </article>
+            <article class="metric">
+              <span>Cached input</span>
+              <strong id="runtime-cached">—</strong>
+              <small id="runtime-cache-rate">缓存率 —</small>
+            </article>
+            <article class="metric">
+              <span>Output</span>
+              <strong id="runtime-output">—</strong>
+              <small id="runtime-reasoning">含 reasoning —</small>
+            </article>
+            <article class="metric">
+              <span>Requests</span>
+              <strong id="runtime-requests">—</strong>
+              <small id="runtime-sessions">会话 —</small>
+            </article>
+          </div>
+
+          <div class="runtime-chart-shell">
+            <div class="runtime-chart-toolbar">
+              <div class="runtime-legend" aria-label="图表图例">
+                <span><i class="uncached"></i>Uncached input</span>
+                <span><i class="cached"></i>Cached input</span>
+                <span><i class="output"></i>Output</span>
+              </div>
+              <span id="runtime-updated">等待首次采集</span>
+            </div>
+            <div class="runtime-chart" id="runtime-chart" aria-live="polite"></div>
+            <div class="runtime-empty" id="runtime-empty" hidden></div>
+          </div>
+
+          <div class="runtime-footer">
+            <div class="model-breakdown" id="runtime-models"></div>
+            <span id="runtime-diagnostics">只保留 token 数值、模型与时间桶</span>
+          </div>
+        </section>
+
         <section class="workspace-grid">
           <div class="configuration-column">
             <section class="panel">
