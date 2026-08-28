@@ -110,6 +110,8 @@ nav { display: grid; gap: 7px; }
 .sidebar-status strong, .sidebar-status span { display: block; }
 .sidebar-status strong { font-size: 12px; }
 .sidebar-status span { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.sidebar-status div { min-width: 0; }
+.sidebar-status strong, .sidebar-status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-dot { width: 8px; height: 8px; border-radius: 99px; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
 
 main { min-width: 0; padding: 42px clamp(24px, 4vw, 64px) 64px; }

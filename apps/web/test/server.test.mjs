@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
+import { CODEX_OVERNIGHT_CLAUDE_PROFILE } from "../../../packages/contracts/dist/index.js";
 import { createAppServer } from "../server.mjs";
 
-async function withServer(run) {
-  const server = createAppServer();
+async function withServer(run, options = {}) {
+  const server = createAppServer(options);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.equal(typeof address, "object");
@@ -30,6 +34,119 @@ test("serves the application and health endpoint", async () => {
     const page = await fetch(baseUrl);
     assert.equal(page.status, 200);
     assert.match(await page.text(), /Agent Workflow Switch/);
+  });
+});
+
+test("activation API is disabled unless an absolute Skill directory is configured", async () => {
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/activate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ profile: CODEX_OVERNIGHT_CLAUDE_PROFILE }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error, "store.preview_only");
+  });
+});
+
+test("activation API resolves the profile on the server and writes only the managed directory", async () => {
+  const skillsDir = await mkdtemp(join(tmpdir(), "agent-workflow-api-"));
+  try {
+    await withServer(
+      async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/api/activate`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ profile: CODEX_OVERNIGHT_CLAUDE_PROFILE }),
+        });
+        assert.equal(response.status, 200);
+        const body = await response.json();
+        assert.equal(body.changed, true);
+        assert.equal(body.status.active.variantId, "workflow-codex-overnight-claude-code");
+        assert.match(
+          await readFile(join(skillsDir, "agent-workflow-active", "SKILL.md"), "utf8"),
+          /# Overnight/,
+        );
+
+        const status = await fetch(`${baseUrl}/api/status`);
+        assert.equal((await status.json()).writeEnabled, true);
+      },
+      { skillsDir },
+    );
+  } finally {
+    await rm(skillsDir, { recursive: true, force: true });
+  }
+});
+
+test("rollback API restores a server-generated backup", async () => {
+  const skillsDir = await mkdtemp(join(tmpdir(), "agent-workflow-api-rollback-"));
+  try {
+    await withServer(
+      async (baseUrl) => {
+        const activate = (profile) =>
+          fetch(`${baseUrl}/api/activate`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ profile }),
+          });
+        const first = await activate(CODEX_OVERNIGHT_CLAUDE_PROFILE);
+        assert.equal(first.status, 200);
+
+        const balanced = {
+          ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+          id: "codex-balanced-claude",
+          mode: { id: "balanced", version: "1.0.0" },
+        };
+        const second = await activate(balanced);
+        assert.equal(second.status, 200);
+        const switched = await second.json();
+        assert.equal(switched.status.active.variantId, "workflow-codex-balanced-claude-code");
+        assert.equal(switched.status.backups.length, 1);
+
+        const rollback = await fetch(`${baseUrl}/api/rollback`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ backupId: switched.status.backups[0].backupId }),
+        });
+        assert.equal(rollback.status, 200);
+        assert.equal(
+          (await rollback.json()).status.active.variantId,
+          "workflow-codex-overnight-claude-code",
+        );
+      },
+      { skillsDir },
+    );
+  } finally {
+    await rm(skillsDir, { recursive: true, force: true });
+  }
+});
+
+test("mutation API rejects cross-origin requests", async () => {
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/activate`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://malicious.example",
+      },
+      body: JSON.stringify({ profile: CODEX_OVERNIGHT_CLAUDE_PROFILE }),
+    });
+    assert.equal(response.status, 403);
+  });
+});
+
+test("mutation API rejects DNS-rebinding style host and origin pairs", async () => {
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/activate`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        host: "malicious.example",
+        origin: "http://malicious.example",
+      },
+      body: JSON.stringify({ profile: CODEX_OVERNIGHT_CLAUDE_PROFILE }),
+    });
+    assert.equal(response.status, 403);
   });
 });
 

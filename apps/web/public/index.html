@@ -41,8 +41,8 @@
         <div class="sidebar-status">
           <span class="status-dot"></span>
           <div>
-            <strong>本地预览</strong>
-            <span>不会修改 Codex 配置</span>
+            <strong id="store-status-title">正在读取</strong>
+            <span id="store-status-detail">检查 Skill 目录</span>
           </div>
         </div>
       </aside>
@@ -55,6 +55,7 @@
             <p class="subtitle">只生成所选模式和 Agent 所需的最小 Skill。</p>
           </div>
           <div class="top-actions">
+            <button class="button ghost" id="rollback-button" type="button" hidden>回滚上一个</button>
             <button class="button ghost" id="copy-button" type="button">复制 Skill</button>
             <button class="button primary" id="export-button" type="button">导出 SKILL.md</button>
           </div>
@@ -126,7 +127,7 @@
               <div class="activation-actions">
                 <p id="activation-note">保存只影响浏览器中的预览状态。</p>
                 <button class="button primary" id="activate-button" type="button">
-                  设为当前预览 Skill
+                  读取激活状态
                 </button>
               </div>
             </section>

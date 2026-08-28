@@ -4,6 +4,13 @@ import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import {
+  BUILTIN_MODE_CATALOG,
+  EXAMPLE_AGENTS,
+  resolveEffectiveSkill,
+} from "../../packages/contracts/dist/index.js";
+import { createSkillStore, SkillStoreError } from "./skill-store.mjs";
+
 const PUBLIC_ROOT = fileURLToPath(new URL("./public/", import.meta.url));
 const CONTRACTS_ROOT = fileURLToPath(
   new URL("../../packages/contracts/dist/", import.meta.url),
@@ -21,12 +28,49 @@ const MIME_TYPES = new Map([
 function securityHeaders(contentType) {
   return {
     "cache-control": "no-store",
-    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
     "content-type": contentType,
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
   };
+}
+
+function sendJson(response, status, value, headOnly = false) {
+  const body = JSON.stringify(value);
+  response.writeHead(status, {
+    ...securityHeaders("application/json; charset=utf-8"),
+    "content-length": Buffer.byteLength(body),
+  });
+  response.end(headOnly ? undefined : body);
+}
+
+function trustedMutationOrigin(request) {
+  const origin = request.headers.origin;
+  if (origin === undefined) return true;
+  const host = request.headers.host;
+  if (!host || !/^(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(host)) return false;
+  return origin === `http://${host}`;
+}
+
+async function readJsonBody(request) {
+  if (request.headers["content-type"]?.split(";", 1)[0]?.trim() !== "application/json") {
+    throw new SkillStoreError("request.content_type", "Content-Type must be application/json.", 415);
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 64 * 1024) {
+      throw new SkillStoreError("request.too_large", "Request body exceeds 64 KiB.", 413);
+    }
+    chunks.push(chunk);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw new SkillStoreError("request.invalid_json", "Request body is not valid JSON.");
+  }
 }
 
 function resolveWithin(root, relativePath) {
@@ -65,17 +109,9 @@ async function serveFile(request, response, root, relativePath) {
   }
 }
 
-export function createAppServer() {
+export function createAppServer(options = {}) {
+  const store = options.store ?? createSkillStore({ skillsDir: options.skillsDir });
   return createServer(async (request, response) => {
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      response.writeHead(405, {
-        ...securityHeaders("text/plain; charset=utf-8"),
-        allow: "GET, HEAD",
-      });
-      response.end("Method not allowed");
-      return;
-    }
-
     let pathname;
     try {
       pathname = decodeURIComponent(new URL(request.url ?? "/", "http://local").pathname);
@@ -85,13 +121,65 @@ export function createAppServer() {
       return;
     }
 
-    if (pathname === "/api/health") {
-      const body = JSON.stringify({ status: "ok", product: "agent-workflow-switch" });
-      response.writeHead(200, {
-        ...securityHeaders("application/json; charset=utf-8"),
-        "content-length": Buffer.byteLength(body),
+    try {
+      if (pathname === "/api/health" && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(
+          response,
+          200,
+          { status: "ok", product: "agent-workflow-switch" },
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      if (pathname === "/api/status" && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(response, 200, await store.status(), request.method === "HEAD");
+        return;
+      }
+
+      if (pathname === "/api/activate" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        const resolution = resolveEffectiveSkill({
+          profile: body?.profile,
+          agents: EXAMPLE_AGENTS,
+          catalog: BUILTIN_MODE_CATALOG,
+        });
+        if (!resolution.ok) {
+          sendJson(response, 422, { error: "profile.invalid", issues: resolution.issues });
+          return;
+        }
+        sendJson(response, 200, await store.activate(resolution.value));
+        return;
+      }
+
+      if (pathname === "/api/rollback" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await store.rollback(body?.backupId));
+        return;
+      }
+    } catch (error) {
+      if (error instanceof SkillStoreError) {
+        sendJson(response, error.status, { error: error.code, message: error.message });
+        return;
+      }
+      sendJson(response, 500, { error: "server.internal" });
+      return;
+    }
+
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      response.writeHead(405, {
+        ...securityHeaders("text/plain; charset=utf-8"),
+        allow: "GET, HEAD",
       });
-      response.end(request.method === "HEAD" ? undefined : body);
+      response.end("Method not allowed");
       return;
     }
 
@@ -114,7 +202,15 @@ if (isEntryPoint()) {
   const host = process.env.AGENT_WORKFLOW_HOST ?? "127.0.0.1";
   const parsedPort = Number.parseInt(process.env.AGENT_WORKFLOW_PORT ?? "4173", 10);
   const port = Number.isInteger(parsedPort) && parsedPort >= 0 ? parsedPort : 4173;
-  const server = createAppServer();
+  if (
+    process.env.AGENT_WORKFLOW_SKILLS_DIR &&
+    host !== "127.0.0.1" &&
+    host !== "localhost" &&
+    host !== "::1"
+  ) {
+    throw new Error("Filesystem activation may only listen on a loopback host.");
+  }
+  const server = createAppServer({ skillsDir: process.env.AGENT_WORKFLOW_SKILLS_DIR });
   server.listen(port, host, () => {
     const address = server.address();
     const activePort = typeof address === "object" && address ? address.port : port;

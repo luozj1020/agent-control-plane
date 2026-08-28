@@ -92,4 +92,17 @@ npm run dev
 
 Open `http://127.0.0.1:4173`. The current UI resolves modes and agent bindings
 through the real contracts package, previews the minimal generated `SKILL.md`,
-and exports it. It deliberately does not write into Codex configuration yet.
+and exports it. Filesystem activation is disabled by default.
+
+To enable atomic activation, explicitly provide the absolute Codex Skill
+directory you want this application to manage:
+
+```bash
+AGENT_WORKFLOW_SKILLS_DIR=/absolute/path/to/.codex/skills npm run dev
+```
+
+The application owns only `agent-workflow-active/` and its hidden
+`.agent-workflow-switch/` control directory inside that root. It refuses to
+overwrite an unowned active directory. Every switch backs up the prior managed
+Skill, uses a single-writer lock and atomic directory rename, and exposes
+rollback in the UI. A restarted Codex session is required after switching.

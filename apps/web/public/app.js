@@ -28,8 +28,11 @@ const elements = {
   modeGrid: document.querySelector("#mode-grid"),
   operationList: document.querySelector("#operation-list"),
   restartBadge: document.querySelector("#restart-badge"),
+  rollbackButton: document.querySelector("#rollback-button"),
   skillPath: document.querySelector("#skill-path"),
   skillPreview: document.querySelector("#skill-preview"),
+  storeStatusDetail: document.querySelector("#store-status-detail"),
+  storeStatusTitle: document.querySelector("#store-status-title"),
   toast: document.querySelector("#toast"),
   tokenEstimate: document.querySelector("#token-estimate"),
   variantName: document.querySelector("#variant-name"),
@@ -37,6 +40,12 @@ const elements = {
 
 let selectedModeId = "overnight";
 let currentResolution = null;
+let serverStatus = {
+  writeEnabled: false,
+  health: "loading",
+  active: null,
+  backups: [],
+};
 let toastTimer;
 
 function option(value, label) {
@@ -91,6 +100,9 @@ function renderModeCards() {
 }
 
 function getInstalledState() {
+  if (serverStatus.writeEnabled) {
+    return serverStatus.active ? [{ ...serverStatus.active, active: true }] : [];
+  }
   try {
     const stored = localStorage.getItem("agent-workflow-active-skill");
     if (!stored) return [];
@@ -194,6 +206,32 @@ function renderFailure(issues) {
   renderOperations({ ok: false, issues });
 }
 
+function storeIsHealthy() {
+  return serverStatus.health === "ready" || serverStatus.health === "active";
+}
+
+function renderStoreStatus() {
+  if (serverStatus.writeEnabled) {
+    if (storeIsHealthy()) {
+      elements.storeStatusTitle.textContent = "文件写入已启用";
+      elements.storeStatusDetail.textContent = serverStatus.active
+        ? `当前：${serverStatus.active.variantId}`
+        : serverStatus.skillsDir;
+    } else {
+      elements.storeStatusTitle.textContent = "Skill 目录被阻止";
+      elements.storeStatusDetail.textContent = serverStatus.error ?? serverStatus.health;
+    }
+  } else {
+    elements.storeStatusTitle.textContent = "本地预览";
+    elements.storeStatusDetail.textContent = "不会修改 Codex 配置";
+  }
+  elements.rollbackButton.hidden = !(
+    serverStatus.writeEnabled &&
+    storeIsHealthy() &&
+    serverStatus.backups.length > 0
+  );
+}
+
 function refresh() {
   const interactive = selectedModeId === "interactive";
   elements.builderAgent.disabled = interactive;
@@ -230,13 +268,35 @@ function refresh() {
   elements.activateButton.disabled = false;
   elements.copyButton.disabled = false;
   elements.exportButton.disabled = false;
-  renderIssues([]);
+  const storeBlocked = serverStatus.writeEnabled && !storeIsHealthy();
+  if (storeBlocked) {
+    elements.compatibilityBadge.textContent = "目录写入被阻止";
+    elements.compatibilityBadge.classList.add("error");
+    elements.activateButton.disabled = true;
+    renderIssues([
+      {
+        path: "/skill-store",
+        message: serverStatus.error ?? `Skill store health: ${serverStatus.health}`,
+      },
+    ]);
+  } else {
+    renderIssues([]);
+  }
   renderOperations(plan);
 
   const installed = getInstalledState()[0];
-  elements.activationNote.textContent = installed
-    ? `浏览器当前记录：${installed.variantId}`
-    : "保存只影响浏览器中的预览状态。";
+  if (serverStatus.writeEnabled) {
+    elements.activateButton.textContent = "激活到 Codex Skill 目录";
+    elements.activationNote.textContent = installed
+      ? `文件系统当前激活：${installed.variantId}`
+      : `目标目录：${serverStatus.skillsDir}`;
+  } else {
+    elements.activateButton.textContent = "设为当前预览 Skill";
+    elements.activationNote.textContent = installed
+      ? `浏览器当前记录：${installed.variantId}`
+      : "保存只影响浏览器中的预览状态。";
+  }
+  renderStoreStatus();
 }
 
 function showToast(message) {
@@ -248,8 +308,48 @@ function showToast(message) {
 
 elements.mainAgent.addEventListener("change", refresh);
 elements.builderAgent.addEventListener("change", refresh);
-elements.activateButton.addEventListener("click", () => {
+async function requestJson(path, options) {
+  const response = await fetch(path, options);
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.message ?? body.error ?? `Request failed: ${response.status}`);
+  }
+  return body;
+}
+
+async function loadServerStatus() {
+  try {
+    serverStatus = await requestJson("/api/status");
+  } catch (error) {
+    serverStatus = {
+      writeEnabled: false,
+      health: "status-unavailable",
+      active: null,
+      backups: [],
+      error: error.message,
+    };
+  }
+  refresh();
+}
+
+elements.activateButton.addEventListener("click", async () => {
   if (!currentResolution) return;
+  if (serverStatus.writeEnabled) {
+    elements.activateButton.disabled = true;
+    try {
+      const result = await requestJson("/api/activate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ profile: createProfile() }),
+      });
+      serverStatus = result.status;
+      showToast(result.changed ? "Skill 已原子激活；重启 Codex 后生效。" : "当前已经是该 Skill。");
+    } catch (error) {
+      showToast(`激活失败：${error.message}`);
+    }
+    refresh();
+    return;
+  }
   localStorage.setItem(
     "agent-workflow-active-skill",
     JSON.stringify({
@@ -260,6 +360,26 @@ elements.activateButton.addEventListener("click", () => {
   );
   showToast("已保存为当前预览 Skill；尚未写入 Codex。");
   refresh();
+});
+elements.rollbackButton.addEventListener("click", async () => {
+  const latest = serverStatus.backups[0];
+  if (!latest) return;
+  if (!window.confirm(`回滚到 ${latest.variantId}？当前 Skill 会先自动备份。`)) return;
+  elements.rollbackButton.disabled = true;
+  try {
+    const result = await requestJson("/api/rollback", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ backupId: latest.backupId }),
+    });
+    serverStatus = result.status;
+    showToast(`已回滚到 ${result.status.active.variantId}；重启 Codex 后生效。`);
+  } catch (error) {
+    showToast(`回滚失败：${error.message}`);
+  } finally {
+    elements.rollbackButton.disabled = false;
+    refresh();
+  }
 });
 elements.copyButton.addEventListener("click", async () => {
   if (!currentResolution) return;
@@ -284,3 +404,4 @@ elements.exportButton.addEventListener("click", () => {
 initializeAgentSelectors();
 renderModeCards();
 refresh();
+loadServerStatus();
