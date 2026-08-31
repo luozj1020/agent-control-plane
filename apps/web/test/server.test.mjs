@@ -72,6 +72,13 @@ test("serves the application and health endpoint", async () => {
     const coordinator = await fetch(`${baseUrl}/mode-switch-coordinator.js`);
     assert.equal(coordinator.status, 200);
     assert.match(await coordinator.text(), /createLatestSwitchCoordinator/);
+
+    const styles = await fetch(`${baseUrl}/styles.css`);
+    assert.equal(styles.status, 200);
+    const css = await styles.text();
+    assert.match(css, /Readability floor/);
+    assert.match(css, /body \{ font-size: 14px/);
+    assert.match(css, /\.interactive-role-tag \{ font-size: 12px/);
   });
 });
 

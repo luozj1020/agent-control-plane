@@ -532,6 +532,130 @@ select:disabled, input:disabled { opacity: 0.58; }
 .toast { position: fixed; right: 24px; bottom: 24px; z-index: 10; padding: 11px 15px; border: 1px solid #38404b; border-radius: 10px; background: #181c22; box-shadow: 0 15px 40px rgba(0,0,0,.35); font-size: 11px; opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 160ms ease, transform 160ms ease; }
 .toast.visible { opacity: 1; transform: translateY(0); }
 
+/* Readability floor: keep dense console information legible at 100% browser zoom. */
+body { font-size: 14px; line-height: 1.45; }
+.soon, .nav-count { font-size: 10px; }
+.sidebar-status strong { font-size: 13px; }
+.sidebar-status span { font-size: 12px; }
+.runtime-heading > span,
+.runtime-live,
+.runtime-filters label > span,
+.runtime-filter-summary,
+.metric > span,
+.metric small,
+.runtime-chart-toolbar,
+.dimension-switch button,
+.model-usage-heading > span,
+.model-usage-table thead th,
+.model-usage-table tbody td:nth-child(2),
+.model-usage-table td small,
+.runtime-footer,
+.call-totals span,
+.call-coverage span,
+.calls-chart-shell > .runtime-legend,
+.history-panel-heading > div > span,
+.history-integrity,
+.history-entry-main span,
+.history-entry-main code,
+.history-entry-state,
+.history-meta span,
+.history-section-heading > span,
+.diff-legend,
+.diff-legend strong,
+.history-restore-bar p,
+.mode-state,
+.mode-switch-note,
+.interactive-global-grid span,
+.interactive-role-toolbar span,
+.interactive-role-model,
+.interactive-role-name,
+.interactive-role-description,
+.interactive-agent-state,
+.interactive-role-controls label,
+.interactive-overwrite small,
+.balanced-window-grid span,
+.balanced-window-grid small,
+.budget-range,
+.balanced-runtime-status span,
+.balanced-run code,
+.balanced-run b,
+.balanced-run small,
+.live-badge,
+.operation-index,
+.token-kicker,
+.usage-chip,
+.usage-axis-label,
+.usage-value,
+.token-legend,
+.token-footnote { font-size: 10px; }
+
+.runtime-heading > div > p:last-child,
+.runtime-filters select,
+.range-switch button,
+.model-usage-table tbody th,
+.model-usage-table tbody td,
+.model-empty,
+.calls-heading > div:first-child > p:last-child,
+.calls-footnote,
+.history-entry-main strong,
+.history-placeholder p,
+.history-meta strong,
+.field-diff,
+.field-diff-empty,
+.diff-line,
+.diff-unavailable,
+.panel-hint,
+.mode-card p,
+.mode-card code,
+.field small,
+.interactive-role-toolbar strong,
+.interactive-add-role,
+.interactive-agent-heading::before,
+.interactive-role-instructions > span,
+.interactive-overwrite span,
+.interactive-install-note strong,
+.interactive-install-note span,
+.balanced-runtime-status strong,
+.compatibility,
+.activation-summary .label,
+.activation-summary strong,
+.preview-heading code,
+.preview-reset,
+.plan-heading span,
+.plan-panel li,
+.usage-summary strong,
+.usage-mode-label { font-size: 11px; }
+
+.runtime-heading h2,
+.calls-heading h2 { font-size: 20px; }
+.model-usage-heading h3,
+.history-placeholder strong,
+.panel h2,
+.plan-panel h3,
+.token-heading h3 { font-size: 16px; }
+.history-panel-heading h2,
+.history-detail-heading h2,
+.history-section-heading h3 { font-size: 15px; }
+.step { font-size: 12px; }
+.field > span { font-size: 13px; }
+.interactive-description,
+.balanced-description { font-size: 12px; line-height: 1.65; }
+.interactive-global-grid select,
+.interactive-global-grid input,
+.interactive-role-name input,
+.interactive-role-description input,
+.interactive-role-controls select { font-size: 12px; }
+.interactive-role-tag { font-size: 12px; }
+.interactive-agent-heading { min-height: 50px; }
+.interactive-role-instructions textarea { font-size: 12px; line-height: 1.65; }
+.balanced-window-grid input { font-size: 14px; }
+.balanced-budget-grid input { font-size: 12px; }
+.activation-actions p,
+.issue-list { font-size: 12px; }
+#skill-preview { font-size: 12px; line-height: 1.75; }
+.toast { font-size: 13px; }
+.runtime-axis-label { font-size: 10px; }
+
 @media (max-width: 1040px) {
   .app-shell { grid-template-columns: 76px minmax(0, 1fr); }
   .sidebar { padding-inline: 12px; }
