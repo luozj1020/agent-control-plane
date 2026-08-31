@@ -79,6 +79,17 @@ const elements = {
   historyView: document.querySelector("#history-view"),
   includedAgents: document.querySelector("#included-agents"),
   includedModes: document.querySelector("#included-modes"),
+  interactiveAgentHealth: document.querySelector("#interactive-agent-health"),
+  interactiveAgentList: document.querySelector("#interactive-agent-list"),
+  interactiveAgentOverwrite: document.querySelector("#interactive-agent-overwrite"),
+  interactiveConfig: document.querySelector("#interactive-config"),
+  interactiveConflictDetail: document.querySelector("#interactive-conflict-detail"),
+  interactiveDefaultEffort: document.querySelector("#interactive-default-effort"),
+  interactiveDefaultModel: document.querySelector("#interactive-default-model"),
+  interactiveInstallDetail: document.querySelector("#interactive-install-detail"),
+  interactiveInstallTitle: document.querySelector("#interactive-install-title"),
+  interactiveMaxThreads: document.querySelector("#interactive-max-threads"),
+  interactiveOverwriteRow: document.querySelector("#interactive-overwrite-row"),
   issueList: document.querySelector("#issue-list"),
   mainAgent: document.querySelector("#main-agent"),
   modeGrid: document.querySelector("#mode-grid"),
@@ -141,6 +152,14 @@ let serverStatus = {
   active: null,
   backups: [],
 };
+let interactiveAgentStatus = {
+  writeEnabled: false,
+  health: "loading",
+  conflicts: [],
+  agents: [],
+  preset: { globalSettings: {}, agents: [] },
+};
+let interactiveAgentStatusLoaded = false;
 let toastTimer;
 let runtimeRange = "24h";
 let runtimeTokenView = "type";
@@ -1374,6 +1393,100 @@ function renderStoreStatus() {
   );
 }
 
+const INTERACTIVE_AGENT_STATUS_LABELS = Object.freeze({
+  installed: "已安装",
+  missing: "待安装",
+  "update-available": "可更新",
+  conflict: "冲突",
+  unsafe: "不安全",
+  unavailable: "不可用",
+});
+
+function renderInteractiveAgentConfig() {
+  const preset = interactiveAgentStatus.preset ?? { globalSettings: {}, agents: [] };
+  const global = preset.globalSettings ?? {};
+  elements.interactiveDefaultModel.textContent = global.defaultSubagentModel ?? "—";
+  elements.interactiveDefaultEffort.textContent = global.defaultSubagentReasoningEffort ?? "—";
+  elements.interactiveMaxThreads.textContent =
+    global.maxConcurrentThreadsPerSession === undefined
+      ? "—"
+      : String(global.maxConcurrentThreadsPerSession);
+
+  const states = new Map(
+    (interactiveAgentStatus.agents ?? []).map((agent) => [agent.name, agent.status]),
+  );
+  elements.interactiveAgentList.replaceChildren();
+  for (const agent of preset.agents ?? []) {
+    const state = states.get(agent.name) ?? "unavailable";
+    const row = document.createElement("div");
+    row.className = "interactive-agent";
+    const name = document.createElement("strong");
+    name.textContent = agent.name;
+    const badge = document.createElement("b");
+    badge.textContent = INTERACTIVE_AGENT_STATUS_LABELS[state] ?? state;
+    badge.classList.toggle("conflict", state === "conflict" || state === "unsafe");
+    const model = document.createElement("code");
+    model.textContent = `${agent.model} · ${agent.reasoningEffort}${agent.sandboxMode ? ` · ${agent.sandboxMode}` : ""}`;
+    model.title = agent.description;
+    row.append(name, badge, model);
+    elements.interactiveAgentList.append(row);
+  }
+
+  const conflictNames = interactiveAgentStatus.conflicts ?? [];
+  elements.interactiveOverwriteRow.hidden = !interactiveAgentStatus.requiresOverwrite;
+  elements.interactiveConflictDetail.textContent = conflictNames.length > 0
+    ? `将先备份：${conflictNames.join(", ")}`
+    : "检测到现有自定义配置";
+  const health = interactiveAgentStatus.health;
+  elements.interactiveAgentHealth.classList.toggle(
+    "error",
+    health === "conflict" || !["loading", "ready", "installed", "preview-only"].includes(health),
+  );
+  if (!interactiveAgentStatusLoaded || health === "loading") {
+    elements.interactiveAgentHealth.textContent = "正在检查";
+    elements.interactiveInstallTitle.textContent = "等待状态";
+    elements.interactiveInstallDetail.textContent = "读取 Codex agents 目录";
+  } else if (health === "installed") {
+    elements.interactiveAgentHealth.textContent = "配置已安装";
+    elements.interactiveInstallTitle.textContent = "7 个角色已就绪";
+    elements.interactiveInstallDetail.textContent = interactiveAgentStatus.agentsDir ?? "~/.codex/agents";
+  } else if (health === "ready") {
+    elements.interactiveAgentHealth.textContent = "等待安装";
+    elements.interactiveInstallTitle.textContent = "激活时同步安装";
+    elements.interactiveInstallDetail.textContent = interactiveAgentStatus.agentsDir ?? "~/.codex/agents";
+  } else if (health === "conflict") {
+    elements.interactiveAgentHealth.textContent = "检测到同名配置";
+    elements.interactiveInstallTitle.textContent = "需要覆写授权";
+    elements.interactiveInstallDetail.textContent = "勾选后先备份现有文件，再激活 Interactive";
+  } else if (health === "preview-only") {
+    elements.interactiveAgentHealth.textContent = "仅预览";
+    elements.interactiveInstallTitle.textContent = "未启用全局写入";
+    elements.interactiveInstallDetail.textContent = "设置 AGENT_WORKFLOW_CODEX_HOME 后可安装";
+  } else {
+    elements.interactiveAgentHealth.textContent = "配置被阻止";
+    elements.interactiveInstallTitle.textContent = "无法安全安装";
+    elements.interactiveInstallDetail.textContent = interactiveAgentStatus.error ?? health;
+  }
+}
+
+function interactiveAgentIssue() {
+  if (!interactiveAgentStatusLoaded) {
+    return "正在读取 Codex 全局 subagent 配置。";
+  }
+  if (!interactiveAgentStatus.writeEnabled) {
+    return "未启用 Codex 全局 agent 写入；请设置 AGENT_WORKFLOW_CODEX_HOME。";
+  }
+  if (interactiveAgentStatus.health === "conflict") {
+    return elements.interactiveAgentOverwrite.checked
+      ? null
+      : "检测到同名 custom agent；需明确勾选备份并覆写。";
+  }
+  if (!["ready", "installed"].includes(interactiveAgentStatus.health)) {
+    return interactiveAgentStatus.error ?? `Interactive agent store health: ${interactiveAgentStatus.health}`;
+  }
+  return null;
+}
+
 function refresh(options = {}) {
   const preserveEditor = options?.preserveEditor === true;
   const interactive = selectedModeId === "interactive";
@@ -1383,8 +1496,10 @@ function refresh(options = {}) {
   elements.builderHelp.textContent = interactive
     ? "Interactive 使用主 Agent 原生 subagent"
     : "接收实现任务的外部 Agent";
+  elements.interactiveConfig.hidden = !interactive;
   elements.balancedConfig.hidden = !balanced;
-  elements.activationStep.textContent = balanced ? "04" : "03";
+  elements.activationStep.textContent = balanced || interactive ? "04" : "03";
+  renderInteractiveAgentConfig();
 
   const draft = resolveSkillDraft();
   if (!draft.ok) {
@@ -1436,19 +1551,24 @@ function refresh(options = {}) {
   elements.copyButton.disabled = false;
   elements.exportButton.disabled = false;
   const storeBlocked = serverStatus.writeEnabled && !storeIsHealthy();
+  const activationIssues = [];
   if (storeBlocked) {
     elements.compatibilityBadge.textContent = "目录写入被阻止";
     elements.compatibilityBadge.classList.add("error");
     elements.activateButton.disabled = true;
-    renderIssues([
-      {
-        path: "/skill-store",
-        message: serverStatus.error ?? `Skill store health: ${serverStatus.health}`,
-      },
-    ]);
-  } else {
-    renderIssues([]);
+    activationIssues.push({
+      path: "/skill-store",
+      message: serverStatus.error ?? `Skill store health: ${serverStatus.health}`,
+    });
   }
+  const agentIssue = interactive && serverStatus.writeEnabled ? interactiveAgentIssue() : null;
+  if (agentIssue) {
+    elements.compatibilityBadge.textContent = "Agent 配置未就绪";
+    elements.compatibilityBadge.classList.add("error");
+    elements.activateButton.disabled = true;
+    activationIssues.push({ path: "/interactive-agents", message: agentIssue });
+  }
+  renderIssues(activationIssues);
   renderOperations(plan);
 
   const installed = getInstalledState()[0];
@@ -1461,6 +1581,12 @@ function refresh(options = {}) {
       : installed
         ? `文件系统当前激活：${installed.variantId}`
         : `目标目录：${serverStatus.skillsDir}`;
+    if (interactive && !modeSwitchState.running && !agentIssue) {
+      elements.activationNote.textContent =
+        interactiveAgentStatus.health === "installed"
+          ? "同步检查 SKILL.md、config.toml 与 7 个 native agents。"
+          : `激活时安装到 ${interactiveAgentStatus.agentsDir ?? "Codex agents 目录"}。`;
+    }
   } else {
     elements.activateButton.textContent = "激活skill";
     elements.activationNote.textContent = installed
@@ -1576,13 +1702,16 @@ function savePreviewSelection(modeId) {
 
 function modeActivationMessage(modeId, result) {
   const mode = modeDisplayName(modeId);
+  const agentSuffix = result.interactiveAgentInstall
+    ? " Interactive subagents 已同步。"
+    : "";
   switch (result.activationKind) {
     case "activate":
-      return `${mode} Skill 已激活；重启 Codex 后生效。`;
+      return `${mode} Skill 已激活；重启 Codex 后生效。${agentSuffix}`;
     case "overwrite":
-      return `已备份当前 Skill，并覆写为 ${mode}；重启 Codex 后生效。`;
+      return `已备份当前 Skill，并覆写为 ${mode}；重启 Codex 后生效。${agentSuffix}`;
     default:
-      return `${mode} 已经是当前 Skill。`;
+      return `${mode} 已经是当前 Skill。${agentSuffix}`;
   }
 }
 
@@ -1603,9 +1732,16 @@ async function applyModeSwitch(modeId) {
         body: JSON.stringify({
           profile: createProfile(modeId),
           content: draft.customized.value.content,
+          allowAgentOverwrite:
+            modeId === "interactive" && elements.interactiveAgentOverwrite.checked,
         }),
       });
       serverStatus = result.status;
+      if (result.interactiveAgentInstall?.status) {
+        interactiveAgentStatus = result.interactiveAgentInstall.status;
+        interactiveAgentStatusLoaded = true;
+        elements.interactiveAgentOverwrite.checked = false;
+      }
       if (modeId === selectedModeId) showToast(modeActivationMessage(modeId, result));
       loadHistory();
     } else if (serverStatus.health === "preview-only") {
@@ -1618,6 +1754,7 @@ async function applyModeSwitch(modeId) {
     }
   } catch (error) {
     if (modeId === selectedModeId) showToast(`模式切换失败：${error.message}`);
+    if (modeId === "interactive") loadInteractiveAgentStatus();
   } finally {
     renderModeCards();
     refresh();
@@ -1695,6 +1832,25 @@ async function loadServerStatus() {
   refresh();
 }
 
+async function loadInteractiveAgentStatus() {
+  try {
+    interactiveAgentStatus = await requestJson("/api/interactive-agents");
+  } catch (error) {
+    interactiveAgentStatus = {
+      writeEnabled: false,
+      health: "status-unavailable",
+      conflicts: [],
+      agents: [],
+      preset: { globalSettings: {}, agents: [] },
+      error: error.message,
+    };
+  } finally {
+    interactiveAgentStatusLoaded = true;
+  }
+  renderInteractiveAgentConfig();
+  refresh();
+}
+
 elements.activateButton.addEventListener("click", async () => {
   if (!currentResolution) return;
   if (serverStatus.writeEnabled) {
@@ -1706,13 +1862,21 @@ elements.activateButton.addEventListener("click", async () => {
         body: JSON.stringify({
           profile: createProfile(),
           content: currentResolution.content,
+          allowAgentOverwrite:
+            selectedModeId === "interactive" && elements.interactiveAgentOverwrite.checked,
         }),
       });
       serverStatus = result.status;
+      if (result.interactiveAgentInstall?.status) {
+        interactiveAgentStatus = result.interactiveAgentInstall.status;
+        interactiveAgentStatusLoaded = true;
+        elements.interactiveAgentOverwrite.checked = false;
+      }
       showToast(modeActivationMessage(selectedModeId, result));
       loadHistory();
     } catch (error) {
       showToast(`激活失败：${error.message}`);
+      if (selectedModeId === "interactive") loadInteractiveAgentStatus();
     }
     renderModeCards();
     refresh();
@@ -1739,6 +1903,7 @@ elements.restoreSkillDefault.addEventListener("click", () => {
   refresh({ preserveEditor: true });
   showToast("已恢复当前配置的默认 Skill；点击激活后写入。");
 });
+elements.interactiveAgentOverwrite.addEventListener("change", refresh);
 elements.rollbackButton.addEventListener("click", async () => {
   const latest = serverStatus.backups[0];
   if (!latest) return;
@@ -1868,6 +2033,7 @@ initializeBalancedControls();
 renderModeCards();
 refresh();
 loadServerStatus();
+loadInteractiveAgentStatus();
 loadHistory();
 loadBalancedRuns();
 window.setInterval(() => {

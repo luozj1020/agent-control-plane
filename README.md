@@ -109,6 +109,36 @@ selected one. A separate Usage page presents actual local-agent token usage and
 model-call counts in an API-console style dashboard with 1 hour, 24 hour,
 7 day, and 30 day ranges. Filesystem activation is disabled by default.
 
+## Interactive subagent installation
+
+Interactive activation can also install a product-owned global Codex subagent
+preset. It enables `[agents]`, sets six concurrent subagent threads, uses
+`gpt-5.3-codex-spark` with medium reasoning for the default and the
+`worker`, `explorer`, `tester`, `debugger`, `benchmarker`, and `build_fixer`
+roles, and uses `gpt-5.6-terra` with high reasoning for the read-only
+`reviewer`. The generated Interactive Skill tells the main Codex thread how to
+route these roles while retaining planning, architecture, synthesis, and final
+validation.
+
+Set the Codex home explicitly when it cannot be inferred. If the configured
+Skill directory is exactly `<CODEX_HOME>/skills`, the server infers the parent
+automatically:
+
+```bash
+AGENT_WORKFLOW_SKILLS_DIR=/absolute/path/to/.codex/skills \
+AGENT_WORKFLOW_CODEX_HOME=/absolute/path/to/.codex \
+npm run dev
+```
+
+The installer edits only four keys in the existing `[agents]` table and
+preserves unrelated `config.toml` content. Existing same-name agent files are
+never overwritten silently: the UI requires an explicit backup-and-overwrite
+checkbox. Backups and ownership hashes are stored under
+`<CODEX_HOME>/.agent-workflow-switch-agents/`. Restart Codex after activation
+so the new global configuration and custom agents are loaded. The supported
+configuration fields and personal agent directory follow the
+[official Codex subagents documentation](https://developers.openai.com/codex/subagents).
+
 ## Balanced Runner
 
 Balanced uses the versioned `balanced-default@1.0.0` policy. Its defaults are a

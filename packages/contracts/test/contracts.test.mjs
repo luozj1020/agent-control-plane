@@ -221,6 +221,9 @@ test("Interactive uses native subagents and includes no external agent", () => {
   assert.deepEqual(result.value.includedModeIds, ["interactive"]);
   assert.deepEqual(result.value.includedAgentIds, ["codex"]);
   assert.match(result.value.content, /# Interactive/);
+  assert.match(result.value.content, /explorer, implementation to worker/);
+  assert.match(result.value.content, /reviewer after implementation/);
+  assert.match(result.value.content, /one active writer/);
   assert.doesNotMatch(result.value.content, /Overnight|Balanced|Claude Code/);
 });
 

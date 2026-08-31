@@ -102,6 +102,32 @@
               </div>
             </section>
 
+            <section class="panel interactive-config" id="interactive-config" hidden>
+              <div class="panel-heading">
+                <div>
+                  <span class="step">03</span>
+                  <h2>Interactive Subagents</h2>
+                </div>
+                <span class="compatibility" id="interactive-agent-health">正在检查</span>
+              </div>
+              <p class="interactive-description">激活 Interactive 时同步配置 Codex 全局 native subagents；主线程保留规划、架构决策、综合验证和最终决策。Spark 是否可用取决于当前 Codex 账号权限。</p>
+              <div class="interactive-global-grid">
+                <div><span>默认模型</span><strong id="interactive-default-model">—</strong></div>
+                <div><span>默认推理</span><strong id="interactive-default-effort">—</strong></div>
+                <div><span>最大并发</span><strong id="interactive-max-threads">—</strong></div>
+              </div>
+              <div class="interactive-agent-list" id="interactive-agent-list"></div>
+              <label class="interactive-overwrite" id="interactive-overwrite-row" hidden>
+                <input id="interactive-agent-overwrite" type="checkbox">
+                <span>备份并覆写同名 Agent</span>
+                <small id="interactive-conflict-detail">检测到现有自定义配置</small>
+              </label>
+              <div class="interactive-install-note">
+                <strong id="interactive-install-title">等待状态</strong>
+                <span id="interactive-install-detail">读取 Codex agents 目录</span>
+              </div>
+            </section>
+
             <section class="panel balanced-config" id="balanced-config" hidden>
               <div class="panel-heading">
                 <div>

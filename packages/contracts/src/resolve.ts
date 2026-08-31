@@ -156,9 +156,13 @@ function renderModeInstructions(
       return [
         "## Workflow",
         "",
-        "Keep the main agent in the foreground as the synthesis owner.",
-        "Use only the main agent's native subagents for parallel bounded work.",
-        "Continuously integrate subagent results and make final decisions in the main context.",
+        "Keep the main Codex thread in continuous ownership of intent, decomposition, synthesis, validation, and final decisions.",
+        "Use native subagents aggressively when independent work can materially improve speed or quality, then wait for the relevant results before deciding.",
+        "Delegate exploration to explorer, implementation to worker, tests to tester, debugging to debugger, benchmarks to benchmarker, and build failures to build_fixer.",
+        "Use reviewer after implementation when correctness, regression, concurrency, performance, or test risk warrants an independent read-only review.",
+        "Keep architectural and product decisions in the main thread. Keep one active writer unless paths or worktrees are provably disjoint.",
+        "Treat subagent reports as claims until the main thread verifies the shared diff and exact checks.",
+        "Use only the main agent's native subagents; do not route Interactive work through an external builder.",
       ].join("\n");
   }
 }

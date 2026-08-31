@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
-import { extname, resolve, sep } from "node:path";
+import { basename, dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -16,6 +16,7 @@ import { createCcSwitchUsageSource } from "./cc-switch-usage-source.mjs";
 import { createClaudeUsageSource } from "./claude-usage-source.mjs";
 import { createPreferredUsageSource } from "./preferred-usage-source.mjs";
 import { createBalancedRuntime } from "./balanced-runtime.mjs";
+import { createCodexAgentStore } from "./codex-agent-store.mjs";
 import { createSkillStore, SkillStoreError } from "./skill-store.mjs";
 import { createUsageMonitor } from "./usage-monitor.mjs";
 
@@ -119,6 +120,13 @@ async function serveFile(request, response, root, relativePath) {
 
 export function createAppServer(options = {}) {
   const store = options.store ?? createSkillStore({ skillsDir: options.skillsDir });
+  const inferredCodexHome =
+    options.skillsDir && basename(resolve(options.skillsDir)) === "skills"
+      ? dirname(resolve(options.skillsDir))
+      : undefined;
+  const codexAgentStore =
+    options.codexAgentStore ??
+    createCodexAgentStore({ codexHome: options.codexHome ?? inferredCodexHome });
   const balancedRuntime = options.balancedRuntime ?? createBalancedRuntime({
     runtimeRoot: options.balancedRuntimeRoot,
   });
@@ -172,6 +180,25 @@ export function createAppServer(options = {}) {
 
       if (pathname === "/api/status" && (request.method === "GET" || request.method === "HEAD")) {
         sendJson(response, 200, await store.status(), request.method === "HEAD");
+        return;
+      }
+
+      if (pathname === "/api/interactive-agents" && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(response, 200, await codexAgentStore.status(), request.method === "HEAD");
+        return;
+      }
+
+      if (pathname === "/api/interactive-agents/install" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        sendJson(
+          response,
+          200,
+          await codexAgentStore.install({ allowOverwrite: body?.allowOverwrite === true }),
+        );
         return;
       }
 
@@ -275,7 +302,20 @@ export function createAppServer(options = {}) {
           sendJson(response, 422, { error: "skill.invalid", issues: customized.issues });
           return;
         }
-        sendJson(response, 200, await store.activate(customized.value));
+        const interactiveAgentInstall =
+          customized.value.mode.id === "interactive"
+            ? await codexAgentStore.install({
+                allowOverwrite: body?.allowAgentOverwrite === true,
+              })
+            : null;
+        let activation;
+        try {
+          activation = await store.activate(customized.value);
+        } catch (error) {
+          if (interactiveAgentInstall?.rollback) await interactiveAgentInstall.rollback();
+          throw error;
+        }
+        sendJson(response, 200, { ...activation, interactiveAgentInstall });
         return;
       }
 
@@ -337,7 +377,10 @@ if (isEntryPoint()) {
   ) {
     throw new Error("Filesystem activation may only listen on a loopback host.");
   }
-  const server = createAppServer({ skillsDir: process.env.AGENT_WORKFLOW_SKILLS_DIR });
+  const server = createAppServer({
+    skillsDir: process.env.AGENT_WORKFLOW_SKILLS_DIR,
+    codexHome: process.env.AGENT_WORKFLOW_CODEX_HOME,
+  });
   server.listen(port, host, () => {
     const address = server.address();
     const activePort = typeof address === "object" && address ? address.port : port;

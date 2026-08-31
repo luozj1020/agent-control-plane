@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -58,6 +58,8 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /mode-switch-policy/);
     assert.match(html, /id="skill-preview"/);
     assert.match(html, /id="restore-skill-default"/);
+    assert.match(html, /id="interactive-config"/);
+    assert.match(html, /Interactive Subagents/);
     assert.doesNotMatch(html, /<pre id="skill-preview"/);
 
     const coordinator = await fetch(`${baseUrl}/mode-switch-coordinator.js`);
@@ -252,6 +254,96 @@ test("activation API validates and writes edited Skill content with server-deriv
     );
   } finally {
     await rm(skillsDir, { recursive: true, force: true });
+  }
+});
+
+test("Interactive activation installs global subagents and requires explicit overwrite for conflicts", async () => {
+  const codexHome = await mkdtemp(join(tmpdir(), "agent-workflow-api-interactive-"));
+  const skillsDir = join(codexHome, "skills");
+  const agentsDir = join(codexHome, "agents");
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    id: "codex-interactive-native",
+    mode: { id: "interactive", version: "1.0.0" },
+    roleBindings: [{ role: "subagent", target: { kind: "main-native" } }],
+  };
+  try {
+    await mkdir(skillsDir);
+    await mkdir(agentsDir);
+    await writeFile(join(agentsDir, "worker.toml"), "existing worker\n", "utf8");
+    await withServer(
+      async (baseUrl) => {
+        const status = await (await fetch(`${baseUrl}/api/interactive-agents`)).json();
+        assert.equal(status.health, "conflict");
+        assert.deepEqual(status.conflicts, ["worker"]);
+
+        const blocked = await fetch(`${baseUrl}/api/activate`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ profile }),
+        });
+        assert.equal(blocked.status, 409);
+        assert.equal((await blocked.json()).error, "agents.overwrite_required");
+        await assert.rejects(readFile(join(skillsDir, "agent-workflow-active", "SKILL.md")));
+
+        const activated = await fetch(`${baseUrl}/api/activate`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ profile, allowAgentOverwrite: true }),
+        });
+        assert.equal(activated.status, 200);
+        const body = await activated.json();
+        assert.equal(body.status.active.mode.id, "interactive");
+        assert.equal(body.interactiveAgentInstall.status.health, "installed");
+        assert.match(await readFile(join(agentsDir, "worker.toml"), "utf8"), /gpt-5\.3-codex-spark/);
+        assert.match(await readFile(join(agentsDir, "reviewer.toml"), "utf8"), /gpt-5\.6-terra/);
+        assert.match(await readFile(join(codexHome, "config.toml"), "utf8"), /max_concurrent_threads_per_session = 6/);
+      },
+      { skillsDir, codexHome },
+    );
+  } finally {
+    await rm(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("Interactive agent installation rolls back when Skill activation fails", async () => {
+  const codexHome = await mkdtemp(join(tmpdir(), "agent-workflow-api-interactive-rollback-"));
+  const skillsDir = join(codexHome, "skills");
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    id: "codex-interactive-rollback",
+    mode: { id: "interactive", version: "1.0.0" },
+    roleBindings: [{ role: "subagent", target: { kind: "main-native" } }],
+  };
+  try {
+    await mkdir(skillsDir);
+    await withServer(
+      async (baseUrl) => {
+        const first = await fetch(`${baseUrl}/api/activate`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ profile: CODEX_OVERNIGHT_CLAUDE_PROFILE }),
+        });
+        assert.equal(first.status, 200);
+        await writeFile(
+          join(skillsDir, ".agent-workflow-switch", "activation.lock"),
+          "occupied",
+          "utf8",
+        );
+        const blocked = await fetch(`${baseUrl}/api/activate`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ profile }),
+        });
+        assert.equal(blocked.status, 409);
+        assert.equal((await blocked.json()).error, "store.locked");
+        await assert.rejects(readFile(join(codexHome, "config.toml")));
+        await assert.rejects(readFile(join(codexHome, "agents", "worker.toml")));
+      },
+      { skillsDir, codexHome },
+    );
+  } finally {
+    await rm(codexHome, { recursive: true, force: true });
   }
 });
 
