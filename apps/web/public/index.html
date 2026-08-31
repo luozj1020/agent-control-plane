@@ -119,11 +119,14 @@
               <div class="interactive-role-toolbar">
                 <div><strong>角色配置</strong><span id="interactive-role-count">0 / 32</span></div>
                 <div>
+                  <button class="preview-reset" id="interactive-undo" type="button" disabled>撤回</button>
+                  <button class="preview-reset" id="interactive-redo" type="button" disabled>重做</button>
+                  <button class="preview-reset" id="interactive-revert" type="button" disabled>回退修改</button>
                   <button class="preview-reset" id="interactive-reset-roles" type="button">恢复默认</button>
-                  <button class="interactive-add-role" id="interactive-add-role" type="button">＋ 添加角色</button>
                 </div>
               </div>
               <div class="interactive-agent-list" id="interactive-agent-list"></div>
+              <button class="interactive-add-role" id="interactive-add-role" type="button">＋ 添加角色</button>
               <label class="interactive-overwrite" id="interactive-overwrite-row" hidden>
                 <input id="interactive-agent-overwrite" type="checkbox">
                 <span>备份并覆写同名 Agent</span>

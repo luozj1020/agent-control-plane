@@ -62,6 +62,10 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /Interactive Subagents/);
     assert.match(html, /id="interactive-add-role"/);
     assert.match(html, /id="interactive-reset-roles"/);
+    assert.match(html, /id="interactive-undo"/);
+    assert.match(html, /id="interactive-redo"/);
+    assert.match(html, /id="interactive-revert"/);
+    assert.match(html, /id="interactive-agent-list"[\s\S]*id="interactive-add-role"/);
     assert.match(html, /developer_instructions/);
     assert.doesNotMatch(html, /<pre id="skill-preview"/);
 

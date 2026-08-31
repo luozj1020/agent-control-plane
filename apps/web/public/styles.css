@@ -398,13 +398,22 @@ select:disabled, input:disabled { opacity: 0.58; }
 .interactive-role-toolbar > div { display: flex; align-items: center; gap: 8px; }
 .interactive-role-toolbar strong { font-size: 10px; }
 .interactive-role-toolbar span { color: var(--muted); font: 8px ui-monospace, monospace; }
-.interactive-add-role, .interactive-delete-role { border: 1px solid var(--line); border-radius: 7px; background: #171b21; color: var(--text); cursor: pointer; }
-.interactive-add-role { padding: 6px 9px; color: var(--accent); font-size: 8px; font-weight: 750; }
-.interactive-delete-role { padding: 6px 8px; color: #ff9e9e; font-size: 7px; }
+.interactive-add-role, .interactive-delete-role { border: 1px solid var(--line); background: #171b21; color: var(--text); cursor: pointer; }
+.interactive-add-role { width: 100%; margin-top: 10px; padding: 10px; border-radius: 9px; color: var(--accent); font-size: 8px; font-weight: 750; }
+.interactive-add-role:hover:not(:disabled) { border-color: rgba(216, 255, 79, .45); background: rgba(216, 255, 79, .04); }
+.interactive-delete-role { display: grid; width: 22px; height: 22px; padding: 0; place-items: center; border-radius: 99px; color: #ff9e9e; font: 800 14px/1 ui-monospace, monospace; }
+.interactive-delete-role:hover:not(:disabled) { border-color: rgba(255, 107, 107, .55); background: rgba(255, 107, 107, .08); }
 .interactive-add-role:disabled, .interactive-delete-role:disabled { opacity: .4; cursor: default; }
 .interactive-agent-list { display: grid; gap: 10px; margin-top: 10px; }
-.interactive-agent { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: #0e1115; }
-.interactive-agent-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 9px; align-items: end; }
+.interactive-agent { overflow: hidden; border: 1px solid var(--line-soft); border-radius: 10px; background: #0e1115; }
+.interactive-agent[open] { border-color: #343b45; }
+.interactive-agent-heading { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(90px, auto) auto auto; gap: 10px; align-items: center; min-height: 42px; padding: 9px 11px; cursor: pointer; list-style: none; }
+.interactive-agent-heading::-webkit-details-marker { display: none; }
+.interactive-agent-heading::before { color: var(--muted); font-size: 9px; content: "▶"; transition: transform 120ms ease; }
+.interactive-agent[open] > .interactive-agent-heading::before { transform: rotate(90deg); }
+.interactive-role-tag { overflow: hidden; font: 700 9px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.interactive-role-model { overflow: hidden; color: var(--muted); font: 7px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.interactive-agent-body { display: grid; gap: 10px; padding: 12px; border-top: 1px solid var(--line-soft); }
 .interactive-role-name, .interactive-role-description { display: grid; gap: 5px; color: var(--muted); font-size: 7px; }
 .interactive-role-name input, .interactive-role-description input { padding: 8px 9px; border-radius: 7px; font: 650 9px ui-monospace, monospace; }
 .interactive-role-description input { font-family: inherit; }
@@ -413,8 +422,8 @@ select:disabled, input:disabled { opacity: 0.58; }
 .interactive-role-controls { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px; }
 .interactive-role-controls label { display: grid; gap: 5px; color: var(--muted); font-size: 7px; }
 .interactive-role-controls select { padding: 8px; border-radius: 7px; font: 650 8px ui-monospace, monospace; }
-.interactive-role-instructions { overflow: hidden; border: 1px solid var(--line-soft); border-radius: 8px; background: #0b0e12; }
-.interactive-role-instructions summary { padding: 9px 10px; color: var(--blue); font-size: 8px; cursor: pointer; user-select: none; }
+.interactive-role-instructions { display: grid; gap: 0; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 8px; background: #0b0e12; }
+.interactive-role-instructions > span { padding: 9px 10px; color: var(--blue); font-size: 8px; }
 .interactive-role-instructions textarea { display: block; width: 100%; min-height: 150px; padding: 12px; resize: vertical; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; outline: none; background: #0a0d11; color: #c8d1dc; font: 9px/1.6 ui-monospace, monospace; }
 .interactive-role-instructions textarea:focus { box-shadow: inset 0 0 0 1px rgba(126, 167, 255, 0.28); }
 .interactive-overwrite { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 9px; align-items: center; margin-top: 14px; padding: 11px; border: 1px solid rgba(255, 190, 61, 0.3); border-radius: 9px; background: rgba(255, 190, 61, 0.05); }
@@ -558,6 +567,9 @@ select:disabled, input:disabled { opacity: 0.58; }
   .balanced-window-grid, .balanced-budget-grid { grid-template-columns: 1fr 1fr; }
   .interactive-global-grid, .interactive-role-controls { grid-template-columns: 1fr; }
   .interactive-role-toolbar { align-items: flex-start; flex-direction: column; }
+  .interactive-role-toolbar > div:last-child { width: 100%; flex-wrap: wrap; }
+  .interactive-agent-heading { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+  .interactive-role-model { display: none; }
   .mode-card { min-height: auto; }
   .activation-actions { align-items: stretch; flex-direction: column; }
   .activation-actions .button { width: 100%; }

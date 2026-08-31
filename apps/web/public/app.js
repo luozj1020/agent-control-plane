@@ -91,8 +91,11 @@ const elements = {
   interactiveInstallTitle: document.querySelector("#interactive-install-title"),
   interactiveMaxThreads: document.querySelector("#interactive-max-threads"),
   interactiveOverwriteRow: document.querySelector("#interactive-overwrite-row"),
+  interactiveRedo: document.querySelector("#interactive-redo"),
+  interactiveRevert: document.querySelector("#interactive-revert"),
   interactiveResetRoles: document.querySelector("#interactive-reset-roles"),
   interactiveRoleCount: document.querySelector("#interactive-role-count"),
+  interactiveUndo: document.querySelector("#interactive-undo"),
   issueList: document.querySelector("#issue-list"),
   mainAgent: document.querySelector("#main-agent"),
   modeGrid: document.querySelector("#mode-grid"),
@@ -169,6 +172,13 @@ let interactiveEditorFingerprint = null;
 let interactivePlanTimer = null;
 let interactivePlanRequest = 0;
 let interactivePlanPending = false;
+let interactiveHistorySnapshot = null;
+let interactiveBaselineConfiguration = null;
+let interactiveHistoryGroup = null;
+let interactiveHistoryAt = 0;
+const interactiveUndoStack = [];
+const interactiveRedoStack = [];
+const interactiveOpenRoles = new Set();
 let toastTimer;
 let runtimeRange = "24h";
 let runtimeTokenView = "type";
@@ -1450,7 +1460,65 @@ function persistInteractiveDraft() {
   localStorage.setItem(INTERACTIVE_DRAFT_KEY, JSON.stringify(interactiveAgentConfiguration));
 }
 
-function markInteractiveConfigurationChanged({ rebuild = false } = {}) {
+function updateInteractiveHistoryControls() {
+  elements.interactiveUndo.disabled = interactiveUndoStack.length === 0;
+  elements.interactiveRedo.disabled = interactiveRedoStack.length === 0;
+  elements.interactiveUndo.title = interactiveUndoStack.length > 0
+    ? `撤回上一步修改（剩余 ${interactiveUndoStack.length} 步）`
+    : "没有可撤回的修改";
+  elements.interactiveRedo.title = interactiveRedoStack.length > 0
+    ? `重做下一步修改（剩余 ${interactiveRedoStack.length} 步）`
+    : "没有可重做的修改";
+  const differsFromBaseline =
+    interactiveAgentConfiguration &&
+    interactiveBaselineConfiguration &&
+    JSON.stringify(interactiveAgentConfiguration) !== JSON.stringify(interactiveBaselineConfiguration);
+  elements.interactiveRevert.disabled = !differsFromBaseline;
+  elements.interactiveRevert.title = differsFromBaseline
+    ? "回退到本次打开页面时或最近一次激活成功的配置"
+    : "当前没有待回退的修改";
+}
+
+function initializeInteractiveHistory() {
+  interactiveHistorySnapshot = interactiveAgentConfiguration
+    ? cloneJson(interactiveAgentConfiguration)
+    : null;
+  interactiveUndoStack.length = 0;
+  interactiveRedoStack.length = 0;
+  interactiveHistoryGroup = null;
+  interactiveHistoryAt = 0;
+  updateInteractiveHistoryControls();
+}
+
+function recordInteractiveHistory(historyGroup = null) {
+  if (!interactiveAgentConfiguration) return;
+  const current = cloneJson(interactiveAgentConfiguration);
+  const now = Date.now();
+  const coalesced =
+    historyGroup !== null &&
+    historyGroup === interactiveHistoryGroup &&
+    now - interactiveHistoryAt < 800;
+  if (
+    interactiveHistorySnapshot &&
+    JSON.stringify(interactiveHistorySnapshot) !== JSON.stringify(current) &&
+    !coalesced
+  ) {
+    interactiveUndoStack.push(interactiveHistorySnapshot);
+    if (interactiveUndoStack.length > 100) interactiveUndoStack.shift();
+    interactiveRedoStack.length = 0;
+  }
+  interactiveHistorySnapshot = current;
+  interactiveHistoryGroup = historyGroup;
+  interactiveHistoryAt = now;
+  updateInteractiveHistoryControls();
+}
+
+function markInteractiveConfigurationChanged({
+  rebuild = false,
+  recordHistory = true,
+  historyGroup = null,
+} = {}) {
+  if (recordHistory) recordInteractiveHistory(historyGroup);
   if (rebuild) interactiveEditorFingerprint = null;
   else interactiveEditorFingerprint = interactiveConfigurationFingerprint();
   persistInteractiveDraft();
@@ -1460,6 +1528,23 @@ function markInteractiveConfigurationChanged({ rebuild = false } = {}) {
   clearTimeout(interactivePlanTimer);
   interactivePlanTimer = setTimeout(planInteractiveAgentConfiguration, 220);
   refresh({ preserveEditor: true });
+}
+
+function travelInteractiveHistory(direction) {
+  if (!interactiveAgentConfiguration) return;
+  const source = direction === "undo" ? interactiveUndoStack : interactiveRedoStack;
+  const destination = direction === "undo" ? interactiveRedoStack : interactiveUndoStack;
+  const restored = source.pop();
+  if (!restored) return;
+  destination.push(cloneJson(interactiveAgentConfiguration));
+  interactiveAgentConfiguration = cloneJson(restored);
+  interactiveHistorySnapshot = cloneJson(restored);
+  interactiveHistoryGroup = null;
+  interactiveHistoryAt = 0;
+  interactiveEditorFingerprint = null;
+  updateInteractiveHistoryControls();
+  markInteractiveConfigurationChanged({ rebuild: true, recordHistory: false });
+  showToast(direction === "undo" ? "已撤回上一步角色修改。" : "已重做角色修改。");
 }
 
 async function planInteractiveAgentConfiguration() {
@@ -1493,26 +1578,23 @@ async function planInteractiveAgentConfiguration() {
 }
 
 function buildInteractiveRoleEditor(agent, index, states) {
-  const row = document.createElement("article");
+  const row = document.createElement("details");
   row.className = "interactive-agent";
   row.dataset.agentName = agent.name;
-
-  const heading = document.createElement("div");
-  heading.className = "interactive-agent-heading";
-  const nameField = document.createElement("label");
-  nameField.className = "interactive-role-name";
-  const nameLabel = document.createElement("span");
-  nameLabel.textContent = "角色名";
-  const name = document.createElement("input");
-  name.value = agent.name;
-  name.spellcheck = false;
-  name.addEventListener("input", () => {
-    agent.name = name.value.trim();
-    row.dataset.agentName = agent.name;
-    badge.dataset.roleState = agent.name;
-    markInteractiveConfigurationChanged();
+  row.open = interactiveOpenRoles.has(agent.name);
+  row.addEventListener("toggle", () => {
+    if (row.open) interactiveOpenRoles.add(agent.name);
+    else interactiveOpenRoles.delete(agent.name);
   });
-  nameField.append(nameLabel, name);
+
+  const heading = document.createElement("summary");
+  heading.className = "interactive-agent-heading";
+  const roleTag = document.createElement("strong");
+  roleTag.className = "interactive-role-tag";
+  roleTag.textContent = agent.name;
+  const modelTag = document.createElement("code");
+  modelTag.className = "interactive-role-model";
+  modelTag.textContent = agent.model ?? "继承默认模型";
   const badge = document.createElement("b");
   badge.className = "interactive-agent-state";
   badge.dataset.roleState = agent.name;
@@ -1522,13 +1604,39 @@ function buildInteractiveRoleEditor(agent, index, states) {
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "interactive-delete-role";
-  remove.textContent = "删除";
+  remove.textContent = "−";
+  remove.title = `删除角色 ${agent.name}`;
+  remove.setAttribute("aria-label", `删除角色 ${agent.name}`);
   remove.disabled = interactiveAgentConfiguration.agents.length <= 1;
-  remove.addEventListener("click", () => {
+  remove.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    interactiveOpenRoles.delete(agent.name);
     interactiveAgentConfiguration.agents.splice(index, 1);
     markInteractiveConfigurationChanged({ rebuild: true });
   });
-  heading.append(nameField, badge, remove);
+  heading.append(roleTag, modelTag, badge, remove);
+
+  const body = document.createElement("div");
+  body.className = "interactive-agent-body";
+  const nameField = document.createElement("label");
+  nameField.className = "interactive-role-name";
+  const nameLabel = document.createElement("span");
+  nameLabel.textContent = "角色名";
+  const name = document.createElement("input");
+  name.value = agent.name;
+  name.spellcheck = false;
+  name.addEventListener("input", () => {
+    const previousName = agent.name;
+    agent.name = name.value.trim();
+    row.dataset.agentName = agent.name;
+    badge.dataset.roleState = agent.name;
+    roleTag.textContent = agent.name || "未命名角色";
+    remove.title = `删除角色 ${agent.name || "未命名角色"}`;
+    if (interactiveOpenRoles.delete(previousName)) interactiveOpenRoles.add(agent.name);
+    markInteractiveConfigurationChanged({ historyGroup: `role-${index}-name` });
+  });
+  nameField.append(nameLabel, name);
 
   const descriptionField = document.createElement("label");
   descriptionField.className = "interactive-role-description";
@@ -1538,7 +1646,7 @@ function buildInteractiveRoleEditor(agent, index, states) {
   description.value = agent.description;
   description.addEventListener("input", () => {
     agent.description = description.value;
-    markInteractiveConfigurationChanged();
+    markInteractiveConfigurationChanged({ historyGroup: `role-${index}-description` });
   });
   descriptionField.append(descriptionLabel, description);
 
@@ -1549,6 +1657,7 @@ function buildInteractiveRoleEditor(agent, index, states) {
   const model = createSelect(interactiveAgentCatalog.models ?? [], agent.model, "继承默认模型");
   model.addEventListener("change", () => {
     agent.model = model.value || null;
+    modelTag.textContent = agent.model ?? "继承默认模型";
     markInteractiveConfigurationChanged();
   });
   modelField.append(model);
@@ -1570,20 +1679,20 @@ function buildInteractiveRoleEditor(agent, index, states) {
   sandboxField.append(sandbox);
   controls.append(modelField, effortField, sandboxField);
 
-  const instructions = document.createElement("details");
+  const instructions = document.createElement("label");
   instructions.className = "interactive-role-instructions";
-  instructions.open = index === 0;
-  const summary = document.createElement("summary");
-  summary.textContent = "Markdown 指令（developer_instructions）";
+  const instructionsLabel = document.createElement("span");
+  instructionsLabel.textContent = "Markdown 指令（developer_instructions）";
   const editor = document.createElement("textarea");
   editor.value = agent.developerInstructions;
   editor.spellcheck = false;
   editor.addEventListener("input", () => {
     agent.developerInstructions = editor.value;
-    markInteractiveConfigurationChanged();
+    markInteractiveConfigurationChanged({ historyGroup: `role-${index}-instructions` });
   });
-  instructions.append(summary, editor);
-  row.append(heading, descriptionField, controls, instructions);
+  instructions.append(instructionsLabel, editor);
+  body.append(nameField, descriptionField, controls, instructions);
+  row.append(heading, body);
   return row;
 }
 
@@ -1608,6 +1717,7 @@ function renderInteractiveAgentConfig() {
   elements.interactiveMaxThreads.value = String(global.maxConcurrentThreadsPerSession);
   elements.interactiveRoleCount.textContent = `${interactiveAgentConfiguration.agents.length} / ${interactiveAgentCatalog.limits?.maxAgents ?? 32}`;
   elements.interactiveAddRole.disabled = interactiveAgentConfiguration.agents.length >= (interactiveAgentCatalog.limits?.maxAgents ?? 32);
+  updateInteractiveHistoryControls();
 
   const states = new Map(
     (interactiveAgentStatus.agents ?? []).map((agent) => [agent.name, agent.status]),
@@ -1949,6 +2059,7 @@ async function applyModeSwitch(modeId) {
       serverStatus = result.status;
       if (result.interactiveAgentInstall?.status) {
         interactiveAgentStatus = result.interactiveAgentInstall.status;
+        interactiveBaselineConfiguration = cloneJson(interactiveAgentConfiguration);
         interactiveAgentStatusLoaded = true;
         elements.interactiveAgentOverwrite.checked = false;
       }
@@ -1956,6 +2067,9 @@ async function applyModeSwitch(modeId) {
       loadHistory();
     } else if (serverStatus.health === "preview-only") {
       savePreviewSelection(modeId);
+      if (modeId === "interactive") {
+        interactiveBaselineConfiguration = cloneJson(interactiveAgentConfiguration);
+      }
       if (modeId === selectedModeId) {
         showToast(`${modeDisplayName(modeId)} 已切换为浏览器预览；尚未写入 Codex。`);
       }
@@ -2056,6 +2170,10 @@ async function loadInteractiveAgentStatus() {
       interactiveAgentConfiguration = cloneJson(
         saved ?? interactiveAgentStatus.configuration ?? interactiveAgentStatus.preset,
       );
+      interactiveBaselineConfiguration = cloneJson(
+        interactiveAgentStatus.configuration ?? interactiveAgentStatus.preset,
+      );
+      initializeInteractiveHistory();
       interactiveEditorFingerprint = null;
       if (saved) {
         interactivePlanPending = true;
@@ -2098,6 +2216,7 @@ elements.activateButton.addEventListener("click", async () => {
       serverStatus = result.status;
       if (result.interactiveAgentInstall?.status) {
         interactiveAgentStatus = result.interactiveAgentInstall.status;
+        interactiveBaselineConfiguration = cloneJson(interactiveAgentConfiguration);
         interactiveAgentStatusLoaded = true;
         elements.interactiveAgentOverwrite.checked = false;
       }
@@ -2112,6 +2231,9 @@ elements.activateButton.addEventListener("click", async () => {
     return;
   }
   savePreviewSelection(selectedModeId);
+  if (selectedModeId === "interactive") {
+    interactiveBaselineConfiguration = cloneJson(interactiveAgentConfiguration);
+  }
   showToast("已保存为当前预览 Skill；尚未写入 Codex。");
   refresh();
 });
@@ -2145,32 +2267,66 @@ elements.interactiveDefaultEffort.addEventListener("change", () => {
 });
 elements.interactiveMaxThreads.addEventListener("input", () => {
   if (!interactiveAgentConfiguration) return;
-  interactiveAgentConfiguration.globalSettings.maxConcurrentThreadsPerSession = Number.parseInt(
+  const parsed = Number.parseInt(
     elements.interactiveMaxThreads.value,
     10,
   );
-  markInteractiveConfigurationChanged();
+  interactiveAgentConfiguration.globalSettings.maxConcurrentThreadsPerSession = Number.isInteger(parsed)
+    ? parsed
+    : null;
+  markInteractiveConfigurationChanged({ historyGroup: "global-max-threads" });
 });
 elements.interactiveAddRole.addEventListener("click", () => {
   if (!interactiveAgentConfiguration) return;
   const names = new Set(interactiveAgentConfiguration.agents.map((agent) => agent.name));
   let suffix = 1;
   while (names.has(`custom_agent_${suffix}`)) suffix += 1;
+  const name = `custom_agent_${suffix}`;
   interactiveAgentConfiguration.agents.push({
-    name: `custom_agent_${suffix}`,
+    name,
     description: "Custom specialist. Update this description so Codex knows when to use the role.",
     model: null,
     reasoningEffort: null,
     sandboxMode: null,
     developerInstructions: "Define this role's scope, responsibilities, boundaries, and expected report format.",
   });
+  interactiveOpenRoles.add(name);
   markInteractiveConfigurationChanged({ rebuild: true });
+});
+elements.interactiveUndo.addEventListener("click", () => travelInteractiveHistory("undo"));
+elements.interactiveRedo.addEventListener("click", () => travelInteractiveHistory("redo"));
+elements.interactiveRevert.addEventListener("click", () => {
+  if (!interactiveBaselineConfiguration) return;
+  interactiveAgentConfiguration = cloneJson(interactiveBaselineConfiguration);
+  interactiveOpenRoles.clear();
+  markInteractiveConfigurationChanged({ rebuild: true });
+  showToast("已回退到最近一次激活或载入的角色配置。");
 });
 elements.interactiveResetRoles.addEventListener("click", () => {
   if (!interactiveAgentStatus.preset) return;
   interactiveAgentConfiguration = cloneJson(interactiveAgentStatus.preset);
+  interactiveOpenRoles.clear();
   markInteractiveConfigurationChanged({ rebuild: true });
   showToast("已恢复默认角色草稿；激活后写入 Codex。");
+});
+document.addEventListener("keydown", (event) => {
+  if (
+    selectedModeId !== "interactive" ||
+    !elements.interactiveConfig.contains(event.target) ||
+    !(event.ctrlKey || event.metaKey) ||
+    event.altKey
+  ) return;
+  const key = event.key.toLowerCase();
+  if (key === "z" && event.shiftKey && interactiveRedoStack.length > 0) {
+    event.preventDefault();
+    travelInteractiveHistory("redo");
+  } else if (key === "z" && interactiveUndoStack.length > 0) {
+    event.preventDefault();
+    travelInteractiveHistory("undo");
+  } else if (key === "y" && interactiveRedoStack.length > 0) {
+    event.preventDefault();
+    travelInteractiveHistory("redo");
+  }
 });
 elements.rollbackButton.addEventListener("click", async () => {
   const latest = serverStatus.backups[0];
