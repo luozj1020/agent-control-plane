@@ -110,11 +110,18 @@
                 </div>
                 <span class="compatibility" id="interactive-agent-health">正在检查</span>
               </div>
-              <p class="interactive-description">激活 Interactive 时同步配置 Codex 全局 native subagents；主线程保留规划、架构决策、综合验证和最终决策。Spark 是否可用取决于当前 Codex 账号权限。</p>
+              <p class="interactive-description">每个角色独立选择模型、推理强度和权限，并直接编辑写入 <code>developer_instructions</code> 的 Markdown。激活 Interactive 时安全同步到 Codex 全局 native subagents。</p>
               <div class="interactive-global-grid">
-                <div><span>默认模型</span><strong id="interactive-default-model">—</strong></div>
-                <div><span>默认推理</span><strong id="interactive-default-effort">—</strong></div>
-                <div><span>最大并发</span><strong id="interactive-max-threads">—</strong></div>
+                <label><span>默认模型</span><select id="interactive-default-model"></select></label>
+                <label><span>默认推理</span><select id="interactive-default-effort"></select></label>
+                <label><span>最大并发</span><input id="interactive-max-threads" type="number" min="1" max="32" step="1"></label>
+              </div>
+              <div class="interactive-role-toolbar">
+                <div><strong>角色配置</strong><span id="interactive-role-count">0 / 32</span></div>
+                <div>
+                  <button class="preview-reset" id="interactive-reset-roles" type="button">恢复默认</button>
+                  <button class="interactive-add-role" id="interactive-add-role" type="button">＋ 添加角色</button>
+                </div>
               </div>
               <div class="interactive-agent-list" id="interactive-agent-list"></div>
               <label class="interactive-overwrite" id="interactive-overwrite-row" hidden>

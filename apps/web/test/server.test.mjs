@@ -60,6 +60,9 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /id="restore-skill-default"/);
     assert.match(html, /id="interactive-config"/);
     assert.match(html, /Interactive Subagents/);
+    assert.match(html, /id="interactive-add-role"/);
+    assert.match(html, /id="interactive-reset-roles"/);
+    assert.match(html, /developer_instructions/);
     assert.doesNotMatch(html, /<pre id="skill-preview"/);
 
     const coordinator = await fetch(`${baseUrl}/mode-switch-coordinator.js`);
@@ -298,6 +301,57 @@ test("Interactive activation installs global subagents and requires explicit ove
         assert.match(await readFile(join(agentsDir, "worker.toml"), "utf8"), /gpt-5\.3-codex-spark/);
         assert.match(await readFile(join(agentsDir, "reviewer.toml"), "utf8"), /gpt-5\.6-terra/);
         assert.match(await readFile(join(codexHome, "config.toml"), "utf8"), /max_concurrent_threads_per_session = 6/);
+      },
+      { skillsDir, codexHome },
+    );
+  } finally {
+    await rm(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("Interactive planning and activation accept an editable custom role set", async () => {
+  const codexHome = await mkdtemp(join(tmpdir(), "agent-workflow-api-custom-roles-"));
+  const skillsDir = join(codexHome, "skills");
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    id: "codex-interactive-custom",
+    mode: { id: "interactive", version: "1.0.0" },
+    roleBindings: [{ role: "subagent", target: { kind: "main-native" } }],
+  };
+  try {
+    await mkdir(skillsDir);
+    await withServer(
+      async (baseUrl) => {
+        const current = await (await fetch(`${baseUrl}/api/interactive-agents`)).json();
+        const configuration = current.preset;
+        configuration.agents = [{
+          name: "docs_researcher",
+          description: "Read-only documentation specialist.",
+          model: "gpt-5.6-luna",
+          reasoningEffort: "medium",
+          sandboxMode: "read-only",
+          developerInstructions: "# Documentation\n\nVerify APIs and return exact references.",
+        }];
+        const planned = await fetch(`${baseUrl}/api/interactive-agents/plan`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ configuration }),
+        });
+        assert.equal(planned.status, 200);
+        assert.deepEqual((await planned.json()).agents, [{ name: "docs_researcher", status: "missing" }]);
+
+        const activated = await fetch(`${baseUrl}/api/activate`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ profile, interactiveAgents: configuration }),
+        });
+        assert.equal(activated.status, 200);
+        const body = await activated.json();
+        assert.deepEqual(body.interactiveAgentInstall.status.configuration.agents.map((agent) => agent.name), ["docs_researcher"]);
+        assert.match(await readFile(join(codexHome, "agents", "docs_researcher.toml"), "utf8"), /gpt-5\.6-luna/);
+        await assert.rejects(readFile(join(codexHome, "agents", "worker.toml")));
+        const skill = await readFile(join(skillsDir, "agent-workflow-active", "SKILL.md"), "utf8");
+        assert.match(skill, /do not assume a fixed role list/);
       },
       { skillsDir, codexHome },
     );

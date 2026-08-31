@@ -389,17 +389,34 @@ select:focus, input:focus { border-color: var(--accent); }
 select:disabled, input:disabled { opacity: 0.58; }
 
 .interactive-description { margin: 14px 0 0; color: var(--muted); font-size: 9px; line-height: 1.55; }
-.interactive-global-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 16px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--line-soft); }
-.interactive-global-grid > div { min-width: 0; padding: 11px 12px; background: #111419; }
-.interactive-global-grid span, .interactive-global-grid strong { display: block; }
+.interactive-description code { color: var(--blue); }
+.interactive-global-grid { display: grid; grid-template-columns: 1.35fr 1fr .7fr; gap: 1px; margin-top: 16px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--line-soft); }
+.interactive-global-grid > label { display: grid; gap: 6px; min-width: 0; padding: 11px 12px; background: #111419; }
 .interactive-global-grid span { color: var(--muted); font-size: 7px; text-transform: uppercase; }
-.interactive-global-grid strong { margin-top: 6px; overflow: hidden; color: var(--accent); font: 700 9px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.interactive-agent-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
-.interactive-agent { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 10px; padding: 10px 11px; border: 1px solid var(--line-soft); border-radius: 9px; background: #0e1115; }
-.interactive-agent strong { font-size: 9px; }
-.interactive-agent b { color: var(--accent); font-size: 7px; text-transform: uppercase; }
-.interactive-agent b.conflict { color: var(--danger); }
-.interactive-agent code { grid-column: 1 / -1; overflow: hidden; color: var(--muted); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+.interactive-global-grid select, .interactive-global-grid input { min-width: 0; padding: 8px; border-radius: 7px; color: var(--accent); font: 700 8px ui-monospace, monospace; }
+.interactive-role-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 16px; }
+.interactive-role-toolbar > div { display: flex; align-items: center; gap: 8px; }
+.interactive-role-toolbar strong { font-size: 10px; }
+.interactive-role-toolbar span { color: var(--muted); font: 8px ui-monospace, monospace; }
+.interactive-add-role, .interactive-delete-role { border: 1px solid var(--line); border-radius: 7px; background: #171b21; color: var(--text); cursor: pointer; }
+.interactive-add-role { padding: 6px 9px; color: var(--accent); font-size: 8px; font-weight: 750; }
+.interactive-delete-role { padding: 6px 8px; color: #ff9e9e; font-size: 7px; }
+.interactive-add-role:disabled, .interactive-delete-role:disabled { opacity: .4; cursor: default; }
+.interactive-agent-list { display: grid; gap: 10px; margin-top: 10px; }
+.interactive-agent { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: #0e1115; }
+.interactive-agent-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 9px; align-items: end; }
+.interactive-role-name, .interactive-role-description { display: grid; gap: 5px; color: var(--muted); font-size: 7px; }
+.interactive-role-name input, .interactive-role-description input { padding: 8px 9px; border-radius: 7px; font: 650 9px ui-monospace, monospace; }
+.interactive-role-description input { font-family: inherit; }
+.interactive-agent-state { align-self: center; color: var(--accent); font-size: 7px; text-transform: uppercase; }
+.interactive-agent-state.conflict { color: var(--danger); }
+.interactive-role-controls { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px; }
+.interactive-role-controls label { display: grid; gap: 5px; color: var(--muted); font-size: 7px; }
+.interactive-role-controls select { padding: 8px; border-radius: 7px; font: 650 8px ui-monospace, monospace; }
+.interactive-role-instructions { overflow: hidden; border: 1px solid var(--line-soft); border-radius: 8px; background: #0b0e12; }
+.interactive-role-instructions summary { padding: 9px 10px; color: var(--blue); font-size: 8px; cursor: pointer; user-select: none; }
+.interactive-role-instructions textarea { display: block; width: 100%; min-height: 150px; padding: 12px; resize: vertical; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; outline: none; background: #0a0d11; color: #c8d1dc; font: 9px/1.6 ui-monospace, monospace; }
+.interactive-role-instructions textarea:focus { box-shadow: inset 0 0 0 1px rgba(126, 167, 255, 0.28); }
 .interactive-overwrite { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 9px; align-items: center; margin-top: 14px; padding: 11px; border: 1px solid rgba(255, 190, 61, 0.3); border-radius: 9px; background: rgba(255, 190, 61, 0.05); }
 .interactive-overwrite input { width: auto; }
 .interactive-overwrite span { font-size: 9px; font-weight: 700; }
@@ -538,7 +555,9 @@ select:disabled, input:disabled { opacity: 0.58; }
   .top-actions { width: 100%; }
   .top-actions .button { flex: 1; }
   .mode-grid, .field-grid { grid-template-columns: 1fr; }
-  .interactive-agent-list, .balanced-window-grid, .balanced-budget-grid { grid-template-columns: 1fr 1fr; }
+  .balanced-window-grid, .balanced-budget-grid { grid-template-columns: 1fr 1fr; }
+  .interactive-global-grid, .interactive-role-controls { grid-template-columns: 1fr; }
+  .interactive-role-toolbar { align-items: flex-start; flex-direction: column; }
   .mode-card { min-height: auto; }
   .activation-actions { align-items: stretch; flex-direction: column; }
   .activation-actions .button { width: 100%; }
@@ -569,5 +588,5 @@ select:disabled, input:disabled { opacity: 0.58; }
 }
 
 @media (max-width: 460px) {
-  .interactive-global-grid, .interactive-agent-list, .balanced-window-grid, .balanced-budget-grid { grid-template-columns: 1fr; }
+  .balanced-window-grid, .balanced-budget-grid { grid-template-columns: 1fr; }
 }

@@ -158,7 +158,7 @@ function renderAgent(definition) {
   if (definition.sandboxMode) {
     lines.push(`sandbox_mode = ${JSON.stringify(definition.sandboxMode)}`);
   }
-  lines.push("", "developer_instructions = \"\"\"", definition.instructions, "\"\"\"", "");
+  lines.push("", `developer_instructions = ${JSON.stringify(definition.instructions)}`, "");
   return lines.join("\n");
 }
 
@@ -176,8 +176,13 @@ function publicPreset() {
       model: definition.model,
       reasoningEffort: definition.reasoningEffort,
       sandboxMode: definition.sandboxMode ?? null,
+      developerInstructions: definition.instructions,
     })),
   };
+}
+
+export function getDefaultCodexAgentConfiguration() {
+  return JSON.parse(JSON.stringify(publicPreset()));
 }
 
 const CONFIG_VALUES = Object.freeze({

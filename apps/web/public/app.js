@@ -80,6 +80,7 @@ const elements = {
   includedAgents: document.querySelector("#included-agents"),
   includedModes: document.querySelector("#included-modes"),
   interactiveAgentHealth: document.querySelector("#interactive-agent-health"),
+  interactiveAddRole: document.querySelector("#interactive-add-role"),
   interactiveAgentList: document.querySelector("#interactive-agent-list"),
   interactiveAgentOverwrite: document.querySelector("#interactive-agent-overwrite"),
   interactiveConfig: document.querySelector("#interactive-config"),
@@ -90,6 +91,8 @@ const elements = {
   interactiveInstallTitle: document.querySelector("#interactive-install-title"),
   interactiveMaxThreads: document.querySelector("#interactive-max-threads"),
   interactiveOverwriteRow: document.querySelector("#interactive-overwrite-row"),
+  interactiveResetRoles: document.querySelector("#interactive-reset-roles"),
+  interactiveRoleCount: document.querySelector("#interactive-role-count"),
   issueList: document.querySelector("#issue-list"),
   mainAgent: document.querySelector("#main-agent"),
   modeGrid: document.querySelector("#mode-grid"),
@@ -160,6 +163,12 @@ let interactiveAgentStatus = {
   preset: { globalSettings: {}, agents: [] },
 };
 let interactiveAgentStatusLoaded = false;
+let interactiveAgentConfiguration = null;
+let interactiveAgentCatalog = { models: [], reasoningEfforts: [], sandboxModes: [], limits: {} };
+let interactiveEditorFingerprint = null;
+let interactivePlanTimer = null;
+let interactivePlanRequest = 0;
+let interactivePlanPending = false;
 let toastTimer;
 let runtimeRange = "24h";
 let runtimeTokenView = "type";
@@ -1402,53 +1411,243 @@ const INTERACTIVE_AGENT_STATUS_LABELS = Object.freeze({
   unavailable: "不可用",
 });
 
+const INTERACTIVE_DRAFT_KEY = "agent-workflow-interactive-agents-draft";
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function interactiveConfigurationFingerprint() {
+  return interactiveAgentConfiguration ? JSON.stringify(interactiveAgentConfiguration) : null;
+}
+
+function createSelect(options, value, inheritLabel = null) {
+  const select = document.createElement("select");
+  if (inheritLabel !== null) {
+    const inherit = document.createElement("option");
+    inherit.value = "";
+    inherit.textContent = inheritLabel;
+    select.append(inherit);
+  }
+  for (const option of options) {
+    const node = document.createElement("option");
+    node.value = typeof option === "string" ? option : option.id;
+    node.textContent = typeof option === "string" ? option : option.label;
+    select.append(node);
+  }
+  if (value && ![...select.options].some((option) => option.value === value)) {
+    const custom = document.createElement("option");
+    custom.value = value;
+    custom.textContent = value;
+    select.append(custom);
+  }
+  select.value = value ?? "";
+  return select;
+}
+
+function persistInteractiveDraft() {
+  if (!interactiveAgentConfiguration) return;
+  localStorage.setItem(INTERACTIVE_DRAFT_KEY, JSON.stringify(interactiveAgentConfiguration));
+}
+
+function markInteractiveConfigurationChanged({ rebuild = false } = {}) {
+  if (rebuild) interactiveEditorFingerprint = null;
+  else interactiveEditorFingerprint = interactiveConfigurationFingerprint();
+  persistInteractiveDraft();
+  interactivePlanPending = true;
+  interactivePlanRequest += 1;
+  interactiveAgentStatus.health = "loading";
+  clearTimeout(interactivePlanTimer);
+  interactivePlanTimer = setTimeout(planInteractiveAgentConfiguration, 220);
+  refresh({ preserveEditor: true });
+}
+
+async function planInteractiveAgentConfiguration() {
+  if (!interactiveAgentConfiguration) return;
+  const requestId = ++interactivePlanRequest;
+  try {
+    const planned = await requestJson("/api/interactive-agents/plan", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ configuration: interactiveAgentConfiguration }),
+    });
+    if (requestId !== interactivePlanRequest) return;
+    interactiveAgentStatus = planned;
+    interactiveAgentCatalog = planned.catalog ?? interactiveAgentCatalog;
+  } catch (error) {
+    if (requestId !== interactivePlanRequest) return;
+    interactiveAgentStatus = {
+      ...interactiveAgentStatus,
+      health: "agents.invalid_configuration",
+      error: error.message,
+      conflicts: [],
+      requiresOverwrite: false,
+    };
+  } finally {
+    if (requestId === interactivePlanRequest) {
+      interactivePlanPending = false;
+      renderInteractiveAgentConfig();
+      refresh({ preserveEditor: true });
+    }
+  }
+}
+
+function buildInteractiveRoleEditor(agent, index, states) {
+  const row = document.createElement("article");
+  row.className = "interactive-agent";
+  row.dataset.agentName = agent.name;
+
+  const heading = document.createElement("div");
+  heading.className = "interactive-agent-heading";
+  const nameField = document.createElement("label");
+  nameField.className = "interactive-role-name";
+  const nameLabel = document.createElement("span");
+  nameLabel.textContent = "角色名";
+  const name = document.createElement("input");
+  name.value = agent.name;
+  name.spellcheck = false;
+  name.addEventListener("input", () => {
+    agent.name = name.value.trim();
+    row.dataset.agentName = agent.name;
+    badge.dataset.roleState = agent.name;
+    markInteractiveConfigurationChanged();
+  });
+  nameField.append(nameLabel, name);
+  const badge = document.createElement("b");
+  badge.className = "interactive-agent-state";
+  badge.dataset.roleState = agent.name;
+  const state = states.get(agent.name) ?? "unavailable";
+  badge.textContent = INTERACTIVE_AGENT_STATUS_LABELS[state] ?? state;
+  badge.classList.toggle("conflict", state === "conflict" || state === "unsafe");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "interactive-delete-role";
+  remove.textContent = "删除";
+  remove.disabled = interactiveAgentConfiguration.agents.length <= 1;
+  remove.addEventListener("click", () => {
+    interactiveAgentConfiguration.agents.splice(index, 1);
+    markInteractiveConfigurationChanged({ rebuild: true });
+  });
+  heading.append(nameField, badge, remove);
+
+  const descriptionField = document.createElement("label");
+  descriptionField.className = "interactive-role-description";
+  const descriptionLabel = document.createElement("span");
+  descriptionLabel.textContent = "用途描述";
+  const description = document.createElement("input");
+  description.value = agent.description;
+  description.addEventListener("input", () => {
+    agent.description = description.value;
+    markInteractiveConfigurationChanged();
+  });
+  descriptionField.append(descriptionLabel, description);
+
+  const controls = document.createElement("div");
+  controls.className = "interactive-role-controls";
+  const modelField = document.createElement("label");
+  modelField.append(document.createTextNode("模型"));
+  const model = createSelect(interactiveAgentCatalog.models ?? [], agent.model, "继承默认模型");
+  model.addEventListener("change", () => {
+    agent.model = model.value || null;
+    markInteractiveConfigurationChanged();
+  });
+  modelField.append(model);
+  const effortField = document.createElement("label");
+  effortField.append(document.createTextNode("推理强度"));
+  const effort = createSelect(interactiveAgentCatalog.reasoningEfforts ?? [], agent.reasoningEffort, "继承 / 模型默认");
+  effort.addEventListener("change", () => {
+    agent.reasoningEffort = effort.value || null;
+    markInteractiveConfigurationChanged();
+  });
+  effortField.append(effort);
+  const sandboxField = document.createElement("label");
+  sandboxField.append(document.createTextNode("权限"));
+  const sandbox = createSelect(interactiveAgentCatalog.sandboxModes ?? [], agent.sandboxMode, "继承主线程");
+  sandbox.addEventListener("change", () => {
+    agent.sandboxMode = sandbox.value || null;
+    markInteractiveConfigurationChanged();
+  });
+  sandboxField.append(sandbox);
+  controls.append(modelField, effortField, sandboxField);
+
+  const instructions = document.createElement("details");
+  instructions.className = "interactive-role-instructions";
+  instructions.open = index === 0;
+  const summary = document.createElement("summary");
+  summary.textContent = "Markdown 指令（developer_instructions）";
+  const editor = document.createElement("textarea");
+  editor.value = agent.developerInstructions;
+  editor.spellcheck = false;
+  editor.addEventListener("input", () => {
+    agent.developerInstructions = editor.value;
+    markInteractiveConfigurationChanged();
+  });
+  instructions.append(summary, editor);
+  row.append(heading, descriptionField, controls, instructions);
+  return row;
+}
+
 function renderInteractiveAgentConfig() {
-  const preset = interactiveAgentStatus.preset ?? { globalSettings: {}, agents: [] };
-  const global = preset.globalSettings ?? {};
-  elements.interactiveDefaultModel.textContent = global.defaultSubagentModel ?? "—";
-  elements.interactiveDefaultEffort.textContent = global.defaultSubagentReasoningEffort ?? "—";
-  elements.interactiveMaxThreads.textContent =
-    global.maxConcurrentThreadsPerSession === undefined
-      ? "—"
-      : String(global.maxConcurrentThreadsPerSession);
+  if (!interactiveAgentConfiguration) return;
+  const global = interactiveAgentConfiguration.globalSettings;
+  if (elements.interactiveDefaultModel.options.length === 0) {
+    for (const option of interactiveAgentCatalog.models ?? []) {
+      elements.interactiveDefaultModel.add(new Option(option.label, option.id));
+    }
+  }
+  if (![...elements.interactiveDefaultModel.options].some((option) => option.value === global.defaultSubagentModel)) {
+    elements.interactiveDefaultModel.add(new Option(global.defaultSubagentModel, global.defaultSubagentModel));
+  }
+  if (elements.interactiveDefaultEffort.options.length === 0) {
+    for (const effort of interactiveAgentCatalog.reasoningEfforts ?? []) {
+      elements.interactiveDefaultEffort.add(new Option(effort, effort));
+    }
+  }
+  elements.interactiveDefaultModel.value = global.defaultSubagentModel;
+  elements.interactiveDefaultEffort.value = global.defaultSubagentReasoningEffort;
+  elements.interactiveMaxThreads.value = String(global.maxConcurrentThreadsPerSession);
+  elements.interactiveRoleCount.textContent = `${interactiveAgentConfiguration.agents.length} / ${interactiveAgentCatalog.limits?.maxAgents ?? 32}`;
+  elements.interactiveAddRole.disabled = interactiveAgentConfiguration.agents.length >= (interactiveAgentCatalog.limits?.maxAgents ?? 32);
 
   const states = new Map(
     (interactiveAgentStatus.agents ?? []).map((agent) => [agent.name, agent.status]),
   );
-  elements.interactiveAgentList.replaceChildren();
-  for (const agent of preset.agents ?? []) {
-    const state = states.get(agent.name) ?? "unavailable";
-    const row = document.createElement("div");
-    row.className = "interactive-agent";
-    const name = document.createElement("strong");
-    name.textContent = agent.name;
-    const badge = document.createElement("b");
-    badge.textContent = INTERACTIVE_AGENT_STATUS_LABELS[state] ?? state;
-    badge.classList.toggle("conflict", state === "conflict" || state === "unsafe");
-    const model = document.createElement("code");
-    model.textContent = `${agent.model} · ${agent.reasoningEffort}${agent.sandboxMode ? ` · ${agent.sandboxMode}` : ""}`;
-    model.title = agent.description;
-    row.append(name, badge, model);
-    elements.interactiveAgentList.append(row);
+  const fingerprint = interactiveConfigurationFingerprint();
+  if (interactiveEditorFingerprint !== fingerprint) {
+    elements.interactiveAgentList.replaceChildren(
+      ...interactiveAgentConfiguration.agents.map((agent, index) => buildInteractiveRoleEditor(agent, index, states)),
+    );
+    interactiveEditorFingerprint = fingerprint;
+  } else {
+    for (const badge of elements.interactiveAgentList.querySelectorAll("[data-role-state]")) {
+      const state = states.get(badge.dataset.roleState) ?? "unavailable";
+      badge.textContent = INTERACTIVE_AGENT_STATUS_LABELS[state] ?? state;
+      badge.classList.toggle("conflict", state === "conflict" || state === "unsafe");
+    }
   }
 
   const conflictNames = interactiveAgentStatus.conflicts ?? [];
+  const removalConflicts = (interactiveAgentStatus.removals ?? [])
+    .filter((removal) => removal.status === "conflict")
+    .map((removal) => removal.name);
   elements.interactiveOverwriteRow.hidden = !interactiveAgentStatus.requiresOverwrite;
-  elements.interactiveConflictDetail.textContent = conflictNames.length > 0
-    ? `将先备份：${conflictNames.join(", ")}`
+  elements.interactiveConflictDetail.textContent = removalConflicts.length > 0
+    ? `无法自动删除外部已修改角色：${removalConflicts.join(", ")}`
+    : conflictNames.length > 0
+      ? `将先备份：${conflictNames.join(", ")}`
     : "检测到现有自定义配置";
   const health = interactiveAgentStatus.health;
   elements.interactiveAgentHealth.classList.toggle(
     "error",
     health === "conflict" || !["loading", "ready", "installed", "preview-only"].includes(health),
   );
-  if (!interactiveAgentStatusLoaded || health === "loading") {
+  if (!interactiveAgentStatusLoaded || health === "loading" || interactivePlanPending) {
     elements.interactiveAgentHealth.textContent = "正在检查";
     elements.interactiveInstallTitle.textContent = "等待状态";
     elements.interactiveInstallDetail.textContent = "读取 Codex agents 目录";
   } else if (health === "installed") {
     elements.interactiveAgentHealth.textContent = "配置已安装";
-    elements.interactiveInstallTitle.textContent = "7 个角色已就绪";
+    elements.interactiveInstallTitle.textContent = `${interactiveAgentConfiguration.agents.length} 个角色已就绪`;
     elements.interactiveInstallDetail.textContent = interactiveAgentStatus.agentsDir ?? "~/.codex/agents";
   } else if (health === "ready") {
     elements.interactiveAgentHealth.textContent = "等待安装";
@@ -1473,8 +1672,17 @@ function interactiveAgentIssue() {
   if (!interactiveAgentStatusLoaded) {
     return "正在读取 Codex 全局 subagent 配置。";
   }
+  if (interactivePlanPending) {
+    return "正在校验角色配置与文件冲突。";
+  }
   if (!interactiveAgentStatus.writeEnabled) {
     return "未启用 Codex 全局 agent 写入；请设置 AGENT_WORKFLOW_CODEX_HOME。";
+  }
+  const removalConflict = (interactiveAgentStatus.removals ?? []).find(
+    (removal) => removal.status === "conflict",
+  );
+  if (removalConflict) {
+    return `角色 ${removalConflict.name} 的文件已被外部修改；为避免误删，请恢复该角色或手动处理文件。`;
   }
   if (interactiveAgentStatus.health === "conflict") {
     return elements.interactiveAgentOverwrite.checked
@@ -1734,6 +1942,8 @@ async function applyModeSwitch(modeId) {
           content: draft.customized.value.content,
           allowAgentOverwrite:
             modeId === "interactive" && elements.interactiveAgentOverwrite.checked,
+          interactiveAgents:
+            modeId === "interactive" ? interactiveAgentConfiguration : undefined,
         }),
       });
       serverStatus = result.status;
@@ -1835,6 +2045,23 @@ async function loadServerStatus() {
 async function loadInteractiveAgentStatus() {
   try {
     interactiveAgentStatus = await requestJson("/api/interactive-agents");
+    interactiveAgentCatalog = interactiveAgentStatus.catalog ?? interactiveAgentCatalog;
+    if (!interactiveAgentConfiguration) {
+      let saved = null;
+      try {
+        saved = JSON.parse(localStorage.getItem(INTERACTIVE_DRAFT_KEY) ?? "null");
+      } catch {
+        localStorage.removeItem(INTERACTIVE_DRAFT_KEY);
+      }
+      interactiveAgentConfiguration = cloneJson(
+        saved ?? interactiveAgentStatus.configuration ?? interactiveAgentStatus.preset,
+      );
+      interactiveEditorFingerprint = null;
+      if (saved) {
+        interactivePlanPending = true;
+        queueMicrotask(planInteractiveAgentConfiguration);
+      }
+    }
   } catch (error) {
     interactiveAgentStatus = {
       writeEnabled: false,
@@ -1864,6 +2091,8 @@ elements.activateButton.addEventListener("click", async () => {
           content: currentResolution.content,
           allowAgentOverwrite:
             selectedModeId === "interactive" && elements.interactiveAgentOverwrite.checked,
+          interactiveAgents:
+            selectedModeId === "interactive" ? interactiveAgentConfiguration : undefined,
         }),
       });
       serverStatus = result.status;
@@ -1904,6 +2133,45 @@ elements.restoreSkillDefault.addEventListener("click", () => {
   showToast("已恢复当前配置的默认 Skill；点击激活后写入。");
 });
 elements.interactiveAgentOverwrite.addEventListener("change", refresh);
+elements.interactiveDefaultModel.addEventListener("change", () => {
+  if (!interactiveAgentConfiguration) return;
+  interactiveAgentConfiguration.globalSettings.defaultSubagentModel = elements.interactiveDefaultModel.value;
+  markInteractiveConfigurationChanged();
+});
+elements.interactiveDefaultEffort.addEventListener("change", () => {
+  if (!interactiveAgentConfiguration) return;
+  interactiveAgentConfiguration.globalSettings.defaultSubagentReasoningEffort = elements.interactiveDefaultEffort.value;
+  markInteractiveConfigurationChanged();
+});
+elements.interactiveMaxThreads.addEventListener("input", () => {
+  if (!interactiveAgentConfiguration) return;
+  interactiveAgentConfiguration.globalSettings.maxConcurrentThreadsPerSession = Number.parseInt(
+    elements.interactiveMaxThreads.value,
+    10,
+  );
+  markInteractiveConfigurationChanged();
+});
+elements.interactiveAddRole.addEventListener("click", () => {
+  if (!interactiveAgentConfiguration) return;
+  const names = new Set(interactiveAgentConfiguration.agents.map((agent) => agent.name));
+  let suffix = 1;
+  while (names.has(`custom_agent_${suffix}`)) suffix += 1;
+  interactiveAgentConfiguration.agents.push({
+    name: `custom_agent_${suffix}`,
+    description: "Custom specialist. Update this description so Codex knows when to use the role.",
+    model: null,
+    reasoningEffort: null,
+    sandboxMode: null,
+    developerInstructions: "Define this role's scope, responsibilities, boundaries, and expected report format.",
+  });
+  markInteractiveConfigurationChanged({ rebuild: true });
+});
+elements.interactiveResetRoles.addEventListener("click", () => {
+  if (!interactiveAgentStatus.preset) return;
+  interactiveAgentConfiguration = cloneJson(interactiveAgentStatus.preset);
+  markInteractiveConfigurationChanged({ rebuild: true });
+  showToast("已恢复默认角色草稿；激活后写入 Codex。");
+});
 elements.rollbackButton.addEventListener("click", async () => {
   const latest = serverStatus.backups[0];
   if (!latest) return;

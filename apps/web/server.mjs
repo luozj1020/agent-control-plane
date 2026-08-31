@@ -16,7 +16,7 @@ import { createCcSwitchUsageSource } from "./cc-switch-usage-source.mjs";
 import { createClaudeUsageSource } from "./claude-usage-source.mjs";
 import { createPreferredUsageSource } from "./preferred-usage-source.mjs";
 import { createBalancedRuntime } from "./balanced-runtime.mjs";
-import { createCodexAgentStore } from "./codex-agent-store.mjs";
+import { createEditableCodexAgentStore } from "./codex-agent-role-store.mjs";
 import { createSkillStore, SkillStoreError } from "./skill-store.mjs";
 import { createUsageMonitor } from "./usage-monitor.mjs";
 
@@ -126,7 +126,7 @@ export function createAppServer(options = {}) {
       : undefined;
   const codexAgentStore =
     options.codexAgentStore ??
-    createCodexAgentStore({ codexHome: options.codexHome ?? inferredCodexHome });
+    createEditableCodexAgentStore({ codexHome: options.codexHome ?? inferredCodexHome });
   const balancedRuntime = options.balancedRuntime ?? createBalancedRuntime({
     runtimeRoot: options.balancedRuntimeRoot,
   });
@@ -197,8 +197,30 @@ export function createAppServer(options = {}) {
         sendJson(
           response,
           200,
-          await codexAgentStore.install({ allowOverwrite: body?.allowOverwrite === true }),
+          await codexAgentStore.install({
+            allowOverwrite: body?.allowOverwrite === true,
+            configuration: body?.configuration,
+          }),
         );
+        return;
+      }
+
+      if (pathname === "/api/interactive-agents/plan" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        const plan = await codexAgentStore.status(body?.configuration);
+        if (plan.health === "agents.invalid_configuration") {
+          sendJson(response, 422, {
+            ...plan,
+            error: plan.health,
+            message: plan.error,
+          });
+          return;
+        }
+        sendJson(response, 200, plan);
         return;
       }
 
@@ -306,6 +328,7 @@ export function createAppServer(options = {}) {
           customized.value.mode.id === "interactive"
             ? await codexAgentStore.install({
                 allowOverwrite: body?.allowAgentOverwrite === true,
+                configuration: body?.interactiveAgents,
               })
             : null;
         let activation;
