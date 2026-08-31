@@ -206,6 +206,9 @@ export type ValidationIssueCode =
   | "profile.invalid"
   | "profile.unknown_field"
   | "schema.unsupported"
+  | "skill.content_invalid"
+  | "skill.content_too_large"
+  | "skill.frontmatter_invalid"
   | "security.raw_secret";
 
 export interface ValidationIssue {

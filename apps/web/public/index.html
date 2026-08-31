@@ -195,9 +195,12 @@
                   <span class="preview-dot green"></span>
                 </div>
                 <code id="skill-path">SKILL.md</code>
-                <span class="live-badge">LIVE</span>
+                <div class="preview-actions">
+                  <span class="live-badge" id="skill-draft-state">DEFAULT</span>
+                  <button class="preview-reset" id="restore-skill-default" type="button" disabled>恢复默认</button>
+                </div>
               </div>
-              <pre id="skill-preview" tabindex="0" aria-label="生成的 Skill 内容"></pre>
+              <textarea id="skill-preview" aria-label="可编辑的 Skill 内容" spellcheck="false"></textarea>
             </section>
 
             <section class="token-panel" aria-labelledby="token-chart-title">

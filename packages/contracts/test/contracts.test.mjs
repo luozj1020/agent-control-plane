@@ -7,6 +7,7 @@ import {
   BUILTIN_MODE_CATALOG,
   CODEX_OVERNIGHT_CLAUDE_PROFILE,
   EXAMPLE_AGENTS,
+  customizeEffectiveSkill,
   planSkillActivation,
   resolveEffectiveSkill,
 } from "../dist/index.js";
@@ -38,6 +39,54 @@ test("Overnight resolves one minimal Skill with only selected agents", () => {
   assert.doesNotMatch(result.value.content, /Balanced|Interactive/);
   assert.match(result.value.content, /builder: Claude Code/);
   assert.match(result.value.relativeSkillPath, /SKILL\.md$/);
+});
+
+test("edited Skill content retains generated identity and receives derived metadata", () => {
+  const resolved = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE);
+  assert.equal(resolved.ok, true);
+  if (!resolved.ok) return;
+  const content = resolved.value.content.replace("# Overnight", "# Overnight · Customized");
+  const customized = customizeEffectiveSkill(resolved.value, content);
+  assert.equal(customized.ok, true);
+  if (!customized.ok) return;
+  assert.equal(customized.value.content, content);
+  assert.notEqual(customized.value.contentFingerprint, resolved.value.contentFingerprint);
+  assert.equal(customized.value.estimatedTokens, Math.ceil(content.length / 4));
+  assert.equal(customized.value.id, resolved.value.id);
+});
+
+test("edited Skill content rejects missing or mismatched generated frontmatter", () => {
+  const resolved = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE);
+  assert.equal(resolved.ok, true);
+  if (!resolved.ok) return;
+  const mismatched = customizeEffectiveSkill(
+    resolved.value,
+    resolved.value.content.replace(`name: ${resolved.value.id}`, "name: another-skill"),
+  );
+  assert.equal(mismatched.ok, false);
+  if (mismatched.ok) return;
+  assert(mismatched.issues.some((issue) => issue.code === "skill.frontmatter_invalid"));
+});
+
+test("edited Skill content rejects duplicate identity fields and oversized UTF-8 content", () => {
+  const resolved = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE);
+  assert.equal(resolved.ok, true);
+  if (!resolved.ok) return;
+  const duplicate = customizeEffectiveSkill(
+    resolved.value,
+    resolved.value.content.replace(
+      `name: ${resolved.value.id}`,
+      `name: ${resolved.value.id}\nname: ${resolved.value.id}`,
+    ),
+  );
+  assert.equal(duplicate.ok, false);
+  const oversized = customizeEffectiveSkill(
+    resolved.value,
+    `${resolved.value.content}${"界".repeat(44_000)}`,
+  );
+  assert.equal(oversized.ok, false);
+  if (oversized.ok) return;
+  assert(oversized.issues.some((issue) => issue.code === "skill.content_too_large"));
 });
 
 test("Balanced resolves its tuned policy and excludes other modes", () => {

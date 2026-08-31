@@ -4,6 +4,7 @@ import {
   BUILTIN_MODE_CATALOG,
   CODEX_OVERNIGHT_CLAUDE_PROFILE,
   EXAMPLE_AGENTS,
+  customizeEffectiveSkill,
   planSkillActivation,
   resolveEffectiveSkill,
 } from "/contracts/index.js";
@@ -114,6 +115,8 @@ const elements = {
   runtimeUpdated: document.querySelector("#runtime-updated"),
   runtimeUpstreamTokens: document.querySelector("#runtime-upstream-tokens"),
   runtimeWindow: document.querySelector("#runtime-window"),
+  restoreSkillDefault: document.querySelector("#restore-skill-default"),
+  skillDraftState: document.querySelector("#skill-draft-state"),
   skillPath: document.querySelector("#skill-path"),
   skillPreview: document.querySelector("#skill-preview"),
   storeStatusDetail: document.querySelector("#store-status-detail"),
@@ -129,6 +132,9 @@ const elements = {
 
 let selectedModeId = "overnight";
 let currentResolution = null;
+let currentDefaultResolution = null;
+let currentDraftKey = null;
+const skillDrafts = new Map();
 let serverStatus = {
   writeEnabled: false,
   health: "loading",
@@ -1114,17 +1120,49 @@ function createProfile(modeId = selectedModeId) {
   return profile;
 }
 
+function draftKeyFor(variant) {
+  return `${variant.id}:${variant.contentFingerprint}`;
+}
+
+function resolveSkillDraft(modeId = selectedModeId) {
+  const resolved = resolveEffectiveSkill({
+    profile: createProfile(modeId),
+    agents: EXAMPLE_AGENTS,
+    catalog: BUILTIN_MODE_CATALOG,
+  });
+  if (!resolved.ok) return { ok: false, issues: resolved.issues };
+  const key = draftKeyFor(resolved.value);
+  const content = skillDrafts.get(key) ?? resolved.value.content;
+  return {
+    ok: true,
+    base: resolved.value,
+    key,
+    content,
+    customized: customizeEffectiveSkill(resolved.value, content),
+  };
+}
+
+function seedStoredSkillDraft(stored) {
+  if (!stored || typeof stored.content !== "string") return;
+  const drafted = resolveSkillDraft(stored.mode?.id ?? stored.modeId ?? selectedModeId);
+  if (!drafted.ok || drafted.base.id !== stored.variantId) return;
+  const customized = customizeEffectiveSkill(drafted.base, stored.content);
+  if (
+    customized.ok &&
+    customized.value.contentFingerprint === stored.contentFingerprint &&
+    stored.content !== drafted.base.content
+  ) {
+    skillDrafts.set(drafted.key, stored.content);
+  }
+}
+
 function renderTokenChart() {
   const estimates = BUILTIN_MODE_CATALOG.modes.map((mode) => {
-    const result = resolveEffectiveSkill({
-      profile: createProfile(mode.id),
-      agents: EXAMPLE_AGENTS,
-      catalog: BUILTIN_MODE_CATALOG,
-    });
+    const draft = resolveSkillDraft(mode.id);
     return {
       id: mode.id,
       label: mode.displayName,
-      tokens: result.ok ? result.value.estimatedTokens : null,
+      tokens: draft.ok && draft.customized.ok ? draft.customized.value.estimatedTokens : null,
     };
   });
   const available = estimates.flatMap((entry) =>
@@ -1272,6 +1310,8 @@ function renderIssues(issues) {
 
 function renderFailure(issues) {
   currentResolution = null;
+  currentDefaultResolution = null;
+  currentDraftKey = null;
   elements.compatibilityBadge.textContent = "配置不兼容";
   elements.compatibilityBadge.classList.add("error");
   elements.variantName.textContent = "无法生成";
@@ -1279,12 +1319,22 @@ function renderFailure(issues) {
   elements.includedModes.textContent = "—";
   elements.includedAgents.textContent = "—";
   elements.skillPath.textContent = "SKILL.md";
-  elements.skillPreview.textContent = "修复左侧配置后将在此生成最小 Skill。";
+  elements.skillPreview.value = "修复左侧配置后将在此生成最小 Skill。";
+  elements.skillDraftState.textContent = "UNAVAILABLE";
+  elements.skillDraftState.classList.remove("edited", "invalid");
+  elements.restoreSkillDefault.disabled = true;
   elements.activateButton.disabled = true;
   elements.copyButton.disabled = true;
   elements.exportButton.disabled = true;
   renderIssues(issues);
   renderOperations({ ok: false, issues });
+}
+
+function renderSkillDraftState(isDefault, valid) {
+  elements.skillDraftState.textContent = valid ? (isDefault ? "DEFAULT" : "EDITED") : "INVALID";
+  elements.skillDraftState.classList.toggle("edited", valid && !isDefault);
+  elements.skillDraftState.classList.toggle("invalid", !valid);
+  elements.restoreSkillDefault.disabled = isDefault;
 }
 
 function storeIsHealthy() {
@@ -1324,7 +1374,8 @@ function renderStoreStatus() {
   );
 }
 
-function refresh() {
+function refresh(options = {}) {
+  const preserveEditor = options?.preserveEditor === true;
   const interactive = selectedModeId === "interactive";
   const balanced = selectedModeId === "balanced";
   elements.builderAgent.disabled = interactive;
@@ -1335,19 +1386,40 @@ function refresh() {
   elements.balancedConfig.hidden = !balanced;
   elements.activationStep.textContent = balanced ? "04" : "03";
 
-  const result = resolveEffectiveSkill({
-    profile: createProfile(),
-    agents: EXAMPLE_AGENTS,
-    catalog: BUILTIN_MODE_CATALOG,
-  });
-  if (!result.ok) {
+  const draft = resolveSkillDraft();
+  if (!draft.ok) {
     renderTokenChart();
-    renderFailure(result.issues);
+    renderFailure(draft.issues);
     return;
   }
 
-  currentResolution = result.value;
-  const plan = planSkillActivation(result.value, getInstalledState());
+  currentDefaultResolution = draft.base;
+  currentDraftKey = draft.key;
+  if (!preserveEditor) elements.skillPreview.value = draft.content;
+  const isDefault = draft.content === draft.base.content;
+  renderSkillDraftState(isDefault, draft.customized.ok);
+
+  if (!draft.customized.ok) {
+    currentResolution = null;
+    elements.compatibilityBadge.textContent = "Skill 内容无效";
+    elements.compatibilityBadge.classList.add("error");
+    elements.variantName.textContent = draft.base.id;
+    elements.tokenEstimate.textContent = `≈ ${Math.ceil(draft.content.length / 4)} tokens`;
+    elements.includedModes.textContent = draft.base.includedModeIds.join(", ");
+    elements.includedAgents.textContent = draft.base.includedAgentIds.join(", ");
+    elements.skillPath.textContent = draft.base.relativeSkillPath;
+    elements.activateButton.disabled = true;
+    elements.copyButton.disabled = true;
+    elements.exportButton.disabled = true;
+    renderIssues(draft.customized.issues);
+    renderOperations(draft.customized);
+    renderStoreStatus();
+    renderTokenChart();
+    return;
+  }
+
+  currentResolution = draft.customized.value;
+  const plan = planSkillActivation(currentResolution, getInstalledState());
   if (!plan.ok) {
     renderFailure(plan.issues);
     return;
@@ -1355,12 +1427,11 @@ function refresh() {
 
   elements.compatibilityBadge.textContent = "兼容性通过";
   elements.compatibilityBadge.classList.remove("error");
-  elements.variantName.textContent = result.value.id;
-  elements.tokenEstimate.textContent = `≈ ${result.value.estimatedTokens} tokens`;
-  elements.includedModes.textContent = result.value.includedModeIds.join(", ");
-  elements.includedAgents.textContent = result.value.includedAgentIds.join(", ");
-  elements.skillPath.textContent = result.value.relativeSkillPath;
-  elements.skillPreview.textContent = result.value.content;
+  elements.variantName.textContent = currentResolution.id;
+  elements.tokenEstimate.textContent = `≈ ${currentResolution.estimatedTokens} tokens`;
+  elements.includedModes.textContent = currentResolution.includedModeIds.join(", ");
+  elements.includedAgents.textContent = currentResolution.includedAgentIds.join(", ");
+  elements.skillPath.textContent = currentResolution.relativeSkillPath;
   elements.activateButton.disabled = false;
   elements.copyButton.disabled = false;
   elements.exportButton.disabled = false;
@@ -1460,6 +1531,7 @@ function synchronizeControlsWithActiveSkill() {
     }
     applyBalancedBudgetToControls(preview?.balancedBudget);
     applyBalancedTimingToControls(preview?.balancedTiming);
+    seedStoredSkillDraft(preview);
     return;
   }
   if (BUILTIN_MODE_CATALOG.modes.some((mode) => mode.id === active.mode?.id)) {
@@ -1479,24 +1551,25 @@ function synchronizeControlsWithActiveSkill() {
   if (builderId) elements.builderAgent.value = builderId;
   applyBalancedBudgetToControls(active.balancedBudget);
   applyBalancedTimingToControls(active.balancedTiming);
+  seedStoredSkillDraft(active);
 }
 
 function savePreviewSelection(modeId) {
-  const resolution = resolveEffectiveSkill({
-    profile: createProfile(modeId),
-    agents: EXAMPLE_AGENTS,
-    catalog: BUILTIN_MODE_CATALOG,
-  });
-  if (!resolution.ok) throw new Error("当前 Agent 绑定与所选模式不兼容。");
+  const draft = resolveSkillDraft(modeId);
+  if (!draft.ok || !draft.customized.ok) {
+    throw new Error("当前 Skill 内容或 Agent 绑定无效。");
+  }
+  const resolution = draft.customized.value;
   localStorage.setItem(
     "agent-workflow-active-skill",
     JSON.stringify({
-      variantId: resolution.value.id,
+      variantId: resolution.id,
       modeId,
-      relativeSkillPath: resolution.value.relativeSkillPath,
-      contentFingerprint: resolution.value.contentFingerprint,
-      balancedBudget: resolution.value.balancedBudget ?? null,
-      balancedTiming: resolution.value.balancedTiming ?? null,
+      relativeSkillPath: resolution.relativeSkillPath,
+      contentFingerprint: resolution.contentFingerprint,
+      content: resolution.content,
+      balancedBudget: resolution.balancedBudget ?? null,
+      balancedTiming: resolution.balancedTiming ?? null,
     }),
   );
 }
@@ -1520,10 +1593,17 @@ async function applyModeSwitch(modeId) {
       if (!storeIsHealthy()) {
         throw new Error(serverStatus.error ?? "Skill 目录当前不可写。");
       }
+      const draft = resolveSkillDraft(modeId);
+      if (!draft.ok || !draft.customized.ok) {
+        throw new Error("当前 Skill 内容或 Agent 绑定无效。");
+      }
       const result = await requestJson("/api/activate", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ profile: createProfile(modeId) }),
+        body: JSON.stringify({
+          profile: createProfile(modeId),
+          content: draft.customized.value.content,
+        }),
       });
       serverStatus = result.status;
       if (modeId === selectedModeId) showToast(modeActivationMessage(modeId, result));
@@ -1623,7 +1703,10 @@ elements.activateButton.addEventListener("click", async () => {
       const result = await requestJson("/api/activate", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ profile: createProfile() }),
+        body: JSON.stringify({
+          profile: createProfile(),
+          content: currentResolution.content,
+        }),
       });
       serverStatus = result.status;
       showToast(modeActivationMessage(selectedModeId, result));
@@ -1638,6 +1721,23 @@ elements.activateButton.addEventListener("click", async () => {
   savePreviewSelection(selectedModeId);
   showToast("已保存为当前预览 Skill；尚未写入 Codex。");
   refresh();
+});
+elements.skillPreview.addEventListener("input", () => {
+  if (!currentDefaultResolution || !currentDraftKey) return;
+  const content = elements.skillPreview.value;
+  if (content === currentDefaultResolution.content) {
+    skillDrafts.delete(currentDraftKey);
+  } else {
+    skillDrafts.set(currentDraftKey, content);
+  }
+  refresh({ preserveEditor: true });
+});
+elements.restoreSkillDefault.addEventListener("click", () => {
+  if (!currentDefaultResolution || !currentDraftKey) return;
+  skillDrafts.delete(currentDraftKey);
+  elements.skillPreview.value = currentDefaultResolution.content;
+  refresh({ preserveEditor: true });
+  showToast("已恢复当前配置的默认 Skill；点击激活后写入。");
 });
 elements.rollbackButton.addEventListener("click", async () => {
   const latest = serverStatus.backups[0];

@@ -94,7 +94,7 @@ function assertVariant(variant) {
     !safeIdentifier(variant.id) ||
     typeof variant.content !== "string" ||
     variant.content.length === 0 ||
-    variant.content.length > 128 * 1024 ||
+    Buffer.byteLength(variant.content, "utf8") > 128 * 1024 ||
     typeof variant.contentFingerprint !== "string" ||
     !validBalancedBudget(variant.balancedBudget) ||
     !validBalancedTiming(variant.balancedTiming) ||
@@ -687,6 +687,9 @@ export function createSkillStore(options = {}) {
     try {
       await validateExistingControl();
       const manifest = await readOwnedDirectory(paths.active);
+      const activeContent = manifest
+        ? await readFile(join(paths.active, SKILL_FILE), "utf8")
+        : null;
       return {
         writeEnabled: true,
         skillsDir,
@@ -696,6 +699,7 @@ export function createSkillStore(options = {}) {
               variantId: manifest.variantId,
               relativeSkillPath: `${ACTIVE_DIRECTORY}/${SKILL_FILE}`,
               contentFingerprint: manifest.contentFingerprint,
+              content: activeContent,
               activatedAt: manifest.activatedAt,
               mode: manifest.mode,
               profileId: manifest.profileId,

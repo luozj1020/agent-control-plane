@@ -23,6 +23,8 @@ function lineSafe(value: string): string {
   return value.replace(/[\r\n]+/g, " ").trim();
 }
 
+const MAX_SKILL_CONTENT_BYTES = 128 * 1024;
+
 function fingerprint(content: string): string {
   let hash = 0x811c9dc5;
   for (let index = 0; index < content.length; index += 1) {
@@ -30,6 +32,83 @@ function fingerprint(content: string): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function skillContentBytes(content: string): number {
+  return new TextEncoder().encode(content).length;
+}
+
+export function customizeEffectiveSkill(
+  variant: EffectiveSkillVariant,
+  content: unknown,
+): Result<EffectiveSkillVariant> {
+  if (typeof content !== "string" || content.trim().length === 0 || content.includes("\0")) {
+    return {
+      ok: false,
+      issues: [
+        {
+          code: "skill.content_invalid",
+          path: "/content",
+          message: "Skill content must be a non-empty text document without NUL characters.",
+        },
+      ],
+    };
+  }
+  if (skillContentBytes(content) > MAX_SKILL_CONTENT_BYTES) {
+    return {
+      ok: false,
+      issues: [
+        {
+          code: "skill.content_too_large",
+          path: "/content",
+          message: "Skill content cannot exceed 128 KiB in UTF-8.",
+        },
+      ],
+    };
+  }
+  const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  const frontmatterBody = frontmatter?.[1];
+  const nameLines = frontmatterBody
+    ? [...frontmatterBody.matchAll(/^name:[\t ]*([^\r\n]*)$/gm)]
+    : [];
+  const descriptionLines = frontmatterBody
+    ? [...frontmatterBody.matchAll(/^description:[\t ]*([^\r\n]*)$/gm)]
+    : [];
+  const name = nameLines[0]?.[1]?.trim();
+  const description = descriptionLines[0]?.[1]?.trim();
+  if (!frontmatter || name !== variant.id || !description) {
+    return {
+      ok: false,
+      issues: [
+        {
+          code: "skill.frontmatter_invalid",
+          path: "/content/frontmatter",
+          message: `Skill frontmatter must retain name: ${variant.id} and a non-empty description.`,
+        },
+      ],
+    };
+  }
+  if (nameLines.length !== 1 || descriptionLines.length !== 1) {
+    return {
+      ok: false,
+      issues: [
+        {
+          code: "skill.frontmatter_invalid",
+          path: "/content/frontmatter",
+          message: "Skill frontmatter must contain exactly one name and one description.",
+        },
+      ],
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      ...variant,
+      content,
+      contentFingerprint: fingerprint(content),
+      estimatedTokens: Math.ceil(content.length / 4),
+    },
+  };
 }
 
 function targetLabel(binding: RoleBinding, agents: ReadonlyMap<string, AgentTarget>): string {

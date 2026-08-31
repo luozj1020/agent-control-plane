@@ -56,6 +56,9 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /ACTIVATION AUDIT LOG/);
     assert.match(html, /激活记录/);
     assert.match(html, /mode-switch-policy/);
+    assert.match(html, /id="skill-preview"/);
+    assert.match(html, /id="restore-skill-default"/);
+    assert.doesNotMatch(html, /<pre id="skill-preview"/);
 
     const coordinator = await fetch(`${baseUrl}/mode-switch-coordinator.js`);
     assert.equal(coordinator.status, 200);
@@ -189,6 +192,61 @@ test("activation API resolves the profile on the server and writes only the mana
 
         const status = await fetch(`${baseUrl}/api/status`);
         assert.equal((await status.json()).writeEnabled, true);
+      },
+      { skillsDir },
+    );
+  } finally {
+    await rm(skillsDir, { recursive: true, force: true });
+  }
+});
+
+test("activation API validates and writes edited Skill content with server-derived metadata", async () => {
+  const skillsDir = await mkdtemp(join(tmpdir(), "agent-workflow-api-edited-skill-"));
+  const content = [
+    "---",
+    "name: workflow-codex-overnight-claude-code",
+    "description: Customized overnight workflow.",
+    "---",
+    "",
+    "# Customized Overnight",
+    "",
+    "Keep this user-authored instruction.",
+    "",
+  ].join("\n");
+  try {
+    await withServer(
+      async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/api/activate`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ profile: CODEX_OVERNIGHT_CLAUDE_PROFILE, content }),
+        });
+        assert.equal(response.status, 200);
+        const body = await response.json();
+        assert.equal(body.status.active.content, content);
+        assert.equal(
+          await readFile(join(skillsDir, "agent-workflow-active", "SKILL.md"), "utf8"),
+          content,
+        );
+        assert.notEqual(body.status.active.contentFingerprint, "fnv1a32:00000000");
+
+        const rejected = await fetch(`${baseUrl}/api/activate`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            profile: CODEX_OVERNIGHT_CLAUDE_PROFILE,
+            content: content.replace(
+              "name: workflow-codex-overnight-claude-code",
+              "name: forged-skill-name",
+            ),
+          }),
+        });
+        assert.equal(rejected.status, 422);
+        assert.equal((await rejected.json()).error, "skill.invalid");
+        assert.equal(
+          await readFile(join(skillsDir, "agent-workflow-active", "SKILL.md"), "utf8"),
+          content,
+        );
       },
       { skillsDir },
     );

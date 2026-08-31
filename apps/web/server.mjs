@@ -9,6 +9,7 @@ import {
   BALANCED_TIMING_LIMITS,
   BUILTIN_MODE_CATALOG,
   EXAMPLE_AGENTS,
+  customizeEffectiveSkill,
   resolveEffectiveSkill,
 } from "../../packages/contracts/dist/index.js";
 import { createCcSwitchUsageSource } from "./cc-switch-usage-source.mjs";
@@ -68,8 +69,8 @@ async function readJsonBody(request) {
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 64 * 1024) {
-      throw new SkillStoreError("request.too_large", "Request body exceeds 64 KiB.", 413);
+    if (size > 1024 * 1024) {
+      throw new SkillStoreError("request.too_large", "Request body exceeds 1 MiB.", 413);
     }
     chunks.push(chunk);
   }
@@ -266,7 +267,15 @@ export function createAppServer(options = {}) {
           sendJson(response, 422, { error: "profile.invalid", issues: resolution.issues });
           return;
         }
-        sendJson(response, 200, await store.activate(resolution.value));
+        const customized =
+          body?.content === undefined
+            ? resolution
+            : customizeEffectiveSkill(resolution.value, body.content);
+        if (!customized.ok) {
+          sendJson(response, 422, { error: "skill.invalid", issues: customized.issues });
+          return;
+        }
+        sendJson(response, 200, await store.activate(customized.value));
         return;
       }
 
