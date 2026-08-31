@@ -1462,7 +1462,7 @@ function refresh(options = {}) {
         ? `文件系统当前激活：${installed.variantId}`
         : `目标目录：${serverStatus.skillsDir}`;
   } else {
-    elements.activateButton.textContent = "设为当前预览 Skill";
+    elements.activateButton.textContent = "激活skill";
     elements.activationNote.textContent = installed
       ? `浏览器当前记录：${installed.variantId}`
       : "保存只影响浏览器中的预览状态。";
