@@ -10,6 +10,7 @@ import {
   createBalancedRuntime,
   validateBalancedTask,
 } from "../balanced-runtime.mjs";
+import { createTaskCardTemplate } from "../task-card.mjs";
 
 async function withWorkspace(run) {
   const root = await mkdtemp(join(tmpdir(), "agent-control-balanced-"));
@@ -69,15 +70,29 @@ function testCatalog(budget = {}) {
 }
 
 function task(overrides = {}) {
-  return {
-    id: "test-task",
-    objective: "Update app.txt",
-    acceptance: ["app.txt contains the new value"],
-    allowedPaths: ["app.txt"],
-    forbiddenPaths: ["secret/**"],
-    validationCommands: [],
-    ...overrides,
-  };
+  const result = createTaskCardTemplate();
+  result.id = overrides.id ?? "test-task";
+  result.goal = overrides.objective ?? overrides.goal ?? "Update app.txt";
+  result.scope.write_paths = overrides.allowedPaths ?? overrides.scope?.write_paths ?? ["app.txt"];
+  result.scope.forbidden_paths = overrides.forbiddenPaths ?? overrides.scope?.forbidden_paths ?? ["secret/**"];
+  if (overrides.acceptance) {
+    result.acceptance = overrides.acceptance.map((item, index) =>
+      typeof item === "string"
+        ? { id: `acceptance-${index + 1}`, description: item }
+        : item);
+  } else {
+    result.acceptance = [{ id: "acceptance-1", description: "app.txt contains the new value" }];
+  }
+  if (overrides.validationCommands) {
+    result.validation = overrides.validationCommands.map((command, index) => ({
+      id: `validation-${index + 1}`,
+      command,
+    }));
+  }
+  if (overrides.allowNoChanges === true) {
+    result.extensions.agent_control_plane = { allow_no_changes: true };
+  }
+  return result;
 }
 
 function adapterRegistry(adapter) {
@@ -420,6 +435,44 @@ test("zero advisor budget disables extensions without misclassifying the round b
     assert.equal(result.review.roundStatus, "runtime_blocked");
     assert.equal(result.review.timeWindowPlan.terminationReason, "first_progress_timeout");
     assert.equal(result.review.evidence.budget.used.advisor, 0);
+  });
+});
+
+test("an explicit downstream no-response classification becomes runtime_blocked", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const silent = {
+      id: "silent-builder",
+      async start() {
+        return {
+          pid: 321,
+          result: Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            sessionId: null,
+            usage: { totalTokens: 0 },
+            failureCategory: "no-response",
+            diagnostics: { activity: { stdoutBytes: 0, stderrBytes: 0 } },
+          }),
+          usage: () => ({ totalTokens: 0 }),
+          sessionId: () => null,
+          async terminate() {},
+        };
+      },
+    };
+    const runtime = createBalancedRuntime({
+      runtimeRoot,
+      catalog: testCatalog(),
+      adapters: adapterRegistry(silent),
+    });
+    const result = await runtime.run({
+      task: task({ allowNoChanges: true }),
+      worktree,
+      adapterId: silent.id,
+      policyRef: "balanced-test@1.0.0",
+    });
+    assert.equal(result.review.roundStatus, "runtime_blocked");
+    assert.equal(result.review.timeWindowPlan.terminationReason, "no-response");
+    assert.equal(result.review.evidence.adapter.failureCategory, "no-response");
   });
 });
 

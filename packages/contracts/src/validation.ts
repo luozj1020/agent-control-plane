@@ -3,8 +3,10 @@ import { BALANCED_BUDGET_LIMITS, BALANCED_TIMING_LIMITS } from "./budget.js";
 import type {
   AgentCapability,
   AgentTarget,
+  ExternalMonitorPolicy,
   ModeSkillCatalog,
   ModeSkillTemplate,
+  OvernightLoopPolicy,
   RoleBinding,
   SkillResolutionInput,
   ValidationIssue,
@@ -20,6 +22,7 @@ const PROFILE_KEYS = new Set([
   "mode",
   "targetAdapterId",
   "roleBindings",
+  "overnightLoopPolicy",
   "balancedBudget",
   "balancedTiming",
 ]);
@@ -50,6 +53,16 @@ const AGENT_CAPABILITIES = new Set([
 ]);
 const WORKFLOW_ROLES = new Set(["builder", "planner", "reviewer", "subagent", "tester"]);
 const TARGET_KINDS = new Set(["agent", "main", "main-native"]);
+const EXTERNAL_MONITOR_LAYERS = ["process", "activity", "state", "evidence", "wake"] as const;
+
+function sameStringSet(actual: unknown, expected: readonly string[]): boolean {
+  return (
+    Array.isArray(actual) &&
+    actual.every((value) => typeof value === "string") &&
+    actual.length === expected.length &&
+    expected.every((value) => actual.includes(value))
+  );
+}
 
 function issue(
   code: ValidationIssueCode,
@@ -294,6 +307,169 @@ function validateBalancedTiming(value: unknown, issues: ValidationIssue[]): void
   }
 }
 
+function validateExternalMonitorPolicy(
+  reference: unknown,
+  lifecycle: "overnight-convergent" | "overnight-continuous" | "balanced",
+  catalog: ModeSkillCatalog,
+  issues: ValidationIssue[],
+): void {
+  if (!isRecord(reference) || typeof reference.id !== "string" || typeof reference.version !== "string") {
+    issues.push(
+      issue(
+        "mode.policy_invalid",
+        "/catalog/modes",
+        `${lifecycle} must reference a versioned external monitor policy.`,
+      ),
+    );
+    return;
+  }
+  const candidate = catalog.externalMonitorPolicies.find(
+    (policy) =>
+      isRecord(policy) && policy.id === reference.id && policy.version === reference.version,
+  );
+  if (!candidate) {
+    issues.push(
+      issue(
+        "mode.policy_unknown",
+        "/catalog/externalMonitorPolicies",
+        `External monitor policy '${reference.id}@${reference.version}' is missing.`,
+      ),
+    );
+    return;
+  }
+
+  const policy = candidate as ExternalMonitorPolicy;
+  const layersAreOrdered =
+    Array.isArray(policy.monitorLayers) &&
+    policy.monitorLayers.length === EXTERNAL_MONITOR_LAYERS.length &&
+    EXTERNAL_MONITOR_LAYERS.every((layer, index) => policy.monitorLayers[index] === layer);
+  const commonContractIsValid =
+    policy.schemaVersion === 1 &&
+    policy.owner === "external-control-plane" &&
+    policy.monitorsUpstreamProcess === false &&
+    layersAreOrdered &&
+    Array.isArray(policy.wakeEvents) &&
+    Array.isArray(policy.terminalWithoutWake);
+  const lifecycleContractIsValid =
+    lifecycle === "overnight-convergent"
+      ? policy.upstreamSleepPolicy === "end-episode-after-submit" &&
+        sameStringSet(policy.wakeEvents, [
+          "revision_pending",
+          "semantic_blocked",
+          "runtime_blocked",
+          "scope_violation",
+          "validation_failed",
+        ]) &&
+        sameStringSet(policy.terminalWithoutWake, ["accepted", "stopped", "interrupted"])
+      : lifecycle === "overnight-continuous"
+        ? policy.upstreamSleepPolicy === "end-episode-after-submit" &&
+          sameStringSet(policy.wakeEvents, [
+            "improvement_cycle_ready",
+            "revision_pending",
+            "semantic_blocked",
+            "authority_blocked",
+            "runtime_blocked",
+          ]) &&
+          sameStringSet(policy.terminalWithoutWake, ["stopped", "interrupted"])
+        : policy.upstreamSleepPolicy === "yield-during-runner-round" &&
+        sameStringSet(policy.wakeEvents, [
+          "review_pending",
+          "runtime_blocked",
+          "budget_exhausted",
+          "scope_violation",
+          "validation_failed",
+        ]) &&
+        Array.isArray(policy.terminalWithoutWake) &&
+        policy.terminalWithoutWake.length === 0;
+  if (!commonContractIsValid || !lifecycleContractIsValid) {
+    issues.push(
+      issue(
+        "mode.policy_invalid",
+        "/catalog/externalMonitorPolicies",
+        `External monitor policy '${reference.id}@${reference.version}' violates the ${lifecycle} lifecycle contract.`,
+      ),
+    );
+  }
+}
+
+function validateOvernightLoopPolicy(
+  mode: Extract<ModeSkillTemplate, { kind: "overnight" }>,
+  profile: WorkflowProfile,
+  catalog: ModeSkillCatalog,
+  issues: ValidationIssue[],
+): void {
+  const reference = profile.overnightLoopPolicy ?? mode.defaultLoopPolicy;
+  if (!isRecord(reference) || typeof reference.id !== "string" || typeof reference.version !== "string") {
+    issues.push(
+      issue(
+        "mode.policy_invalid",
+        profile.overnightLoopPolicy === undefined
+          ? "/catalog/modes"
+          : "/profile/overnightLoopPolicy",
+        "Overnight must select a versioned loop policy.",
+      ),
+    );
+    return;
+  }
+  const allowed =
+    Array.isArray(mode.loopPolicies) &&
+    mode.loopPolicies.some(
+      (candidate) =>
+        isRecord(candidate) &&
+        candidate.id === reference.id &&
+        candidate.version === reference.version,
+    );
+  const candidate = catalog.overnightLoopPolicies.find(
+    (policy) =>
+      isRecord(policy) && policy.id === reference.id && policy.version === reference.version,
+  );
+  if (!allowed || !candidate) {
+    issues.push(
+      issue(
+        "mode.policy_unknown",
+        profile.overnightLoopPolicy === undefined
+          ? "/catalog/overnightLoopPolicies"
+          : "/profile/overnightLoopPolicy",
+        `Overnight loop policy '${reference.id}@${reference.version}' is missing or not allowed by this mode.`,
+      ),
+    );
+    return;
+  }
+
+  const policy = candidate as OvernightLoopPolicy;
+  const convergent =
+    policy.strategy === "convergent" &&
+    policy.scopePolicy === "monotonic-non-expanding" &&
+    policy.completionPolicy === "terminal-on-acceptance";
+  const continuous =
+    policy.strategy === "continuous-improvement" &&
+    policy.scopePolicy === "bounded-expansion-with-rationale" &&
+    policy.completionPolicy === "continue-until-interrupted";
+  if (
+    policy.schemaVersion !== 1 ||
+    typeof policy.displayName !== "string" ||
+    policy.displayName.length === 0 ||
+    typeof policy.description !== "string" ||
+    policy.description.length === 0 ||
+    (!convergent && !continuous)
+  ) {
+    issues.push(
+      issue(
+        "mode.policy_invalid",
+        "/catalog/overnightLoopPolicies",
+        `Overnight loop policy '${reference.id}@${reference.version}' is invalid.`,
+      ),
+    );
+    return;
+  }
+  validateExternalMonitorPolicy(
+    policy.externalMonitorPolicy,
+    convergent ? "overnight-convergent" : "overnight-continuous",
+    catalog,
+    issues,
+  );
+}
+
 export function validateSkillResolutionInput(input: unknown): readonly ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   findRawSecrets(input, "", issues);
@@ -438,7 +614,9 @@ export function validateSkillResolutionInput(input: unknown): readonly Validatio
     !isRecord(rawCatalog) ||
     !Array.isArray(rawCatalog.modes) ||
     !Array.isArray(rawCatalog.tunedWindowPolicies) ||
-    !Array.isArray(rawCatalog.balancedBudgetPolicies)
+    !Array.isArray(rawCatalog.balancedBudgetPolicies) ||
+    !Array.isArray(rawCatalog.externalMonitorPolicies) ||
+    !Array.isArray(rawCatalog.overnightLoopPolicies)
   ) {
     issues.push(issue("profile.invalid", "/catalog", "Mode catalog is invalid."));
     return issues;
@@ -463,6 +641,23 @@ export function validateSkillResolutionInput(input: unknown): readonly Validatio
       ),
     );
     return issues;
+  }
+  if (mode.kind === "overnight") {
+    validateOvernightLoopPolicy(mode, profile, catalog, issues);
+  } else if (mode.kind === "balanced") {
+    validateExternalMonitorPolicy(mode.externalMonitorPolicy, "balanced", catalog, issues);
+  } else if (
+    "externalMonitorPolicy" in mode ||
+    "loopPolicies" in mode ||
+    "defaultLoopPolicy" in mode
+  ) {
+    issues.push(
+      issue(
+        "mode.policy_invalid",
+        "/catalog/modes",
+        "Interactive must remain in foreground ownership and cannot reference external monitor or Overnight loop policies.",
+      ),
+    );
   }
   if (mode.kind === "balanced") {
     const policy = catalog.tunedWindowPolicies.find(
@@ -570,6 +765,15 @@ export function validateSkillResolutionInput(input: unknown): readonly Validatio
         ),
       );
     }
+  }
+  if (mode.kind !== "overnight" && profile.overnightLoopPolicy !== undefined) {
+    issues.push(
+      issue(
+        "mode.incompatible_role",
+        "/profile/overnightLoopPolicy",
+        "Overnight loop policy configuration is valid only in Overnight mode.",
+      ),
+    );
   }
 
   validateModeRoles(mode, profile, agentsById, issues);

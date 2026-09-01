@@ -26,6 +26,20 @@ test("catalog exposes three distinct immutable mode Skill families", () => {
   assert.deepEqual(BALANCED_BUDGET_LIMITS.mainReviewCalls, { min: 1, max: 99 });
   assert.deepEqual(BALANCED_TIMING_LIMITS.hardCapSeconds, { min: 60, max: 7_200 });
   assert.equal(Object.isFrozen(BUILTIN_MODE_CATALOG.modes[0]), true);
+  assert.deepEqual(
+    BUILTIN_MODE_CATALOG.externalMonitorPolicies.map((policy) => policy.id),
+    ["overnight-convergent-monitor", "overnight-continuous-monitor", "balanced-round-monitor"],
+  );
+  for (const policy of BUILTIN_MODE_CATALOG.externalMonitorPolicies) {
+    assert.equal(policy.owner, "external-control-plane");
+    assert.equal(policy.monitorsUpstreamProcess, false);
+    assert.deepEqual(policy.monitorLayers, ["process", "activity", "state", "evidence", "wake"]);
+  }
+  assert.deepEqual(
+    BUILTIN_MODE_CATALOG.overnightLoopPolicies.map((policy) => policy.strategy),
+    ["convergent", "continuous-improvement"],
+  );
+  assert.equal("externalMonitorPolicy" in BUILTIN_MODE_CATALOG.modes[2], false);
 });
 
 test("Overnight resolves one minimal Skill with only selected agents", () => {
@@ -35,17 +49,61 @@ test("Overnight resolves one minimal Skill with only selected agents", () => {
 
   assert.deepEqual(result.value.includedModeIds, ["overnight"]);
   assert.deepEqual(result.value.includedAgentIds, ["codex", "claude-code"]);
-  assert.match(result.value.content, /# Overnight/);
+  assert.match(result.value.content, /# Workflow/);
   assert.doesNotMatch(result.value.content, /Balanced|Interactive/);
-  assert.match(result.value.content, /builder: Claude Code/);
+  assert.doesNotMatch(result.value.content, /- mode:|- main:|- builder:|- reviewer:/);
+  assert.deepEqual(result.value.externalMonitorPolicy, {
+    id: "overnight-convergent-monitor",
+    version: "1.0.0",
+  });
+  assert.deepEqual(result.value.overnightLoopPolicy, {
+    id: "overnight-convergent",
+    version: "1.0.0",
+  });
+  assert.match(result.value.id, /overnight-convergent/);
+  assert.match(result.value.content, /agent-control-plane overnight submit/);
+  assert.match(result.value.content, /--adapter claude-code --strategy convergent/);
+  assert.match(result.value.content, /end the current upstream inference episode/);
+  assert.match(result.value.content, /Do not call status or poll downstream/);
+  assert.match(result.value.content, /process -> activity -> state -> evidence -> wake/);
+  assert.match(result.value.content, /revision_pending, semantic_blocked, runtime_blocked/);
+  assert.match(result.value.content, /Terminal-without-wake states: accepted, stopped, interrupted/);
+  assert.match(result.value.content, /scope\.write_paths.*may only narrow/);
+  assert.match(result.value.content, /accept.*globally terminal/);
   assert.match(result.value.relativeSkillPath, /SKILL\.md$/);
+});
+
+test("Overnight continuous improvement treats user metrics as a floor and expands only by reviewed cycles", () => {
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    id: "codex-overnight-continuous",
+    overnightLoopPolicy: { id: "overnight-continuous-improvement", version: "1.0.0" },
+  };
+  const result = resolve(profile);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  assert.match(result.value.id, /overnight-continuous-improvement/);
+  assert.deepEqual(result.value.overnightLoopPolicy, profile.overnightLoopPolicy);
+  assert.deepEqual(result.value.externalMonitorPolicy, {
+    id: "overnight-continuous-monitor",
+    version: "1.0.0",
+  });
+  assert.match(result.value.content, /permanent minimum floor/);
+  assert.match(result.value.content, /success as a checkpoint, not global completion/);
+  assert.match(result.value.content, /overnight next-init/);
+  assert.match(result.value.content, /hypothesis and Task Card/);
+  assert.match(result.value.content, /`added_paths`/);
+  assert.match(result.value.content, /Continue until the user interrupts/);
+  assert.match(result.value.content, /--decision continue --next NEXT\.json/);
+  assert.doesNotMatch(result.value.content, /globally terminal/);
 });
 
 test("edited Skill content retains generated identity and receives derived metadata", () => {
   const resolved = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE);
   assert.equal(resolved.ok, true);
   if (!resolved.ok) return;
-  const content = resolved.value.content.replace("# Overnight", "# Overnight · Customized");
+  const content = resolved.value.content.replace("# Workflow", "# Customized workflow");
   const customized = customizeEffectiveSkill(resolved.value, content);
   assert.equal(customized.ok, true);
   if (!customized.ok) return;
@@ -61,7 +119,7 @@ test("edited Skill content rejects missing or mismatched generated frontmatter",
   if (!resolved.ok) return;
   const mismatched = customizeEffectiveSkill(
     resolved.value,
-    resolved.value.content.replace(`name: ${resolved.value.id}`, "name: another-skill"),
+    resolved.value.content.replace("name: agent-workflow-active", "name: another-skill"),
   );
   assert.equal(mismatched.ok, false);
   if (mismatched.ok) return;
@@ -75,8 +133,8 @@ test("edited Skill content rejects duplicate identity fields and oversized UTF-8
   const duplicate = customizeEffectiveSkill(
     resolved.value,
     resolved.value.content.replace(
-      `name: ${resolved.value.id}`,
-      `name: ${resolved.value.id}\nname: ${resolved.value.id}`,
+      "name: agent-workflow-active",
+      "name: agent-workflow-active\nname: agent-workflow-active",
     ),
   );
   assert.equal(duplicate.ok, false);
@@ -99,11 +157,97 @@ test("Balanced resolves its tuned policy and excludes other modes", () => {
   assert.equal(result.ok, true);
   if (!result.ok) return;
 
-  assert.match(result.value.content, /balanced-default@1\.0\.0/);
+  assert.doesNotMatch(result.value.content, /balanced-default@1\.0\.0|--policy/);
   assert.match(result.value.content, /agent-control-plane balanced run/);
-  assert.match(result.value.content, /context=600, active=600/);
+  assert.match(result.value.content, /context=600, first-progress=600, active=600/);
   assert.match(result.value.content, /main-review=3, downstream=3, advisor=2/);
+  assert.deepEqual(result.value.externalMonitorPolicy, {
+    id: "balanced-round-monitor",
+    version: "1.0.0",
+  });
+  assert.match(result.value.content, /Yield the upstream until the command returns/);
+  assert.match(result.value.content, /Do not poll status/);
+  assert.match(result.value.content, /machine-observed product changes refresh execution windows/);
+  assert.match(result.value.content, /At `review_pending`/);
+  assert.match(result.value.content, /runtime_blocked, budget_exhausted, scope_violation, validation_failed/);
   assert.doesNotMatch(result.value.content, /Overnight|Interactive/);
+});
+
+test("Overnight Skills invoke the product-owned detached runner", () => {
+  const convergent = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE);
+  assert.equal(convergent.ok, true);
+  if (!convergent.ok) return;
+  assert.match(convergent.value.content, /agent-control-plane overnight submit/);
+  assert.match(convergent.value.content, /--strategy convergent/);
+  assert.match(convergent.value.content, /agent-control-plane overnight review/);
+  assert.doesNotMatch(convergent.value.content, /aiwf\.py/);
+
+  const continuous = resolve({
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    overnightLoopPolicy: { id: "overnight-continuous-improvement", version: "1.0.0" },
+  });
+  assert.equal(continuous.ok, true);
+  if (!continuous.ok) return;
+  assert.match(continuous.value.content, /--strategy continuous-improvement/);
+  assert.match(continuous.value.content, /--decision continue --next NEXT\.json/);
+  assert.match(continuous.value.content, /overnight interrupt/);
+});
+
+test("mode resolution rejects missing or malformed external monitor policies", () => {
+  const unknownProfile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    overnightLoopPolicy: { id: "missing-policy", version: "1.0.0" },
+  };
+  const unknown = resolve(unknownProfile);
+  assert.equal(unknown.ok, false);
+  if (!unknown.ok) {
+    assert(unknown.issues.some((entry) => entry.code === "mode.policy_unknown"));
+  }
+
+  const invalidCatalog = {
+    ...BUILTIN_MODE_CATALOG,
+    externalMonitorPolicies: BUILTIN_MODE_CATALOG.externalMonitorPolicies.map((policy) =>
+      policy.id === "overnight-convergent-monitor"
+        ? { ...policy, monitorLayers: ["activity", "process", "state", "evidence", "wake"] }
+        : policy,
+    ),
+  };
+  const invalid = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE, EXAMPLE_AGENTS, invalidCatalog);
+  assert.equal(invalid.ok, false);
+  if (!invalid.ok) {
+    assert(invalid.issues.some((entry) => entry.code === "mode.policy_invalid"));
+  }
+
+  const malformedCatalog = {
+    ...BUILTIN_MODE_CATALOG,
+    externalMonitorPolicies: BUILTIN_MODE_CATALOG.externalMonitorPolicies.map((policy) =>
+      policy.id === "overnight-convergent-monitor"
+        ? { ...policy, wakeEvents: null, terminalWithoutWake: "review_ready" }
+        : policy,
+    ),
+  };
+  assert.doesNotThrow(() =>
+    resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE, EXAMPLE_AGENTS, malformedCatalog),
+  );
+  const malformed = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE, EXAMPLE_AGENTS, malformedCatalog);
+  assert.equal(malformed.ok, false);
+  if (!malformed.ok) {
+    assert(malformed.issues.some((entry) => entry.code === "mode.policy_invalid"));
+  }
+});
+
+test("Overnight loop selection is rejected outside Overnight mode", () => {
+  const profile = {
+    ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    id: "balanced-with-overnight-policy",
+    mode: { id: "balanced", version: "1.0.0" },
+    overnightLoopPolicy: { id: "overnight-convergent", version: "1.0.0" },
+  };
+  const result = resolve(profile);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert(result.issues.some((entry) => entry.path === "/profile/overnightLoopPolicy"));
+  }
 });
 
 test("Balanced embeds validated budget and timing overrides in the external Runner command", () => {
@@ -220,11 +364,56 @@ test("Interactive uses native subagents and includes no external agent", () => {
 
   assert.deepEqual(result.value.includedModeIds, ["interactive"]);
   assert.deepEqual(result.value.includedAgentIds, ["codex"]);
-  assert.match(result.value.content, /# Interactive/);
-  assert.match(result.value.content, /do not assume a fixed role list/);
-  assert.match(result.value.content, /narrowest suitable role/);
+  assert.match(result.value.content, /# Workflow/);
+  assert.match(result.value.content, /Do not assume a fixed role list or model/);
+  assert.match(result.value.content, /bounded objective, read\/write scope/);
   assert.match(result.value.content, /one active writer/);
+  assert.match(result.value.content, /explicit integration owner/);
+  assert.equal(result.value.externalMonitorPolicy, undefined);
+  assert.equal(result.value.overnightLoopPolicy, undefined);
+  assert.doesNotMatch(result.value.content, /external-control-plane|yield\/sleep|revision_pending/);
   assert.doesNotMatch(result.value.content, /Overnight|Balanced|Claude Code/);
+});
+
+test("generated Skills are self-contained, mode-isolated, and bounded in size", () => {
+  const profiles = [
+    CODEX_OVERNIGHT_CLAUDE_PROFILE,
+    {
+      ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+      id: "continuous-size-check",
+      overnightLoopPolicy: { id: "overnight-continuous-improvement", version: "1.0.0" },
+    },
+    {
+      ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+      id: "balanced-size-check",
+      mode: { id: "balanced", version: "1.0.0" },
+    },
+    {
+      ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+      id: "interactive-size-check",
+      mode: { id: "interactive", version: "1.0.0" },
+      roleBindings: [{ role: "subagent", target: { kind: "main-native" } }],
+    },
+  ];
+  for (const profile of profiles) {
+    const result = resolve(profile);
+    assert.equal(result.ok, true);
+    if (!result.ok) continue;
+    assert.match(result.value.content, /^---\nname: agent-workflow-active\n/);
+    assert.match(result.value.content, /description: Use when /);
+    assert.doesNotMatch(result.value.content, /## Active configuration|- mode:|- main:|- builder:|- reviewer:|@1\.0\.0/);
+    assert.match(result.value.content, /## Operating contract/);
+    assert.match(result.value.content, /## Procedure/);
+    assert(result.value.estimatedTokens <= (profile.mode.id === "interactive" ? 500 : 900));
+    if (profile.mode.id === "interactive") {
+      assert.doesNotMatch(result.value.content, /## Task Card|agent-control-plane .* run/);
+    } else {
+      assert.match(result.value.content, /## Task Card/);
+      assert.match(result.value.content, /agent-control-plane task init --output TASK\.json/);
+      assert.match(result.value.content, /agent-control-plane task validate --task TASK\.json/);
+      assert.doesNotMatch(result.value.content, /```json/);
+    }
+  }
 });
 
 test("Interactive rejects external-only subagent topology", () => {

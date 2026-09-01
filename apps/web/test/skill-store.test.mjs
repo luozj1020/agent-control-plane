@@ -30,7 +30,7 @@ function testStore(skillsDir) {
   });
 }
 
-function resolveMode(modeId, balancedBudget, balancedTiming) {
+function resolveMode(modeId, balancedBudget, balancedTiming, overnightLoopPolicy) {
   const mode = BUILTIN_MODE_CATALOG.modes.find((entry) => entry.id === modeId);
   assert(mode);
   const interactive = modeId === "interactive";
@@ -41,6 +41,7 @@ function resolveMode(modeId, balancedBudget, balancedTiming) {
     roleBindings: interactive
       ? [{ role: "subagent", target: { kind: "main-native" } }]
       : CODEX_OVERNIGHT_CLAUDE_PROFILE.roleBindings,
+    ...(overnightLoopPolicy ? { overnightLoopPolicy } : {}),
     ...(balancedBudget ? { balancedBudget } : {}),
     ...(balancedTiming ? { balancedTiming } : {}),
   };
@@ -103,8 +104,39 @@ test("activation writes an owned minimal Skill atomically", async () => {
     );
     assert.equal(manifest.owner, "agent-workflow-switch");
     assert.equal(manifest.variantId, variant.id);
+    assert.deepEqual(manifest.overnightLoopPolicy, variant.overnightLoopPolicy);
     assert.equal(result.status.active.variantId, variant.id);
+    assert.deepEqual(result.status.active.overnightLoopPolicy, variant.overnightLoopPolicy);
     assert.deepEqual(result.status.backups, []);
+  });
+});
+
+test("Overnight loop strategy survives switching, history, and rollback", async () => {
+  await withTempDirectory(async (skillsDir) => {
+    const store = testStore(skillsDir);
+    const convergent = resolveMode("overnight");
+    const continuous = resolveMode(
+      "overnight",
+      undefined,
+      undefined,
+      { id: "overnight-continuous-improvement", version: "1.0.0" },
+    );
+    assert.notEqual(convergent.id, continuous.id);
+
+    await store.activate(convergent);
+    const switched = await store.activate(continuous);
+    assert.deepEqual(switched.status.active.overnightLoopPolicy, continuous.overnightLoopPolicy);
+    const history = await store.history();
+    assert(history.entries.some(
+      (entry) => entry.overnightLoopPolicy?.id === "overnight-continuous-improvement",
+    ));
+
+    const convergentBackup = switched.status.backups.find(
+      (entry) => entry.variantId === convergent.id,
+    );
+    assert(convergentBackup);
+    const restored = await store.rollback(convergentBackup.backupId);
+    assert.deepEqual(restored.status.active.overnightLoopPolicy, convergent.overnightLoopPolicy);
   });
 });
 

@@ -13,6 +13,10 @@ const scripts = [
   new URL("../claude-usage-source.mjs", import.meta.url),
   new URL("../preferred-usage-source.mjs", import.meta.url),
   new URL("../skill-diff.mjs", import.meta.url),
+  new URL("../task-card.mjs", import.meta.url),
+  new URL("../task-card-preflight.mjs", import.meta.url),
+  new URL("../runtime-environment.mjs", import.meta.url),
+  new URL("../runtime-connectivity.mjs", import.meta.url),
   new URL("../public/app.js", import.meta.url),
   new URL("../public/mode-switch-coordinator.js", import.meta.url),
 ];
@@ -20,6 +24,7 @@ const required = [
   ...scripts,
   new URL("../public/index.html", import.meta.url),
   new URL("../public/styles.css", import.meta.url),
+  new URL("../task-card-v1.schema.json", import.meta.url),
 ];
 
 await Promise.all(required.map((file) => access(file)));

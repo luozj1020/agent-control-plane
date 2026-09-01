@@ -27,9 +27,9 @@ template into Codex.
 
 ## Product invariants
 
-1. The product is primarily a configuration switcher. Balanced may invoke one
-   on-demand, bounded local Runner; it is never an always-running workflow
-   daemon.
+1. The product is primarily a configuration switcher. Overnight may launch one
+   detached, run-scoped supervisor and Balanced may invoke one foreground,
+   bounded local Runner; neither requires an always-running workflow daemon.
 2. Overnight, Balanced, and Interactive are versioned product-owned mode
    templates. The product compiles them into agent-specific Skills,
    instructions, and configuration.
@@ -52,6 +52,24 @@ template into Codex.
 11. Balanced timing and budgets are enforced by tools, not natural-language
     claims. Product-content hashes are the only window-refresh authority.
 12. A downstream exit never authorizes semantic acceptance or merge.
+13. Overnight and Balanced reference versioned external-monitor policies with
+    the same ordered layers: process, activity, state, evidence, and wake. The
+    monitor owns downstream runtime facts and durable state; it never monitors
+    or keeps alive the upstream agent process.
+14. "Sleep" is an upstream lifecycle boundary, not an operating-system sleep:
+    Overnight ends the current inference episode after durable submission,
+    while Balanced yields during one foreground Runner round. Interactive has
+    no external sleep/monitor policy.
+15. Overnight loop policies are separate versioned Skill variants. The active
+    Skill contains either convergent or continuous-improvement instructions,
+    never both strategy bodies.
+16. An Overnight submission is durable before the upstream episode ends. Its
+    supervisor records process, activity, state, hash-bound evidence, and one
+    current wake request; a wake transport adapter may open the next upstream
+    review episode without making the upstream process the monitored subject.
+17. Convergent revisions are mechanically non-expanding. Continuous next-cycle
+    contracts retain the initial metric floor and forbidden boundaries, while
+    declaring rationale, measurable gain, added paths, and rollback boundary.
 
 ## Configuration model
 
@@ -63,6 +81,12 @@ template into Codex.
 - **Mode Skill template:** one product-owned, versioned orchestration contract
   for exactly one mode, with role requirements, capabilities,
   continuation/review policy, and render inputs.
+- **External monitor policy:** a versioned, agent-neutral contract defining the
+  downstream monitoring hierarchy, upstream sleep boundary, wake states, and
+  terminal states that must not generate duplicate wakes.
+- **Overnight loop policy:** a versioned strategy defining whether review
+  boundaries monotonically contract toward acceptance or permit a reviewed,
+  measurable expansion after each successful improvement checkpoint.
 - **Target adapter:** renders a product mode for Codex, Claude Code, or another
   compatible main-agent Skill/config format.
 - **Effective Skill bundle:** immutable resolved mode, agent bindings, adapter
@@ -76,13 +100,23 @@ template into Codex.
 
 ## Product-owned modes
 
-- **Overnight:** the main agent freezes intent, delegates durable downstream
-  work to the configured roles, returns only for semantic review, and issues
-  bounded revisions until accepted or genuinely blocked.
+- **Overnight / convergent:** the main agent freezes intent, delegates durable
+  downstream work, and ends its current inference episode. Every rejected
+  result becomes a Revision Delta whose `goal`, stable acceptance items, and
+  `scope.write_paths` cannot exceed the previous round. Forbidden paths,
+  stop conditions, risk, and authority boundaries cannot be relaxed. Accepted
+  `review_ready` is terminal.
+- **Overnight / continuous improvement:** the user metrics are the minimum
+  completion floor. A successful cycle becomes an evidence checkpoint; the
+  main agent may freeze one next hypothesis with measurable gain, added paths,
+  validation, and rollback boundaries. Forbidden and human-authority boundaries
+  remain immutable. The logical run continues until user interruption, while
+  semantic, authority, or runtime blockers pause it without inventing scope.
 - **Balanced:** the product selects a versioned, previously tuned window policy;
-  downstream work runs for the policy's current window and returns to the main
-  agent for review after every round. An on-demand Runner enforces context,
-  active, extension, idle, tail, and hard-cap boundaries plus call budgets.
+  the main agent yields while downstream work runs for the policy's current
+  round and wakes at the round-review or blocker boundary. An on-demand Runner
+  monitors and enforces context, active, extension, idle, tail, and hard-cap
+  boundaries plus call budgets.
   Token usage is monitored but never used as a termination budget.
   It is not one user-entered fixed window.
 - **Interactive:** the main agent remains foreground owner and collaborates with
@@ -103,6 +137,8 @@ require maintaining a Cartesian product of copied Skill directories.
 - The target agent sees only the currently activated workflow Skill.
 - A rendered Skill includes only the selected downstream agent adapters and
   role bindings.
+- An Overnight Skill includes only its selected loop policy, so the inactive
+  strategy does not consume the main agent's context.
 - Shared source fragments are resolved at render time; they are not bundled as
   unused runtime instructions.
 - Switching modes replaces the managed active Skill atomically and preserves a
@@ -126,7 +162,11 @@ total number of modes and supported agents in the product catalog.
 ## Explicit non-goals
 
 - Running or supervising the main Codex process or Interactive native
-  subagents. Balanced owns only the downstream child it explicitly launches.
+  subagents. External monitors own only the downstream child and durable run
+  state they explicitly launch or receive.
 - Owning general chat histories or arbitrary worktrees outside a Balanced run.
 - Acting as a model gateway or storing API credentials.
 - Keeping a second always-running orchestrator after profile activation.
+- Providing a remote wake transport for every supported upstream harness. Wake
+  states are durable adapter boundaries; harness-specific delivery remains an
+  adapter capability.

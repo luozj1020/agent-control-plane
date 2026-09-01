@@ -53,6 +53,14 @@ function safeIdentifier(value) {
   return typeof value === "string" && /^[a-z0-9][a-z0-9._-]{0,159}$/.test(value);
 }
 
+function validVersionedRef(value) {
+  return (
+    value === undefined ||
+    value === null ||
+    (value && safeIdentifier(value.id) && safeIdentifier(value.version))
+  );
+}
+
 function sha256(content) {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
@@ -96,6 +104,7 @@ function assertVariant(variant) {
     variant.content.length === 0 ||
     Buffer.byteLength(variant.content, "utf8") > 128 * 1024 ||
     typeof variant.contentFingerprint !== "string" ||
+    !validVersionedRef(variant.overnightLoopPolicy) ||
     !validBalancedBudget(variant.balancedBudget) ||
     !validBalancedTiming(variant.balancedTiming) ||
     !Array.isArray(variant.includedModeIds) ||
@@ -142,6 +151,7 @@ function manifestFor(variant, now, restoredFrom) {
     mainAgentId: variant.mainAgentId,
     targetAdapterId: variant.targetAdapterId,
     includedAgentIds: variant.includedAgentIds,
+    overnightLoopPolicy: variant.overnightLoopPolicy ?? null,
     balancedBudget: variant.balancedBudget ?? null,
     balancedTiming: variant.balancedTiming ?? null,
     contentFingerprint: variant.contentFingerprint,
@@ -407,6 +417,7 @@ export function createSkillStore(options = {}) {
       includedAgentIds: Array.isArray(variant.includedAgentIds)
         ? variant.includedAgentIds
         : [],
+      overnightLoopPolicy: variant.overnightLoopPolicy ?? null,
       balancedBudget: variant.balancedBudget ?? null,
       balancedTiming: variant.balancedTiming ?? null,
       contentFingerprint: variant.contentFingerprint,
@@ -489,6 +500,7 @@ export function createSkillStore(options = {}) {
       !safeIdentifier(metadata.mainAgentId) ||
       !Array.isArray(metadata.includedAgentIds) ||
       !metadata.includedAgentIds.every(safeIdentifier) ||
+      !validVersionedRef(metadata.overnightLoopPolicy) ||
       typeof metadata.recordedAt !== "string" ||
       !Number.isFinite(Date.parse(metadata.recordedAt)) ||
       typeof metadata.activatedAt !== "string" ||
@@ -582,6 +594,7 @@ export function createSkillStore(options = {}) {
       mainAgentId: metadata.mainAgentId,
       targetAdapterId: metadata.targetAdapterId,
       includedAgentIds: metadata.includedAgentIds,
+      overnightLoopPolicy: metadata.overnightLoopPolicy ?? null,
       contentFingerprint: metadata.contentFingerprint,
       previous: metadata.previous,
       sourceHistoryId: metadata.sourceHistoryId,
@@ -602,6 +615,7 @@ export function createSkillStore(options = {}) {
           mainAgentId: manifest.mainAgentId,
           targetAdapterId: manifest.targetAdapterId ?? null,
           includedAgentIds: manifest.includedAgentIds ?? [],
+          overnightLoopPolicy: manifest.overnightLoopPolicy ?? null,
           balancedBudget: manifest.balancedBudget ?? null,
           balancedTiming: manifest.balancedTiming ?? null,
           contentFingerprint: manifest.contentFingerprint,
@@ -653,6 +667,15 @@ export function createSkillStore(options = {}) {
       ["profileId", active?.profileId ?? null, snapshot.metadata.profileId],
       ["mainAgentId", active?.mainAgentId ?? null, snapshot.metadata.mainAgentId],
       ["targetAdapterId", active?.targetAdapterId ?? null, snapshot.metadata.targetAdapterId],
+      [
+        "overnightLoopPolicy",
+        active?.overnightLoopPolicy
+          ? `${active.overnightLoopPolicy.id}@${active.overnightLoopPolicy.version}`
+          : null,
+        snapshot.metadata.overnightLoopPolicy
+          ? `${snapshot.metadata.overnightLoopPolicy.id}@${snapshot.metadata.overnightLoopPolicy.version}`
+          : null,
+      ],
       [
         "balancedBudget",
         JSON.stringify(active?.balancedBudget ?? null),
@@ -706,6 +729,7 @@ export function createSkillStore(options = {}) {
               mainAgentId: manifest.mainAgentId,
               targetAdapterId: manifest.targetAdapterId ?? null,
               includedAgentIds: manifest.includedAgentIds ?? [],
+              overnightLoopPolicy: manifest.overnightLoopPolicy ?? null,
               balancedBudget: manifest.balancedBudget ?? null,
               balancedTiming: manifest.balancedTiming ?? null,
             }
@@ -807,6 +831,7 @@ export function createSkillStore(options = {}) {
         mainAgentId: backupManifest.mainAgentId,
         targetAdapterId: backupManifest.targetAdapterId,
         includedAgentIds: backupManifest.includedAgentIds ?? [],
+        overnightLoopPolicy: backupManifest.overnightLoopPolicy ?? undefined,
         balancedBudget: backupManifest.balancedBudget ?? undefined,
         balancedTiming: backupManifest.balancedTiming ?? undefined,
         contentFingerprint: backupManifest.contentFingerprint,
@@ -876,6 +901,7 @@ export function createSkillStore(options = {}) {
         mainAgentId: snapshot.metadata.mainAgentId,
         targetAdapterId: snapshot.metadata.targetAdapterId ?? undefined,
         includedAgentIds: snapshot.metadata.includedAgentIds,
+        overnightLoopPolicy: snapshot.metadata.overnightLoopPolicy ?? undefined,
         balancedBudget: snapshot.metadata.balancedBudget ?? undefined,
         balancedTiming: snapshot.metadata.balancedTiming ?? undefined,
         contentFingerprint: snapshot.metadata.contentFingerprint,

@@ -20,6 +20,7 @@ test("process adapters stream activity, session identity, and deduplicated usage
       id: "test-process",
       command: process.execPath,
       args: ["-e", script],
+      requiresNetwork: false,
     });
     const events = [];
     const controller = await adapter.start({
@@ -35,9 +36,44 @@ test("process adapters stream activity, session identity, and deduplicated usage
     assert.equal(result.exitCode, 0);
     assert.equal(result.sessionId, "session-test");
     assert.equal(result.usage.totalTokens, 15);
+    assert.equal(result.failureCategory, null);
+    assert.equal(result.diagnostics.activity.streamInitialized, false);
+    assert.ok(result.diagnostics.activity.stdoutBytes > 0);
     assert(events.some((event) => event.type === "task-directed"));
     assert(events.some((event) => event.type === "completion-ready"));
     assert.match(await readFile(join(root, "stdout.jsonl"), "utf8"), /message-1/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("network adapters fail closed with a host handoff inside a restricted sandbox", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-control-adapter-sandbox-"));
+  try {
+    const adapter = createProcessAdapter({
+      id: "network-process",
+      command: process.execPath,
+      args: ["-e", "process.exit(99)"],
+      requiresNetwork: true,
+      providerEnvironmentPrefixes: ["TEST_PROVIDER_"],
+    });
+    const events = [];
+    const controller = await adapter.start({
+      worktree: root,
+      prompt: "must not be dispatched",
+      stdoutPath: join(root, "stdout.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      runtimeEnvironment: { executionEnvironment: "sandbox" },
+      onEvent(event) {
+        events.push(event);
+      },
+    });
+    const result = await controller.result;
+    assert.equal(controller.pid, null);
+    assert.equal(result.exitCode, null);
+    assert.equal(result.failureCategory, "sandbox-network-host-handoff");
+    assert.equal(result.diagnostics.environment.hostHandoffRequired, true);
+    assert(events.some((event) => event.type === "adapter-blocked"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

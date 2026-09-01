@@ -23,19 +23,17 @@ import {
   BUILTIN_MODE_CATALOG,
 } from "../../packages/contracts/dist/index.js";
 import { createBuiltInAdapterRegistry } from "./agent-adapters.mjs";
+import { normalizeRuntimeEnvironment } from "./runtime-environment.mjs";
+import {
+  TaskCardError,
+  taskAllowsNoChanges,
+  taskValidationCommands,
+  validateTaskCard,
+} from "./task-card.mjs";
 
 const RUNTIME_SCHEMA_VERSION = 1;
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,159}$/;
 const IGNORED_DIRECTORIES = new Set([".git", ".agent-control-plane", "node_modules"]);
-const TASK_KEYS = new Set([
-  "id",
-  "objective",
-  "acceptance",
-  "allowedPaths",
-  "forbiddenPaths",
-  "validationCommands",
-  "allowNoChanges",
-]);
 
 export class BalancedRuntimeError extends Error {
   constructor(code, message, status = 400, details = undefined) {
@@ -141,82 +139,14 @@ function validateBudget(budget) {
 }
 
 export function validateBalancedTask(task) {
-  if (!task || typeof task !== "object" || Array.isArray(task)) {
-    throw new BalancedRuntimeError("task.invalid", "Balanced Task must be an object.");
-  }
-  for (const key of Object.keys(task)) {
-    if (!TASK_KEYS.has(key)) {
-      throw new BalancedRuntimeError("task.unknown_field", `Unknown Balanced Task field '${key}'.`);
+  try {
+    return validateTaskCard(task);
+  } catch (error) {
+    if (error instanceof TaskCardError) {
+      throw new BalancedRuntimeError(error.code, error.message, error.status);
     }
+    throw error;
   }
-  if (
-    !SAFE_ID.test(task.id ?? "") ||
-    typeof task.objective !== "string" ||
-    !task.objective.trim() ||
-    task.objective.length > 16_384
-  ) {
-    throw new BalancedRuntimeError("task.invalid", "Task id and objective are required.");
-  }
-  for (const key of ["acceptance", "allowedPaths", "forbiddenPaths"] ) {
-    if (
-      !Array.isArray(task[key]) ||
-      (key !== "forbiddenPaths" && task[key].length === 0) ||
-      task[key].length > 512 ||
-      !task[key].every(
-        (value) => typeof value === "string" && value.length > 0 && value.length <= 4096,
-      )
-    ) {
-      throw new BalancedRuntimeError(
-        "task.invalid",
-        `${key} must be ${key === "forbiddenPaths" ? "an array" : "a non-empty array"} of non-empty strings.`,
-      );
-    }
-  }
-  for (const pattern of [...task.allowedPaths, ...task.forbiddenPaths]) {
-    const normalized = pattern
-      .replaceAll("\\", "/")
-      .replace(/^\.\//, "")
-      .replace(/\/+$/, "");
-    if (
-      !normalized ||
-      normalized.startsWith("/") ||
-      /^[A-Za-z]:\//.test(normalized) ||
-      normalized.split("/").includes("..") ||
-      normalized.includes("\0")
-    ) {
-      throw new BalancedRuntimeError(
-        "task.unsafe_path",
-        `Task path pattern '${pattern}' must stay relative to the worktree.`,
-      );
-    }
-  }
-  if (
-    !Array.isArray(task.validationCommands) ||
-    !task.validationCommands.every(
-      (command) =>
-        Array.isArray(command) &&
-        command.length > 0 &&
-        command.length <= 64 &&
-        command.every((part) => typeof part === "string" && part.length > 0 && part.length <= 4096),
-    )
-  ) {
-    throw new BalancedRuntimeError(
-      "task.invalid",
-      "validationCommands must contain argv arrays and never shell strings.",
-    );
-  }
-  if (task.allowNoChanges !== undefined && typeof task.allowNoChanges !== "boolean") {
-    throw new BalancedRuntimeError("task.invalid", "allowNoChanges must be boolean.");
-  }
-  return Object.freeze({
-    id: task.id,
-    objective: task.objective.trim(),
-    acceptance: Object.freeze([...task.acceptance]),
-    allowedPaths: Object.freeze([...task.allowedPaths]),
-    forbiddenPaths: Object.freeze([...task.forbiddenPaths]),
-    validationCommands: Object.freeze(task.validationCommands.map((command) => Object.freeze([...command]))),
-    allowNoChanges: task.allowNoChanges === true,
-  });
 }
 
 async function validateDirectory(path, label) {
@@ -313,8 +243,8 @@ function globExpression(pattern) {
 }
 
 function buildReviewProjection(task, before, after, paths) {
-  const allowed = task.allowedPaths.map(globExpression);
-  const forbidden = task.forbiddenPaths.map(globExpression);
+  const allowed = task.scope.write_paths.map(globExpression);
+  const forbidden = (task.scope.forbidden_paths ?? []).map(globExpression);
   const entries = paths.map((path) => {
     const classification = forbidden.some((pattern) => pattern.test(path))
       ? "forbidden"
@@ -359,7 +289,7 @@ function execFileResult(command, args, options) {
 
 async function runValidation(task, worktree, timeoutMs) {
   const results = [];
-  for (const [command, ...args] of task.validationCommands) {
+  for (const [command, ...args] of taskValidationCommands(task)) {
     const result = await execFileResult(command, args, {
       cwd: worktree,
       encoding: "utf8",
@@ -549,7 +479,7 @@ function buildPrompt(task, context) {
   return [
     "You are the downstream Builder in a bounded Balanced workflow round.",
     "The JSON contract below is frozen. Implement it in the current worktree.",
-    "Do not edit forbidden paths or paths outside allowedPaths. Run assigned validation when useful.",
+    "Do not edit forbidden paths or paths outside scope.write_paths. Run assigned validation when useful.",
     "Finish by reporting assumptions, changed paths, validation, and remaining risks, then exit.",
     context.round > 1
       ? `This is revision round ${context.round}; preserve prior accepted work and implement only this delta.`
@@ -643,6 +573,7 @@ export function createBalancedRuntime(options = {}) {
       input.timing,
     );
     const budget = resolveBudget(catalog, input.budget);
+    const runtimeEnvironment = normalizeRuntimeEnvironment(input.runtimeEnvironment);
     const runId = `${new Date(clock()).toISOString().replace(/[:.]/g, "-").toLowerCase()}-${task.id.slice(0, 64)}-${randomUUID()}`;
     const runDirectory = join(runtimeRoot, runId);
     await mkdir(runDirectory, { mode: 0o700 });
@@ -657,6 +588,7 @@ export function createBalancedRuntime(options = {}) {
       taskSha256: sha256(contractText),
       worktree,
       adapterId: adapter.id,
+      runtimeEnvironment,
       policyRef: policyReference(policy),
       policy,
       budget,
@@ -869,6 +801,7 @@ export function createBalancedRuntime(options = {}) {
         stdoutPath: join(roundDirectory, "stdout.jsonl"),
         stderrPath: join(roundDirectory, "stderr.log"),
         terminationGraceMs: 5000,
+        runtimeEnvironment: metadata.runtimeEnvironment,
         onEvent(event) {
           const now = clock();
           if (event.type === "output" && firstOutputAt === 0) firstOutputAt = now;
@@ -1114,6 +1047,15 @@ export function createBalancedRuntime(options = {}) {
       record({ type: "adapter-error", message: error.message });
     }
 
+    if (!terminationReason && adapterResult?.failureCategory) {
+      terminationReason = adapterResult.failureCategory;
+      record({
+        type: "adapter-runtime-blocked",
+        failureCategory: adapterResult.failureCategory,
+        diagnostics: adapterResult.diagnostics ?? null,
+      });
+    }
+
     await cancelAdvisorEvaluation("round-finished").catch((error) => {
       record({ type: "advisor-cleanup-error", message: error.message });
       if (!terminationReason) terminationReason = "advisor_failed";
@@ -1144,7 +1086,7 @@ export function createBalancedRuntime(options = {}) {
     const paths = changedPaths(baseline, finalSnapshot);
     const reviewProjection = buildReviewProjection(task, baseline, finalSnapshot, paths);
     const scope = scopeResult(reviewProjection);
-    const hasRequiredChange = task.allowNoChanges || paths.length > 0;
+    const hasRequiredChange = taskAllowsNoChanges(task) || paths.length > 0;
     let roundStatus = "review_pending";
     if (terminationReason && terminationReason !== "completion_ready_converged") {
       roundStatus = terminationReason === "budget_exhausted" ? "budget_exhausted" : "runtime_blocked";
@@ -1224,6 +1166,8 @@ export function createBalancedRuntime(options = {}) {
           exitCode: adapterResult?.exitCode ?? null,
           signal: adapterResult?.signal ?? null,
           error: adapterResult?.error ?? null,
+          failureCategory: adapterResult?.failureCategory ?? null,
+          diagnostics: adapterResult?.diagnostics ?? null,
         },
         usage,
         budget: evidenceBudget,
@@ -1239,6 +1183,8 @@ export function createBalancedRuntime(options = {}) {
     metadata.sessionId = review.sessionId;
     metadata.latestReviewPath = reviewPath;
     metadata.latestReviewSha256 = reviewSha256;
+    metadata.latestFailureCategory = adapterResult?.failureCategory ?? null;
+    metadata.latestRuntimeDiagnostics = adapterResult?.diagnostics ?? null;
     metadata.updatedAt = new Date(clock()).toISOString();
     await writeJsonAtomic(join(runDirectory, "run.json"), metadata);
     return { runDirectory, reviewPath, reviewSha256, review };

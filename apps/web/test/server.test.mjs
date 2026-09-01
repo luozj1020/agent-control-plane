@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { CODEX_OVERNIGHT_CLAUDE_PROFILE } from "../../../packages/contracts/dist/index.js";
-import { createAppServer } from "../server.mjs";
+import { createAppServer, resolveLocalCodexPaths } from "../server.mjs";
 
 async function withServer(run, options = {}) {
   const server = createAppServer(options);
@@ -21,6 +21,27 @@ async function withServer(run, options = {}) {
     );
   }
 }
+
+test("local entrypoint discovers the current user's Codex home with explicit and preview overrides", () => {
+  assert.deepEqual(resolveLocalCodexPaths({}, "/home/tester"), {
+    codexHome: "/home/tester/.codex",
+    skillsDir: "/home/tester/.codex/skills",
+    source: "auto",
+  });
+  assert.deepEqual(resolveLocalCodexPaths({
+    AGENT_WORKFLOW_CODEX_HOME: "/opt/codex",
+    AGENT_WORKFLOW_SKILLS_DIR: "/opt/codex/custom-skills",
+  }, "/home/tester"), {
+    codexHome: "/opt/codex",
+    skillsDir: "/opt/codex/custom-skills",
+    source: "explicit",
+  });
+  assert.deepEqual(resolveLocalCodexPaths({ AGENT_WORKFLOW_PREVIEW_ONLY: "1" }, "/home/tester"), {
+    codexHome: undefined,
+    skillsDir: undefined,
+    source: "preview-only",
+  });
+});
 
 test("serves the application and health endpoint", async () => {
   await withServer(async (baseUrl) => {
@@ -38,6 +59,22 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /Token 运行时用量/);
     assert.match(html, /RUNTIME ANALYTICS/);
     assert.match(html, /id="nav-usage"/);
+    assert.match(html, /id="nav-task-card"/);
+    assert.match(html, /class="task-card-view" id="task-card-view" hidden/);
+    assert.match(html, /id="task-card-editor"/);
+    assert.match(html, /id="task-card-form"/);
+    assert.match(html, /id="task-card-editor-switch"/);
+    assert.match(html, /id="task-card-undo"/);
+    assert.match(html, /id="task-card-preflight-run"/);
+    assert.match(html, /id="task-card-connectivity-run"/);
+    assert.match(html, /主动连接诊断 · 1 次调用/);
+    assert.match(html, /id="task-card-connectivity-result"/);
+    assert.match(html, /id="task-card-execution-environment"/);
+    assert.match(html, /id="task-card-proxy-mode"/);
+    assert.match(html, /id="task-card-environment-isolation"/);
+    assert.match(html, /id="task-card-network-diagnostics"/);
+    assert.match(html, /id="task-card-markdown"/);
+    assert.match(html, /JSON 是运行时唯一事实源/);
     assert.match(html, /class="usage-view" id="usage-view" hidden/);
     assert.match(html, /模型调用数/);
     assert.match(html, /id="calls-chart"/);
@@ -79,6 +116,146 @@ test("serves the application and health endpoint", async () => {
     assert.match(css, /Readability floor/);
     assert.match(css, /body \{ font-size: 14px/);
     assert.match(css, /\.interactive-role-tag \{ font-size: 12px/);
+  });
+});
+
+test("active connectivity endpoint forwards only the explicit diagnostic request", async () => {
+  let received = null;
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/runtime/connectivity-probe`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({
+        adapterId: "claude-code",
+        worktree: tmpdir(),
+        timeoutSeconds: 60,
+        runtimeEnvironment: { proxyMode: "direct" },
+      }),
+    });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.kind, "downstream-connectivity-probe");
+    assert.equal(result.success, true);
+    assert.equal(result.activity.stdoutBytes, 42);
+    assert.deepEqual(received, {
+      adapterId: "claude-code",
+      worktree: tmpdir(),
+      timeoutSeconds: 60,
+      runtimeEnvironment: { proxyMode: "direct" },
+    });
+  }, {
+    async connectivityProbe(input) {
+      received = input;
+      return {
+        schemaVersion: 1,
+        kind: "downstream-connectivity-probe",
+        adapterId: input.adapterId,
+        success: true,
+        activity: { stdoutBytes: 42, stderrBytes: 0, parsedEvents: 2 },
+      };
+    },
+  });
+});
+
+test("serves and validates the canonical Task Card used by both delegated modes", async () => {
+  await withServer(async (baseUrl) => {
+    const templateResponse = await fetch(`${baseUrl}/api/task-card/template`);
+    assert.equal(templateResponse.status, 200);
+    const template = await templateResponse.json();
+    assert.equal(template.task.id, "task-id");
+    assert.equal(template.task.schema_version, 1);
+    assert.match(template.projections.audit, /^# Task Card/m);
+    assert.match(template.projections.execution, /execution-card-v1/);
+
+    const schemaResponse = await fetch(`${baseUrl}/api/task-card/schema`);
+    assert.equal(schemaResponse.status, 200);
+    const schema = await schemaResponse.json();
+    assert.equal(schema.title, "Task Card v1");
+    assert.equal(schema.properties.schema_version.const, 1);
+    assert.ok(schema.required.includes("stop_conditions"));
+
+    const validResponse = await fetch(`${baseUrl}/api/task-card/validate`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({
+        ...template.task,
+        id: "api-task",
+        goal: "Validate one bounded behavior.",
+        validation: [{ id: "tests", command: ["npm", "test"] }],
+      }),
+    });
+    assert.equal(validResponse.status, 200);
+    const valid = await validResponse.json();
+    assert.equal(valid.valid, true);
+    assert.equal(valid.migrated, false);
+    assert.equal(valid.task.id, "api-task");
+    assert.match(valid.projections.audit, /Validate one bounded behavior\./);
+
+    const legacyResponse = await fetch(`${baseUrl}/api/task-card/validate`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({
+        id: "legacy-api",
+        objective: "Migrate the old API contract.",
+        acceptance: ["It is migrated."],
+        allowedPaths: ["src/**"],
+        forbiddenPaths: [],
+        validationCommands: [],
+      }),
+    });
+    assert.equal(legacyResponse.status, 200);
+    const legacy = await legacyResponse.json();
+    assert.equal(legacy.migrated, true);
+    assert.equal(legacy.task.schema_version, 1);
+
+    const invalidResponse = await fetch(`${baseUrl}/api/task-card/validate`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({
+        ...template.task,
+        scope: { ...template.task.scope, write_paths: ["../outside"] },
+      }),
+    });
+    assert.equal(invalidResponse.status, 400);
+    assert.equal((await invalidResponse.json()).error, "task.unsafe_path");
+
+    const preflightOptionsResponse = await fetch(`${baseUrl}/api/task-card/preflight`);
+    assert.equal(preflightOptionsResponse.status, 200);
+    const preflightOptions = await preflightOptionsResponse.json();
+    assert.ok(preflightOptions.workflowModes.some((entry) => entry.id === "overnight"));
+    assert.ok(preflightOptions.adapters.some(
+      (entry) => entry.id === "claude-code" && entry.connectivityProbeSupported === true,
+    ));
+    assert.equal(preflightOptions.runtimeEnvironment.defaults.proxyMode, "direct");
+
+    const preflightResponse = await fetch(`${baseUrl}/api/task-card/preflight`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({
+        task: {
+          ...template.task,
+          validation: [{ id: "tests", command: ["npm", "test"] }],
+        },
+        workflowMode: "overnight",
+        worktree: tmpdir(),
+        adapterId: "claude-code",
+        strategy: "convergent",
+      }),
+    });
+    assert.equal(preflightResponse.status, 200);
+    const preflight = await preflightResponse.json();
+    assert.equal(preflight.ready, true);
+    assert.match(preflight.taskSha256, /^[a-f0-9]{64}$/);
+    assert.equal(preflight.envelope.strategy, "convergent");
+    assert.equal(preflight.envelope.runtimeEnvironment.proxyMode, "direct");
+  }, {
+    preflightEnvironment: {},
+    preflightAdapters: [{
+      id: "claude-code",
+      displayName: "Claude Code",
+      requiresNetwork: true,
+      filesystemIsolation: "post-run-only",
+    }],
   });
 });
 
@@ -173,6 +350,52 @@ test("serves Balanced policy and persisted run status", async () => {
   );
 });
 
+test("serves persisted Overnight run and wake state", async () => {
+  const interrupted = [];
+  const overnightRuntime = {
+    async listRuns() {
+      return [
+        {
+          runId: "overnight-run",
+          taskId: "overnight-task",
+          state: "improvement_cycle_ready",
+          strategy: "continuous-improvement",
+          cycle: 2,
+          adapterId: "claude-code",
+          latestWakeSha256: "a".repeat(64),
+        },
+      ];
+    },
+    async interruptById(runId) {
+      interrupted.push(runId);
+      return { runDirectory: "/runtime/overnight-run", state: "interrupt_requested" };
+    },
+  };
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/overnight/runs`);
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.runs[0].state, "improvement_cycle_ready");
+      assert.equal(body.runs[0].cycle, 2);
+      assert.equal(body.runs[0].latestWakeSha256.length, 64);
+
+      const interruptedResponse = await fetch(
+        `${baseUrl}/api/overnight/runs/overnight-run/interrupt`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: baseUrl },
+          body: "{}",
+        },
+      );
+      assert.equal(interruptedResponse.status, 200);
+      assert.equal((await interruptedResponse.json()).state, "interrupt_requested");
+      assert.deepEqual(interrupted, ["overnight-run"]);
+    },
+    { overnightRuntime },
+  );
+});
+
 test("activation API is disabled unless an absolute Skill directory is configured", async () => {
   await withServer(async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/activate`, {
@@ -199,11 +422,18 @@ test("activation API resolves the profile on the server and writes only the mana
         const body = await response.json();
         assert.equal(body.changed, true);
         assert.equal(body.activationKind, "activate");
-        assert.equal(body.status.active.variantId, "workflow-codex-overnight-claude-code");
+        assert.equal(
+          body.status.active.variantId,
+          "workflow-codex-overnight-convergent-claude-code",
+        );
+        assert.deepEqual(body.status.active.overnightLoopPolicy, {
+          id: "overnight-convergent",
+          version: "1.0.0",
+        });
         assert.equal(body.status.active.mode.id, "overnight");
         assert.match(
           await readFile(join(skillsDir, "agent-workflow-active", "SKILL.md"), "utf8"),
-          /# Overnight/,
+          /# Workflow/,
         );
 
         const status = await fetch(`${baseUrl}/api/status`);
@@ -220,7 +450,7 @@ test("activation API validates and writes edited Skill content with server-deriv
   const skillsDir = await mkdtemp(join(tmpdir(), "agent-workflow-api-edited-skill-"));
   const content = [
     "---",
-    "name: workflow-codex-overnight-claude-code",
+    "name: agent-workflow-active",
     "description: Customized overnight workflow.",
     "---",
     "",
@@ -252,7 +482,7 @@ test("activation API validates and writes edited Skill content with server-deriv
           body: JSON.stringify({
             profile: CODEX_OVERNIGHT_CLAUDE_PROFILE,
             content: content.replace(
-              "name: workflow-codex-overnight-claude-code",
+              "name: agent-workflow-active",
               "name: forged-skill-name",
             ),
           }),
@@ -271,7 +501,7 @@ test("activation API validates and writes edited Skill content with server-deriv
   }
 });
 
-test("Interactive activation installs global subagents and requires explicit overwrite for conflicts", async () => {
+test("Interactive API imports existing roles and still requires explicit overwrite for a replacement preset", async () => {
   const codexHome = await mkdtemp(join(tmpdir(), "agent-workflow-api-interactive-"));
   const skillsDir = join(codexHome, "skills");
   const agentsDir = join(codexHome, "agents");
@@ -284,17 +514,22 @@ test("Interactive activation installs global subagents and requires explicit ove
   try {
     await mkdir(skillsDir);
     await mkdir(agentsDir);
-    await writeFile(join(agentsDir, "worker.toml"), "existing worker\n", "utf8");
+    await writeFile(join(agentsDir, "worker.toml"), `name = "worker"
+description = "Existing worker role."
+model = "vendor/worker-v2"
+developer_instructions = "Keep the existing workflow."
+`, "utf8");
     await withServer(
       async (baseUrl) => {
         const status = await (await fetch(`${baseUrl}/api/interactive-agents`)).json();
-        assert.equal(status.health, "conflict");
-        assert.deepEqual(status.conflicts, ["worker"]);
+        assert.equal(status.health, "ready");
+        assert.equal(status.configurationOrigin, "existing");
+        assert.deepEqual(status.agents, [{ name: "worker", status: "imported" }]);
 
         const blocked = await fetch(`${baseUrl}/api/activate`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ profile }),
+          body: JSON.stringify({ profile, interactiveAgents: status.preset }),
         });
         assert.equal(blocked.status, 409);
         assert.equal((await blocked.json()).error, "agents.overwrite_required");
@@ -303,7 +538,7 @@ test("Interactive activation installs global subagents and requires explicit ove
         const activated = await fetch(`${baseUrl}/api/activate`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ profile, allowAgentOverwrite: true }),
+          body: JSON.stringify({ profile, interactiveAgents: status.preset, allowAgentOverwrite: true }),
         });
         assert.equal(activated.status, 200);
         const body = await activated.json();
@@ -362,7 +597,7 @@ test("Interactive planning and activation accept an editable custom role set", a
         assert.match(await readFile(join(codexHome, "agents", "docs_researcher.toml"), "utf8"), /gpt-5\.6-luna/);
         await assert.rejects(readFile(join(codexHome, "agents", "worker.toml")));
         const skill = await readFile(join(skillsDir, "agent-workflow-active", "SKILL.md"), "utf8");
-        assert.match(skill, /do not assume a fixed role list/);
+        assert.match(skill, /Do not assume a fixed role list or model/);
       },
       { skillsDir, codexHome },
     );
@@ -481,7 +716,7 @@ test("rollback API restores a server-generated backup", async () => {
         assert.equal(rollback.status, 200);
         assert.equal(
           (await rollback.json()).status.active.variantId,
-          "workflow-codex-overnight-claude-code",
+          "workflow-codex-overnight-convergent-claude-code",
         );
       },
       { skillsDir },

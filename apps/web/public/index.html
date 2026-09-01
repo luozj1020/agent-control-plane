@@ -30,10 +30,9 @@
             <span class="nav-icon">▥</span>
             用量监测
           </button>
-          <button class="nav-item" type="button" disabled>
+          <button class="nav-item" id="nav-task-card" type="button">
             <span class="nav-icon">◎</span>
-            Agent 目标
-            <span class="soon">即将推出</span>
+            Task Card
           </button>
           <button class="nav-item" id="nav-history" type="button">
             <span class="nav-icon">↺</span>
@@ -99,6 +98,33 @@
                   <select id="builder-agent"></select>
                   <small id="builder-help">接收实现任务的外部 Agent</small>
                 </label>
+              </div>
+            </section>
+
+            <section class="panel overnight-config" id="overnight-config" hidden>
+              <div class="panel-heading">
+                <div>
+                  <span class="step">03</span>
+                  <h2>Overnight 运行策略</h2>
+                </div>
+                <span class="compatibility" id="overnight-policy-version">—</span>
+              </div>
+              <p class="overnight-description">只会把当前选择的策略写入 Skill；另一种策略不会占用主 Agent 上下文。</p>
+              <label class="field overnight-policy-field">
+                <span>修改策略</span>
+                <select id="overnight-loop-policy"></select>
+                <small id="overnight-policy-description">正在读取策略目录</small>
+              </label>
+              <div class="overnight-policy-rules">
+                <div><span>范围规则</span><strong id="overnight-scope-rule">—</strong></div>
+                <div><span>结束规则</span><strong id="overnight-completion-rule">—</strong></div>
+              </div>
+              <div class="balanced-runtime-status overnight-runtime-status">
+                <div>
+                  <strong>最近运行</strong>
+                  <span id="overnight-runtime-summary">尚无运行记录</span>
+                </div>
+                <div class="balanced-run-list" id="overnight-run-list"></div>
               </div>
             </section>
 
@@ -266,6 +292,157 @@
               <ol id="operation-list"></ol>
             </section>
           </aside>
+        </section>
+
+        <section class="task-card-view" id="task-card-view" hidden>
+          <header class="task-card-topbar">
+            <div>
+              <p class="eyebrow">MACHINE-READABLE TASK CONTRACT</p>
+              <h1>Task Card</h1>
+              <p class="subtitle">JSON 是运行时唯一事实源；Markdown 只用于阅读和审阅。</p>
+            </div>
+            <div class="top-actions">
+              <input id="task-card-import-input" type="file" accept="application/json,.json" hidden>
+              <button class="button ghost" id="task-card-import" type="button">导入 JSON</button>
+              <button class="button ghost" id="task-card-undo" type="button" disabled>撤销</button>
+              <button class="button ghost" id="task-card-redo" type="button" disabled>重做</button>
+              <button class="button ghost" id="task-card-revert" type="button" disabled>回退修改</button>
+              <button class="button ghost" id="task-card-reset" type="button">恢复模板</button>
+              <button class="button primary" id="task-card-export" type="button" disabled>导出 TASK.json</button>
+            </div>
+          </header>
+
+          <div class="task-card-layout">
+            <section class="task-card-panel">
+              <div class="task-card-panel-heading">
+                <div>
+                  <p class="token-kicker">CANONICAL SOURCE</p>
+                  <h2>TASK.json</h2>
+                </div>
+                <div class="task-card-heading-actions">
+                  <div class="task-card-view-switch" id="task-card-editor-switch" aria-label="Task Card 编辑方式">
+                    <button class="active" type="button" data-task-card-editor-view="form" aria-pressed="true">结构化</button>
+                    <button type="button" data-task-card-editor-view="json" aria-pressed="false">JSON 专家</button>
+                  </div>
+                  <span class="task-card-state pending" id="task-card-state">正在载入</span>
+                </div>
+              </div>
+              <div class="task-card-form" id="task-card-form" aria-label="Task Card 结构化编辑器"></div>
+              <textarea
+                id="task-card-editor"
+                class="task-card-json-editor"
+                aria-label="Task Card JSON 编辑器"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                hidden
+              ></textarea>
+              <div class="task-card-message" id="task-card-message">正在读取标准模板。</div>
+            </section>
+
+            <section class="task-card-panel preview">
+              <div class="task-card-panel-heading">
+                <div>
+                  <p class="token-kicker">REVIEW PROJECTION</p>
+                  <h2>Markdown 预览</h2>
+                </div>
+                <div class="task-card-view-switch" id="task-card-view-switch" aria-label="Task Card 投影视图">
+                  <button class="active" type="button" data-task-card-view="audit" aria-pressed="true">Audit</button>
+                  <button type="button" data-task-card-view="execution" aria-pressed="false">Execution</button>
+                </div>
+              </div>
+              <textarea
+                id="task-card-markdown"
+                aria-label="Task Card Markdown 预览"
+                readonly
+                spellcheck="false"
+              ></textarea>
+              <div class="task-card-rules">
+                <strong>运行时约束</strong>
+                <ul>
+                  <li>未知字段会被拒绝，不会静默忽略。</li>
+                  <li>路径必须相对工作树，禁止绝对路径与 <code>..</code>。</li>
+                  <li>验证命令必须是 argv 数组，不接受 Shell 字符串。</li>
+                  <li>旧七字段格式载入后会自动迁移为 <code>task-card-v1</code>。</li>
+                  <li>Overnight 与 Balanced 共用这份 JSON 契约。</li>
+                </ul>
+              </div>
+            </section>
+
+            <section class="task-card-panel task-card-preflight" id="task-card-preflight-panel">
+              <div class="task-card-panel-heading">
+                <div>
+                  <p class="token-kicker">READ-ONLY LAUNCH CHECK</p>
+                  <h2>Preflight</h2>
+                </div>
+                <span class="task-card-state pending" id="task-card-preflight-state">尚未检查</span>
+              </div>
+              <div class="task-card-preflight-body">
+                <div class="task-card-preflight-fields">
+                  <label>
+                    <span>工作流模式</span>
+                    <select id="task-card-workflow-mode">
+                      <option value="overnight">Overnight</option>
+                      <option value="balanced">Balanced</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>下游 Adapter</span>
+                    <select id="task-card-adapter"></select>
+                  </label>
+                  <label>
+                    <span>执行环境</span>
+                    <select id="task-card-execution-environment">
+                      <option value="auto">自动检测</option>
+                      <option value="host">宿主机进程</option>
+                      <option value="sandbox">受限沙箱</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>代理模式</span>
+                    <select id="task-card-proxy-mode">
+                      <option value="direct">直连（清除代理变量）</option>
+                      <option value="inherit">继承系统代理</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>环境变量隔离</span>
+                    <select id="task-card-environment-isolation">
+                      <option value="provider-scoped">供应商范围变量</option>
+                      <option value="inherit">继承全部变量</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>网络诊断</span>
+                    <select id="task-card-network-diagnostics">
+                      <option value="metadata">仅元数据</option>
+                      <option value="off">关闭</option>
+                    </select>
+                  </label>
+                  <label class="wide">
+                    <span>绝对工作树路径</span>
+                    <input id="task-card-worktree" type="text" placeholder="/mnt/e/project" autocomplete="off" spellcheck="false">
+                  </label>
+                  <label id="task-card-strategy-field">
+                    <span>Overnight 策略</span>
+                    <select id="task-card-strategy">
+                      <option value="convergent">收缩式修改</option>
+                      <option value="continuous-improvement">持续扩张改进</option>
+                    </select>
+                  </label>
+                  <div class="task-card-preflight-actions wide">
+                    <button class="button primary task-card-preflight-run" id="task-card-preflight-run" type="button" disabled>运行 Preflight</button>
+                    <button class="button ghost task-card-connectivity-run" id="task-card-connectivity-run" type="button" disabled>主动连接诊断 · 1 次调用</button>
+                  </div>
+                  <p class="task-card-connectivity-notice wide">主动诊断只向当前路由发送固定最小提示，不发送 Task Card 或工作区内容；每次点击最多消耗 1 次下游模型调用。</p>
+                  <div class="task-card-connectivity-result wide" id="task-card-connectivity-result" hidden></div>
+                </div>
+                <div class="task-card-preflight-result" id="task-card-preflight-result">
+                  <p>先完成 Task Card，并选择工作树与下游 Adapter。这里不会启动任何 Agent，也不会显示代理地址、Token 或凭证。</p>
+                </div>
+              </div>
+            </section>
+          </div>
         </section>
 
         <section class="usage-view" id="usage-view" hidden>

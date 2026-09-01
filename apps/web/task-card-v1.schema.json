@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-control-plane.local/schemas/task-card-v1.schema.json",
+  "title": "Task Card v1",
+  "description": "Canonical machine-readable task contract shared by Overnight and Balanced.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "mode",
+    "goal",
+    "profiles",
+    "scope",
+    "acceptance",
+    "risk",
+    "handoff",
+    "validation",
+    "stop_conditions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/id" },
+    "mode": {
+      "enum": ["builder", "checker-test", "mixed-exception", "control-plane"]
+    },
+    "goal": { "$ref": "#/$defs/long_text" },
+    "profiles": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/text" }
+    },
+    "scope": {
+      "type": "object",
+      "required": ["write_paths"],
+      "additionalProperties": false,
+      "properties": {
+        "write_paths": { "$ref": "#/$defs/non_empty_paths" },
+        "read_paths": { "$ref": "#/$defs/paths" },
+        "forbidden_paths": { "$ref": "#/$defs/paths" }
+      }
+    },
+    "acceptance": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "required": ["id", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "description": { "$ref": "#/$defs/text" },
+          "validation_id": { "$ref": "#/$defs/id" }
+        }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "public_api": { "$ref": "#/$defs/risk" },
+        "data_model": { "$ref": "#/$defs/risk" },
+        "security": { "$ref": "#/$defs/risk" },
+        "migration": { "$ref": "#/$defs/risk" },
+        "permission": { "$ref": "#/$defs/risk" },
+        "concurrency": { "$ref": "#/$defs/risk" },
+        "cross_module": { "$ref": "#/$defs/risk" },
+        "production_impact": { "$ref": "#/$defs/risk" }
+      }
+    },
+    "handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "must_do": { "$ref": "#/$defs/texts" },
+        "must_not_do": { "$ref": "#/$defs/texts" },
+        "may_decide": { "$ref": "#/$defs/texts" },
+        "must_report": { "$ref": "#/$defs/texts" },
+        "stop_condition": {
+          "$ref": "#/$defs/texts",
+          "deprecated": true,
+          "description": "Audit-only legacy field; execution stops belong in top-level stop_conditions."
+        }
+      }
+    },
+    "validation": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "required": ["id", "command"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "command": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": { "$ref": "#/$defs/text" }
+          },
+          "description": { "$ref": "#/$defs/text" },
+          "local_allowed": { "type": "boolean", "default": true }
+        }
+      }
+    },
+    "stop_conditions": { "$ref": "#/$defs/texts" },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "task_shape": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "responsibilities": { "$ref": "#/$defs/texts" },
+            "new_modules": { "$ref": "#/$defs/texts" },
+            "split_decision": { "enum": ["split", "exception"] },
+            "split_reason": { "$ref": "#/$defs/text" }
+          },
+          "dependentRequired": { "split_decision": ["split_reason"] }
+        },
+        "complex_gate_contract": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["enabled", "counterexamples", "fail_closed_conditions"],
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "const": true },
+                "counterexamples": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": { "$ref": "#/$defs/text" }
+                },
+                "fail_closed_conditions": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "$ref": "#/$defs/text" }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["enabled", "not_applicable_reason"],
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "const": false },
+                "not_applicable_reason": { "$ref": "#/$defs/text" }
+              }
+            }
+          ]
+        },
+        "agent_control_plane": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow_no_changes": { "type": "boolean", "default": false }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"
+    },
+    "text": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "long_text": { "type": "string", "minLength": 1, "maxLength": 16384 },
+    "texts": {
+      "type": "array",
+      "maxItems": 512,
+      "items": { "$ref": "#/$defs/text" }
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "Repository-relative path or bounded glob; runtime validation rejects absolute paths and '..'."
+    },
+    "paths": {
+      "type": "array",
+      "maxItems": 512,
+      "items": { "$ref": "#/$defs/path" }
+    },
+    "non_empty_paths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "items": { "$ref": "#/$defs/path" }
+    },
+    "risk": { "enum": ["no", "yes", "unknown"] }
+  }
+}

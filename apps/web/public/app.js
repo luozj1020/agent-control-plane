@@ -11,11 +11,23 @@ import {
 import { createLatestSwitchCoordinator } from "/mode-switch-coordinator.js";
 
 const MODE_COPY = {
-  overnight: "适合放置运行：持久委派下游实现，完成后回到主 Agent 审阅。",
-  balanced: "按产品调优窗口运行，每轮结束都回到主 Agent 检查方向。",
+  overnight: "提交后由外部监控接管；可选择逐轮收缩至验收，或达标后持续扩张改进。",
+  balanced: "每轮执行期间由上游休眠，外部 Runner 按调优窗口监控，并在轮次边界唤醒审阅。",
   interactive: "主 Agent 保持前台，使用自身原生 subagent 并行协作。",
 };
 
+const OVERNIGHT_MODE = BUILTIN_MODE_CATALOG.modes.find((mode) => mode.kind === "overnight");
+const OVERNIGHT_LOOP_POLICIES = (OVERNIGHT_MODE?.loopPolicies ?? []).flatMap((reference) => {
+  const policy = BUILTIN_MODE_CATALOG.overnightLoopPolicies.find(
+    (candidate) => candidate.id === reference.id && candidate.version === reference.version,
+  );
+  return policy ? [policy] : [];
+});
+const DEFAULT_OVERNIGHT_LOOP_POLICY = BUILTIN_MODE_CATALOG.overnightLoopPolicies.find(
+  (policy) =>
+    policy.id === OVERNIGHT_MODE?.defaultLoopPolicy.id &&
+    policy.version === OVERNIGHT_MODE?.defaultLoopPolicy.version,
+);
 const BALANCED_MODE = BUILTIN_MODE_CATALOG.modes.find((mode) => mode.kind === "balanced");
 const BALANCED_POLICY = BUILTIN_MODE_CATALOG.tunedWindowPolicies.find(
   (policy) =>
@@ -100,8 +112,17 @@ const elements = {
   mainAgent: document.querySelector("#main-agent"),
   modeGrid: document.querySelector("#mode-grid"),
   modeSwitchPolicy: document.querySelector("#mode-switch-policy"),
+  overnightCompletionRule: document.querySelector("#overnight-completion-rule"),
+  overnightConfig: document.querySelector("#overnight-config"),
+  overnightLoopPolicy: document.querySelector("#overnight-loop-policy"),
+  overnightPolicyDescription: document.querySelector("#overnight-policy-description"),
+  overnightPolicyVersion: document.querySelector("#overnight-policy-version"),
+  overnightRunList: document.querySelector("#overnight-run-list"),
+  overnightRuntimeSummary: document.querySelector("#overnight-runtime-summary"),
+  overnightScopeRule: document.querySelector("#overnight-scope-rule"),
   navConfiguration: document.querySelector("#nav-configuration"),
   navHistory: document.querySelector("#nav-history"),
+  navTaskCard: document.querySelector("#nav-task-card"),
   navUsage: document.querySelector("#nav-usage"),
   operationList: document.querySelector("#operation-list"),
   restartBadge: document.querySelector("#restart-badge"),
@@ -138,6 +159,35 @@ const elements = {
   skillPreview: document.querySelector("#skill-preview"),
   storeStatusDetail: document.querySelector("#store-status-detail"),
   storeStatusTitle: document.querySelector("#store-status-title"),
+  taskCardEditor: document.querySelector("#task-card-editor"),
+  taskCardEditorSwitch: document.querySelector("#task-card-editor-switch"),
+  taskCardEnvironmentIsolation: document.querySelector("#task-card-environment-isolation"),
+  taskCardExecutionEnvironment: document.querySelector("#task-card-execution-environment"),
+  taskCardExport: document.querySelector("#task-card-export"),
+  taskCardForm: document.querySelector("#task-card-form"),
+  taskCardImport: document.querySelector("#task-card-import"),
+  taskCardImportInput: document.querySelector("#task-card-import-input"),
+  taskCardMarkdown: document.querySelector("#task-card-markdown"),
+  taskCardMessage: document.querySelector("#task-card-message"),
+  taskCardNetworkDiagnostics: document.querySelector("#task-card-network-diagnostics"),
+  taskCardAdapter: document.querySelector("#task-card-adapter"),
+  taskCardConnectivityResult: document.querySelector("#task-card-connectivity-result"),
+  taskCardConnectivityRun: document.querySelector("#task-card-connectivity-run"),
+  taskCardPreflightResult: document.querySelector("#task-card-preflight-result"),
+  taskCardPreflightRun: document.querySelector("#task-card-preflight-run"),
+  taskCardPreflightState: document.querySelector("#task-card-preflight-state"),
+  taskCardProxyMode: document.querySelector("#task-card-proxy-mode"),
+  taskCardRedo: document.querySelector("#task-card-redo"),
+  taskCardRevert: document.querySelector("#task-card-revert"),
+  taskCardReset: document.querySelector("#task-card-reset"),
+  taskCardState: document.querySelector("#task-card-state"),
+  taskCardStrategy: document.querySelector("#task-card-strategy"),
+  taskCardStrategyField: document.querySelector("#task-card-strategy-field"),
+  taskCardUndo: document.querySelector("#task-card-undo"),
+  taskCardViewSwitch: document.querySelector("#task-card-view-switch"),
+  taskCardView: document.querySelector("#task-card-view"),
+  taskCardWorkflowMode: document.querySelector("#task-card-workflow-mode"),
+  taskCardWorktree: document.querySelector("#task-card-worktree"),
   toast: document.querySelector("#toast"),
   tokenEstimate: document.querySelector("#token-estimate"),
   tokenDimension: document.querySelector("#token-dimension"),
@@ -193,6 +243,29 @@ let selectedHistoryId = null;
 let historyRequest = 0;
 let balancedRuns = [];
 let balancedRunsAvailable = true;
+let overnightRuns = [];
+let overnightRunsAvailable = true;
+let taskCardTemplate = null;
+let taskCardDraft = null;
+let taskCardBaseline = null;
+let validatedTaskCard = null;
+let taskCardValidationTimer = null;
+let taskCardValidationRequest = 0;
+let taskCardProjectionView = "audit";
+let taskCardProjections = { audit: "", execution: "" };
+let taskCardEditorView = "form";
+let taskCardErrorPath = null;
+let taskCardLastEditorValue = "";
+let taskCardHistoryGroup = null;
+let taskCardHistoryAt = 0;
+let taskCardSetBaselineOnValidation = false;
+let taskCardPreflightOptions = { workflowModes: [], overnightStrategies: [], adapters: [] };
+let taskCardConnectivityRunning = false;
+const taskCardUndoStack = [];
+const taskCardRedoStack = [];
+const taskCardOpenSections = new Set([
+  "identity", "scope", "acceptance", "risk", "handoff", "validation", "stop", "extensions",
+]);
 let serverStatusLoaded = false;
 let modeSwitchState = { active: null, pending: null, running: false };
 let markServerStatusReady;
@@ -212,6 +285,15 @@ const LANE_LABELS = Object.freeze({
   upstream: "上游 · 主 Agent",
   downstream: "下游 · Builder / subagent",
 });
+
+const TASK_CARD_DRAFT_KEY = "agent-workflow-task-card-draft";
+const TASK_CARD_PREFLIGHT_KEY = "agent-workflow-task-card-preflight";
+const TASK_CARD_MODES = ["builder", "checker-test", "mixed-exception", "control-plane"];
+const TASK_CARD_RISKS = [
+  "public_api", "data_model", "security", "migration", "permission",
+  "concurrency", "cross_module", "production_impact",
+];
+const TASK_CARD_HANDOFF = ["must_do", "must_not_do", "may_decide", "must_report", "stop_condition"];
 
 const compactNumber = new Intl.NumberFormat("zh-CN", {
   notation: "compact",
@@ -660,17 +742,806 @@ function historyActionLabel(action) {
 function switchView(view) {
   activeView = view;
   const configuration = view === "configuration";
+  const taskCard = view === "task-card";
   const usage = view === "usage";
   const history = view === "history";
   elements.configurationTopbar.hidden = !configuration;
   elements.configurationWorkspace.hidden = !configuration;
+  elements.taskCardView.hidden = !taskCard;
   elements.usageView.hidden = !usage;
   elements.historyView.hidden = !history;
   elements.navConfiguration.classList.toggle("active", configuration);
+  elements.navTaskCard.classList.toggle("active", taskCard);
   elements.navUsage.classList.toggle("active", usage);
   elements.navHistory.classList.toggle("active", history);
+  if (taskCard && ["overnight", "balanced"].includes(selectedModeId)) {
+    elements.taskCardWorkflowMode.value = selectedModeId;
+    synchronizeTaskCardStrategy();
+  }
   if (usage) loadRuntimeUsage();
   if (history) loadHistory({ selectEntry: true });
+}
+
+function setTaskCardState(state, message) {
+  const labels = {
+    pending: "正在校验",
+    valid: "有效",
+    invalid: "无效",
+    unavailable: "不可用",
+  };
+  elements.taskCardState.className = `task-card-state ${state}`;
+  elements.taskCardState.textContent = labels[state] ?? state;
+  elements.taskCardMessage.className = `task-card-message ${state}`;
+  elements.taskCardMessage.textContent = message;
+}
+
+function taskCardSnapshot(value = elements.taskCardEditor.value) {
+  return value;
+}
+
+function taskCardPath(path) {
+  return JSON.stringify(path);
+}
+
+function taskCardPathLabel(path) {
+  return path.map((part) => typeof part === "number" ? `[${part}]` : part).join(".").replaceAll(".[", "[");
+}
+
+function taskCardDisplayErrorPath(path) {
+  if (!path) return null;
+  let result = path.startsWith("task.") ? path.slice(5) : path;
+  const acceptanceReference = result.match(/^acceptance\.([A-Za-z0-9._-]+)\.(.+)$/);
+  if (acceptanceReference && taskCardDraft?.acceptance) {
+    const index = taskCardDraft.acceptance.findIndex((entry) => entry.id === acceptanceReference[1]);
+    if (index >= 0) result = `acceptance[${index}].${acceptanceReference[2]}`;
+  }
+  return result;
+}
+
+function openTaskCardErrorSection(path) {
+  const section = path?.match(/^[A-Za-z_]+/)?.[0];
+  const mapped = {
+    schema_version: "identity", id: "identity", mode: "identity", goal: "identity", profiles: "identity",
+    scope: "scope", acceptance: "acceptance", risk: "risk", handoff: "handoff",
+    validation: "validation", stop_conditions: "stop", extensions: "extensions",
+  }[section];
+  if (mapped) taskCardOpenSections.add(mapped);
+}
+
+function taskCardClone(value) {
+  return structuredClone(value);
+}
+
+function setTaskCardValue(target, path, value, { removeEmpty = false } = {}) {
+  let parent = target;
+  for (let index = 0; index < path.length - 1; index += 1) parent = parent[path[index]];
+  const key = path.at(-1);
+  if (removeEmpty && value === "") delete parent[key];
+  else parent[key] = value;
+}
+
+function updateTaskCardHistoryButtons() {
+  elements.taskCardUndo.disabled = taskCardUndoStack.length === 0;
+  elements.taskCardRedo.disabled = taskCardRedoStack.length === 0;
+  elements.taskCardRevert.disabled = !taskCardBaseline || taskCardSnapshot() === taskCardBaseline;
+}
+
+function recordTaskCardHistory(previous, group = null) {
+  const now = Date.now();
+  if (
+    previous !== taskCardUndoStack.at(-1) &&
+    (group !== taskCardHistoryGroup || now - taskCardHistoryAt > 800)
+  ) {
+    taskCardUndoStack.push(previous);
+    if (taskCardUndoStack.length > 100) taskCardUndoStack.shift();
+  }
+  taskCardHistoryGroup = group;
+  taskCardHistoryAt = now;
+  taskCardRedoStack.length = 0;
+  updateTaskCardHistoryButtons();
+}
+
+function replaceTaskCardSnapshot(snapshot, { render = true } = {}) {
+  elements.taskCardEditor.value = snapshot;
+  taskCardLastEditorValue = snapshot;
+  try {
+    taskCardDraft = JSON.parse(snapshot);
+    if (render) renderTaskCardForm();
+  } catch {
+    taskCardDraft = null;
+  }
+  queueTaskCardValidation({ preserveHistoryGroup: true });
+  updateTaskCardHistoryButtons();
+}
+
+function commitTaskCardMutation(mutator, group, { render = false } = {}) {
+  if (!taskCardDraft) return;
+  const previous = taskCardSnapshot();
+  const next = taskCardClone(taskCardDraft);
+  mutator(next);
+  const serialized = JSON.stringify(next, null, 2);
+  if (serialized === previous) return;
+  recordTaskCardHistory(previous, group);
+  taskCardDraft = next;
+  elements.taskCardEditor.value = serialized;
+  taskCardLastEditorValue = serialized;
+  if (render) renderTaskCardForm();
+  queueTaskCardValidation({ preserveHistoryGroup: true });
+  updateTaskCardHistoryButtons();
+}
+
+function createTaskCardControl(labelText, control, path = null, help = null) {
+  const label = document.createElement("label");
+  label.className = "task-card-field";
+  const title = document.createElement("span");
+  title.textContent = labelText;
+  label.append(title, control);
+  if (help) {
+    const note = document.createElement("small");
+    note.textContent = help;
+    label.append(note);
+  }
+  if (path && taskCardErrorPath) {
+    const fieldPath = taskCardPathLabel(path);
+    if (taskCardErrorPath === fieldPath || taskCardErrorPath.startsWith(`${fieldPath}.`)) {
+      label.classList.add("invalid");
+    }
+  }
+  return label;
+}
+
+function createTaskCardInput(path, value, options = {}) {
+  const control = document.createElement(options.multiline ? "textarea" : "input");
+  if (!options.multiline) control.type = options.type ?? "text";
+  control.value = value ?? "";
+  control.dataset.taskPath = taskCardPath(path);
+  if (options.valueType) control.dataset.taskValueType = options.valueType;
+  if (options.removeEmpty) control.dataset.taskRemoveEmpty = "true";
+  if (options.rerender) control.dataset.taskRerender = "true";
+  if (options.placeholder) control.placeholder = options.placeholder;
+  if (options.disabled) control.disabled = true;
+  return control;
+}
+
+function createTaskCardSelect(path, value, values, options = {}) {
+  const control = document.createElement("select");
+  control.dataset.taskPath = taskCardPath(path);
+  if (options.removeEmpty) control.dataset.taskRemoveEmpty = "true";
+  if (options.rerender) control.dataset.taskRerender = "true";
+  for (const entry of values) {
+    const choice = typeof entry === "string" ? { value: entry, label: entry } : entry;
+    control.append(option(choice.value, choice.label));
+  }
+  control.value = value ?? "";
+  return control;
+}
+
+function createTaskCardSection(id, title, summary) {
+  const section = document.createElement("details");
+  section.className = "task-card-section";
+  section.dataset.taskSection = id;
+  section.open = taskCardOpenSections.has(id);
+  const heading = document.createElement("summary");
+  const name = document.createElement("strong");
+  name.textContent = title;
+  const meta = document.createElement("span");
+  meta.textContent = summary;
+  heading.append(name, meta);
+  const body = document.createElement("div");
+  body.className = "task-card-section-body";
+  section.append(heading, body);
+  section.addEventListener("toggle", () => {
+    if (section.open) taskCardOpenSections.add(id);
+    else taskCardOpenSections.delete(id);
+  });
+  return { section, body };
+}
+
+function createTaskCardRemoveButton(path, index, label = "删除") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "task-card-remove";
+  button.dataset.taskAction = "remove";
+  button.dataset.taskPath = taskCardPath(path);
+  button.dataset.taskIndex = String(index);
+  button.setAttribute("aria-label", label);
+  button.textContent = "−";
+  return button;
+}
+
+function createTaskCardAddButton(path, kind, label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "task-card-add";
+  button.dataset.taskAction = "add";
+  button.dataset.taskPath = taskCardPath(path);
+  button.dataset.taskKind = kind;
+  button.textContent = `＋ ${label}`;
+  return button;
+}
+
+function appendTaskCardTextList(body, label, path, values, placeholder) {
+  const group = document.createElement("div");
+  group.className = "task-card-list-group";
+  const title = document.createElement("strong");
+  title.textContent = label;
+  group.append(title);
+  values.forEach((value, index) => {
+    const row = document.createElement("div");
+    row.className = "task-card-list-row";
+    row.append(
+      createTaskCardInput([...path, index], value, { placeholder }),
+      createTaskCardRemoveButton(path, index, `删除 ${label} 第 ${index + 1} 项`),
+    );
+    group.append(row);
+  });
+  group.append(createTaskCardAddButton(path, "text", `添加${label}`));
+  body.append(group);
+}
+
+function renderTaskCardForm() {
+  elements.taskCardForm.replaceChildren();
+  if (!taskCardDraft || typeof taskCardDraft !== "object") {
+    const empty = document.createElement("p");
+    empty.className = "task-card-form-empty";
+    empty.textContent = "JSON 有效后才会显示结构化编辑器。";
+    elements.taskCardForm.append(empty);
+    return;
+  }
+  const task = taskCardDraft;
+
+  const identity = createTaskCardSection("identity", "任务身份与目标", `${task.id ?? "—"} · ${task.mode ?? "—"}`);
+  const identityGrid = document.createElement("div");
+  identityGrid.className = "task-card-field-grid";
+  identityGrid.append(
+    createTaskCardControl("Schema", createTaskCardInput(["schema_version"], task.schema_version, { disabled: true }), ["schema_version"]),
+    createTaskCardControl("稳定任务 ID", createTaskCardInput(["id"], task.id), ["id"]),
+    createTaskCardControl("执行角色", createTaskCardSelect(["mode"], task.mode, TASK_CARD_MODES), ["mode"]),
+  );
+  identity.body.append(identityGrid);
+  identity.body.append(createTaskCardControl(
+    "目标",
+    createTaskCardInput(["goal"], task.goal, { multiline: true }),
+    ["goal"],
+    "描述一个有边界、可验收的结果。",
+  ));
+  appendTaskCardTextList(identity.body, "Profile", ["profiles"], task.profiles ?? [], "base");
+  elements.taskCardForm.append(identity.section);
+
+  const scope = createTaskCardSection("scope", "范围", `${task.scope?.write_paths?.length ?? 0} 个可写路径`);
+  appendTaskCardTextList(scope.body, "可写路径", ["scope", "write_paths"], task.scope?.write_paths ?? [], "src/**");
+  appendTaskCardTextList(scope.body, "只读路径", ["scope", "read_paths"], task.scope?.read_paths ?? [], "docs/**");
+  appendTaskCardTextList(scope.body, "禁止路径", ["scope", "forbidden_paths"], task.scope?.forbidden_paths ?? [], ".env");
+  elements.taskCardForm.append(scope.section);
+
+  const acceptance = createTaskCardSection("acceptance", "验收标准", `${task.acceptance?.length ?? 0} 条`);
+  const validationOptions = [
+    { value: "", label: "不绑定验证命令" },
+    ...(task.validation ?? []).map((entry) => ({ value: entry.id, label: entry.id })),
+  ];
+  (task.acceptance ?? []).forEach((entry, index) => {
+    const card = document.createElement("div");
+    card.className = "task-card-object-card";
+    const cardHead = document.createElement("div");
+    cardHead.className = "task-card-object-heading";
+    const title = document.createElement("strong");
+    title.textContent = entry.id || `验收 ${index + 1}`;
+    cardHead.append(title, createTaskCardRemoveButton(["acceptance"], index, `删除验收 ${index + 1}`));
+    const grid = document.createElement("div");
+    grid.className = "task-card-field-grid two";
+    grid.append(
+      createTaskCardControl("稳定 ID", createTaskCardInput(["acceptance", index, "id"], entry.id, { rerender: true }), ["acceptance", index, "id"]),
+      createTaskCardControl("验证绑定", createTaskCardSelect(
+        ["acceptance", index, "validation_id"],
+        entry.validation_id ?? "",
+        validationOptions,
+        { removeEmpty: true },
+      ), ["acceptance", index, "validation_id"]),
+    );
+    card.append(cardHead, grid, createTaskCardControl(
+      "可观察结果",
+      createTaskCardInput(["acceptance", index, "description"], entry.description, { multiline: true }),
+      ["acceptance", index, "description"],
+    ));
+    acceptance.body.append(card);
+  });
+  acceptance.body.append(createTaskCardAddButton(["acceptance"], "acceptance", "添加验收标准"));
+  elements.taskCardForm.append(acceptance.section);
+
+  const risk = createTaskCardSection("risk", "风险声明", "no / yes / unknown");
+  const riskGrid = document.createElement("div");
+  riskGrid.className = "task-card-risk-grid";
+  for (const key of TASK_CARD_RISKS) {
+    riskGrid.append(createTaskCardControl(
+      key.replaceAll("_", " "),
+      createTaskCardSelect(["risk", key], task.risk?.[key] ?? "unknown", ["no", "yes", "unknown"]),
+      ["risk", key],
+    ));
+  }
+  risk.body.append(riskGrid);
+  elements.taskCardForm.append(risk.section);
+
+  const handoff = createTaskCardSection("handoff", "交接与权限", "必须做 / 禁止做 / 可自主决定");
+  for (const key of TASK_CARD_HANDOFF) {
+    appendTaskCardTextList(
+      handoff.body,
+      key.replaceAll("_", " "),
+      ["handoff", key],
+      task.handoff?.[key] ?? [],
+      "输入一条明确边界",
+    );
+  }
+  elements.taskCardForm.append(handoff.section);
+
+  const validation = createTaskCardSection("validation", "验证命令", `${task.validation?.length ?? 0} 条 argv 命令`);
+  (task.validation ?? []).forEach((entry, index) => {
+    const card = document.createElement("div");
+    card.className = "task-card-object-card";
+    const cardHead = document.createElement("div");
+    cardHead.className = "task-card-object-heading";
+    const title = document.createElement("strong");
+    title.textContent = entry.id || `验证 ${index + 1}`;
+    cardHead.append(title, createTaskCardRemoveButton(["validation"], index, `删除验证 ${index + 1}`));
+    const grid = document.createElement("div");
+    grid.className = "task-card-field-grid two";
+    const local = document.createElement("input");
+    local.type = "checkbox";
+    local.checked = entry.local_allowed !== false;
+    local.dataset.taskPath = taskCardPath(["validation", index, "local_allowed"]);
+    local.dataset.taskValueType = "boolean";
+    grid.append(
+      createTaskCardControl("稳定 ID", createTaskCardInput(["validation", index, "id"], entry.id, { rerender: true }), ["validation", index, "id"]),
+      createTaskCardControl("允许本地执行", local, ["validation", index, "local_allowed"]),
+    );
+    card.append(cardHead, grid, createTaskCardControl(
+      "说明",
+      createTaskCardInput(["validation", index, "description"], entry.description ?? "", { removeEmpty: true }),
+      ["validation", index, "description"],
+    ));
+    appendTaskCardTextList(card, "argv 参数", ["validation", index, "command"], entry.command ?? [], "npm");
+    validation.body.append(card);
+  });
+  validation.body.append(createTaskCardAddButton(["validation"], "validation", "添加验证命令"));
+  elements.taskCardForm.append(validation.section);
+
+  const stop = createTaskCardSection("stop", "停止条件", `${task.stop_conditions?.length ?? 0} 条`);
+  appendTaskCardTextList(stop.body, "停止条件", ["stop_conditions"], task.stop_conditions ?? [], "external_blocker");
+  elements.taskCardForm.append(stop.section);
+
+  const extensions = createTaskCardSection("extensions", "扩展字段", "高级 JSON");
+  const extensionEditor = createTaskCardInput(["extensions"], JSON.stringify(task.extensions ?? {}, null, 2), {
+    multiline: true,
+    valueType: "json",
+  });
+  extensionEditor.classList.add("task-card-extension-editor");
+  extensions.body.append(createTaskCardControl(
+    "extensions",
+    extensionEditor,
+    ["extensions"],
+    "用于 task_shape、complex_gate_contract 与产品扩展；仍会经过严格运行时校验。",
+  ));
+  elements.taskCardForm.append(extensions.section);
+}
+
+function renderTaskCardProjection() {
+  elements.taskCardMarkdown.value = taskCardProjections[taskCardProjectionView] ?? "";
+}
+
+async function validateTaskCardDraft() {
+  const requestId = ++taskCardValidationRequest;
+  let candidate;
+  try {
+    candidate = JSON.parse(elements.taskCardEditor.value);
+  } catch (error) {
+    taskCardDraft = null;
+    validatedTaskCard = null;
+    taskCardErrorPath = null;
+    elements.taskCardMarkdown.value = "";
+    elements.taskCardExport.disabled = true;
+    elements.taskCardPreflightRun.disabled = true;
+    setTaskCardState("invalid", `JSON 语法错误：${error.message}`);
+    if (taskCardEditorView === "form") renderTaskCardForm();
+    return;
+  }
+
+  setTaskCardState("pending", "正在使用运行时校验器检查契约。");
+  try {
+    const shouldRenderCanonicalForm = !taskCardDraft || Boolean(taskCardErrorPath);
+    const result = await requestJson("/api/task-card/validate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(candidate),
+    });
+    if (requestId !== taskCardValidationRequest) return;
+    validatedTaskCard = result.task;
+    taskCardDraft = taskCardClone(result.task);
+    taskCardErrorPath = null;
+    taskCardProjections = result.projections ?? { audit: "", execution: "" };
+    if (result.migrated) {
+      const migrated = JSON.stringify(result.task, null, 2);
+      elements.taskCardEditor.value = migrated;
+      taskCardLastEditorValue = migrated;
+      localStorage.setItem(TASK_CARD_DRAFT_KEY, migrated);
+    }
+    if (taskCardEditorView === "form" && (result.migrated || shouldRenderCanonicalForm)) {
+      renderTaskCardForm();
+    }
+    if (taskCardSetBaselineOnValidation || taskCardBaseline === null) {
+      taskCardBaseline = elements.taskCardEditor.value;
+      taskCardSetBaselineOnValidation = false;
+    }
+    renderTaskCardProjection();
+    elements.taskCardExport.disabled = false;
+    elements.taskCardPreflightRun.disabled = false;
+    updateTaskCardHistoryButtons();
+    setTaskCardState(
+      "valid",
+      result.migrated
+        ? "已从 legacy-v0 自动迁移并保存为 task-card-v1；请检查生成的稳定验收 ID。"
+        : "task-card-v1 契约有效，浏览器草稿已保存；可供 Overnight 与 Balanced 使用。",
+    );
+  } catch (error) {
+    if (requestId !== taskCardValidationRequest) return;
+    validatedTaskCard = null;
+    taskCardErrorPath = taskCardDisplayErrorPath(error.path);
+    openTaskCardErrorSection(taskCardErrorPath);
+    taskCardProjections = { audit: "", execution: "" };
+    elements.taskCardMarkdown.value = "";
+    elements.taskCardExport.disabled = true;
+    elements.taskCardPreflightRun.disabled = true;
+    setTaskCardState("invalid", error.message);
+    if (taskCardEditorView === "form") renderTaskCardForm();
+  }
+}
+
+function queueTaskCardValidation(options = {}) {
+  localStorage.setItem(TASK_CARD_DRAFT_KEY, elements.taskCardEditor.value);
+  taskCardValidationRequest += 1;
+  if (!options.preserveHistoryGroup) taskCardHistoryGroup = null;
+  clearTimeout(taskCardValidationTimer);
+  taskCardValidationTimer = window.setTimeout(validateTaskCardDraft, 220);
+}
+
+async function loadTaskCard() {
+  try {
+    const result = await requestJson("/api/task-card/template");
+    taskCardTemplate = result.task;
+    const stored = localStorage.getItem(TASK_CARD_DRAFT_KEY);
+    elements.taskCardEditor.value = stored ?? JSON.stringify(taskCardTemplate, null, 2);
+    taskCardLastEditorValue = elements.taskCardEditor.value;
+    taskCardSetBaselineOnValidation = true;
+    await validateTaskCardDraft();
+    await loadTaskCardPreflightOptions();
+  } catch (error) {
+    validatedTaskCard = null;
+    elements.taskCardEditor.disabled = true;
+    elements.taskCardExport.disabled = true;
+    setTaskCardState("unavailable", `Task Card 服务不可用：${error.message}`);
+  }
+}
+
+function exportTaskCard() {
+  if (!validatedTaskCard) return;
+  const content = `${JSON.stringify(validatedTaskCard, null, 2)}\n`;
+  const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "TASK.json";
+  anchor.click();
+  URL.revokeObjectURL(url);
+  showToast("已导出经过校验的 TASK.json。");
+}
+
+function setTaskCardEditorView(view) {
+  if (view === "form" && !taskCardDraft) {
+    showToast("JSON 仍有语法错误，修复后才能返回结构化编辑。");
+    return;
+  }
+  taskCardEditorView = view;
+  elements.taskCardForm.hidden = view !== "form";
+  elements.taskCardEditor.hidden = view !== "json";
+  for (const button of elements.taskCardEditorSwitch.querySelectorAll("button")) {
+    const active = button.dataset.taskCardEditorView === view;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+  if (view === "form") renderTaskCardForm();
+}
+
+function taskCardAddedValue(kind, length) {
+  if (kind === "acceptance") {
+    return { id: `acceptance-${length + 1}`, description: "Replace with one observable result." };
+  }
+  if (kind === "validation") {
+    return {
+      id: `validation-${length + 1}`,
+      command: ["npm", "test"],
+      description: "Replace with a deterministic validation command.",
+      local_allowed: true,
+    };
+  }
+  return "";
+}
+
+function taskCardArrayAt(task, path) {
+  let value = task;
+  for (const part of path) value = value[part];
+  return value;
+}
+
+function restoreTaskCardHistory(stack, destination) {
+  const snapshot = stack.pop();
+  if (snapshot === undefined) return;
+  destination.push(taskCardSnapshot());
+  taskCardHistoryGroup = null;
+  replaceTaskCardSnapshot(snapshot);
+}
+
+function preflightConfiguration() {
+  try {
+    return JSON.parse(localStorage.getItem(TASK_CARD_PREFLIGHT_KEY) ?? "null") ?? {};
+  } catch {
+    localStorage.removeItem(TASK_CARD_PREFLIGHT_KEY);
+    return {};
+  }
+}
+
+function savePreflightConfiguration() {
+  localStorage.setItem(TASK_CARD_PREFLIGHT_KEY, JSON.stringify({
+    workflowMode: elements.taskCardWorkflowMode.value,
+    adapterId: elements.taskCardAdapter.value,
+    worktree: elements.taskCardWorktree.value,
+    strategy: elements.taskCardStrategy.value,
+    executionEnvironment: elements.taskCardExecutionEnvironment.value,
+    proxyMode: elements.taskCardProxyMode.value,
+    isolationMode: elements.taskCardEnvironmentIsolation.value,
+    networkDiagnostics: elements.taskCardNetworkDiagnostics.value,
+  }));
+}
+
+function updateTaskCardConnectivityAvailability() {
+  const adapter = (taskCardPreflightOptions.adapters ?? []).find(
+    (candidate) => candidate.id === elements.taskCardAdapter.value,
+  );
+  const supported = adapter?.connectivityProbeSupported !== false;
+  elements.taskCardConnectivityRun.disabled =
+    taskCardConnectivityRunning ||
+    !elements.taskCardAdapter.value ||
+    !elements.taskCardWorktree.value.trim() ||
+    !supported;
+  elements.taskCardConnectivityRun.title = supported
+    ? "向当前路由发送一次固定最小交互"
+    : "当前 Adapter 未实现主动连接诊断协议";
+}
+
+function synchronizeTaskCardStrategy() {
+  const overnight = elements.taskCardWorkflowMode.value === "overnight";
+  elements.taskCardStrategyField.hidden = !overnight;
+}
+
+async function loadTaskCardPreflightOptions() {
+  try {
+    taskCardPreflightOptions = await requestJson("/api/task-card/preflight");
+    const stored = preflightConfiguration();
+    const delegatedMode = ["overnight", "balanced"].includes(selectedModeId)
+      ? selectedModeId
+      : "overnight";
+    elements.taskCardWorkflowMode.value = stored.workflowMode ?? delegatedMode;
+    elements.taskCardAdapter.replaceChildren();
+    for (const adapter of taskCardPreflightOptions.adapters ?? []) {
+      elements.taskCardAdapter.append(option(adapter.id, adapter.displayName));
+    }
+    if (stored.adapterId && [...elements.taskCardAdapter.options].some((entry) => entry.value === stored.adapterId)) {
+      elements.taskCardAdapter.value = stored.adapterId;
+    }
+    elements.taskCardWorktree.value = stored.worktree ?? "";
+    elements.taskCardStrategy.value = stored.strategy ?? "convergent";
+    elements.taskCardExecutionEnvironment.value = stored.executionEnvironment ?? "auto";
+    elements.taskCardProxyMode.value = stored.proxyMode ?? "direct";
+    elements.taskCardEnvironmentIsolation.value = stored.isolationMode ?? "provider-scoped";
+    elements.taskCardNetworkDiagnostics.value = stored.networkDiagnostics ?? "metadata";
+    synchronizeTaskCardStrategy();
+    updateTaskCardConnectivityAvailability();
+  } catch (error) {
+    elements.taskCardPreflightRun.disabled = true;
+    elements.taskCardConnectivityRun.disabled = true;
+    elements.taskCardPreflightState.className = "task-card-state unavailable";
+    elements.taskCardPreflightState.textContent = "不可用";
+    elements.taskCardPreflightResult.textContent = `Preflight 配置不可用：${error.message}`;
+  }
+}
+
+function connectivityRecommendation(failureCategory) {
+  const recommendations = {
+    "sandbox-network-host-handoff": "当前沙箱禁止网络访问。请从宿主机终端启动控制面，再重新执行一次诊断。",
+    "adapter-unavailable": "下游 CLI 不在控制面 PATH 中。请检查命令安装位置或 AGENT_CONTROL_CLAUDE_COMMAND。",
+    "workspace-not-trusted": "下游 CLI 拒绝当前工作树。请先在对应工具中完成工作区信任。",
+    "proxy-failure": "代理握手失败。检查系统代理，或切换为直连后手动重新诊断。",
+    "dns-failure": "域名解析失败。检查 DNS、网络出口，或切换当前代理路由后手动重试。",
+    "tls-failure": "TLS 或证书校验失败。检查系统证书、企业代理与供应商证书链。",
+    "authentication-failure": "供应商认证失败。检查登录状态、CC Switch 当前供应商以及认证变量。",
+    "provider-limit": "供应商返回额度、账单或限流错误。请检查对应账户状态。",
+    "transport-failure": "连接未建立或被中断。检查网络出口和当前代理路由。",
+    "probe-timeout": "诊断在 60 秒内没有结束。确认下游 CLI 未等待交互输入，再手动重试。",
+    "no-response": "CLI 正常退出但没有返回内容。检查下游模型与 stream-json 兼容性。",
+    "cli-error": "下游 CLI 返回非零状态。请在同一宿主环境检查 CLI 配置。",
+  };
+  return recommendations[failureCategory] ?? "未识别到明确原因。请检查下游 CLI 日志与供应商状态。";
+}
+
+function connectivityMetric(label, value) {
+  const row = document.createElement("div");
+  const name = document.createElement("span");
+  name.textContent = label;
+  const data = document.createElement("strong");
+  data.textContent = value;
+  row.append(name, data);
+  return row;
+}
+
+function renderTaskCardConnectivity(result) {
+  const target = elements.taskCardConnectivityResult;
+  target.replaceChildren();
+  target.hidden = false;
+  target.className = `task-card-connectivity-result wide ${result.success ? "success" : "failure"}`;
+
+  const heading = document.createElement("div");
+  heading.className = "task-card-connectivity-heading";
+  const title = document.createElement("strong");
+  title.textContent = result.success ? "连接已建立" : "连接诊断未通过";
+  const route = document.createElement("code");
+  route.textContent = `${result.adapterDisplayName ?? result.adapterId} · ${result.proxyMode}`;
+  heading.append(title, route);
+
+  const metrics = document.createElement("div");
+  metrics.className = "task-card-connectivity-metrics";
+  metrics.append(
+    connectivityMetric("耗时", `${result.elapsedMilliseconds ?? 0} ms`),
+    connectivityMetric("Stream 初始化", result.streamInitialized ? "已确认" : "未确认"),
+    connectivityMetric("终态回执", result.resultReceived ? "已收到" : "未收到"),
+    connectivityMetric("调用状态", result.consumedCall ? "已观察到用量阶段" : result.attempted ? "已启动，未确认用量" : "未启动"),
+    connectivityMetric("输出活动", `${result.activity?.stdoutBytes ?? 0} / ${result.activity?.stderrBytes ?? 0} B`),
+    connectivityMetric("Token", result.usageAvailable ? String(result.usage?.totalTokens ?? 0) : "不可见"),
+  );
+  target.append(heading, metrics);
+
+  const note = document.createElement("p");
+  if (result.success) {
+    note.textContent = result.resultReceived
+      ? "当前所选路由完成了最小交互。该结果只证明连接可用，不作为任务验收证据。"
+      : "CLI 返回了内容，但未解析到标准终态事件；连接可用，协议兼容性仍需检查。";
+  } else {
+    note.textContent = `${result.failureCategory ?? "unknown"}：${connectivityRecommendation(result.failureCategory)}`;
+  }
+  target.append(note);
+}
+
+async function runTaskCardConnectivityProbe() {
+  if (taskCardConnectivityRunning) return;
+  if (!elements.taskCardAdapter.value || !elements.taskCardWorktree.value.trim()) {
+    showToast("请先选择下游 Adapter 并填写绝对工作树路径。");
+    return;
+  }
+  if (!window.confirm(
+    "主动连接诊断会向当前下游发送固定最小提示，并最多消耗 1 次模型调用。不会发送 Task Card、工作区内容或代理凭证。继续？",
+  )) return;
+
+  savePreflightConfiguration();
+  taskCardConnectivityRunning = true;
+  updateTaskCardConnectivityAvailability();
+  elements.taskCardConnectivityRun.textContent = "正在诊断…";
+  elements.taskCardConnectivityResult.hidden = false;
+  elements.taskCardConnectivityResult.className = "task-card-connectivity-result wide pending";
+  elements.taskCardConnectivityResult.textContent = "正在等待当前路由返回最小交互回执；不会自动切换路由或发起第二次调用。";
+  try {
+    const result = await requestJson("/api/runtime/connectivity-probe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        adapterId: elements.taskCardAdapter.value,
+        worktree: elements.taskCardWorktree.value,
+        timeoutSeconds: 60,
+        runtimeEnvironment: {
+          executionEnvironment: elements.taskCardExecutionEnvironment.value,
+          proxyMode: elements.taskCardProxyMode.value,
+          isolationMode: elements.taskCardEnvironmentIsolation.value,
+          networkDiagnostics: elements.taskCardNetworkDiagnostics.value,
+        },
+      }),
+    });
+    renderTaskCardConnectivity(result);
+  } catch (error) {
+    elements.taskCardConnectivityResult.hidden = false;
+    elements.taskCardConnectivityResult.className = "task-card-connectivity-result wide failure";
+    elements.taskCardConnectivityResult.textContent = `诊断请求失败：${error.message}`;
+  } finally {
+    taskCardConnectivityRunning = false;
+    elements.taskCardConnectivityRun.textContent = "主动连接诊断 · 1 次调用";
+    updateTaskCardConnectivityAvailability();
+  }
+}
+
+function renderTaskCardPreflight(result) {
+  elements.taskCardPreflightResult.replaceChildren();
+  elements.taskCardPreflightState.className = `task-card-state ${result.ready ? "valid" : "invalid"}`;
+  elements.taskCardPreflightState.textContent = result.ready ? "可以启动" : "存在阻断";
+
+  const summary = document.createElement("div");
+  summary.className = "task-card-preflight-summary";
+  const title = document.createElement("strong");
+  title.textContent = result.ready ? "启动前检查通过" : "启动前检查未通过";
+  const fingerprint = document.createElement("code");
+  fingerprint.textContent = result.taskSha256 ? `sha256:${result.taskSha256.slice(0, 16)}…` : "无任务指纹";
+  summary.append(title, fingerprint);
+  elements.taskCardPreflightResult.append(summary);
+
+  const checks = document.createElement("div");
+  checks.className = "task-card-preflight-checks";
+  for (const entry of result.checks ?? []) {
+    const row = document.createElement("div");
+    row.className = `task-card-preflight-check ${entry.status}`;
+    const marker = document.createElement("i");
+    marker.textContent = entry.status === "passed" ? "✓" : entry.status === "warning" ? "!" : "×";
+    const copy = document.createElement("div");
+    const label = document.createElement("strong");
+    label.textContent = entry.label;
+    const detail = document.createElement("span");
+    detail.textContent = entry.detail;
+    copy.append(label, detail);
+    row.append(marker, copy);
+    checks.append(row);
+  }
+  elements.taskCardPreflightResult.append(checks);
+
+  const warnings = (result.issues ?? []).filter((entry) => entry.severity === "warning");
+  if (warnings.length > 0) {
+    const list = document.createElement("ul");
+    list.className = "task-card-preflight-warnings";
+    for (const warning of warnings) {
+      const item = document.createElement("li");
+      item.textContent = warning.message;
+      list.append(item);
+    }
+    elements.taskCardPreflightResult.append(list);
+  }
+}
+
+async function runTaskCardPreflight() {
+  if (!validatedTaskCard) return;
+  savePreflightConfiguration();
+  elements.taskCardPreflightRun.disabled = true;
+  elements.taskCardPreflightState.className = "task-card-state pending";
+  elements.taskCardPreflightState.textContent = "正在检查";
+  try {
+    const workflowMode = elements.taskCardWorkflowMode.value;
+    const result = await requestJson("/api/task-card/preflight", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        task: validatedTaskCard,
+        workflowMode,
+        worktree: elements.taskCardWorktree.value,
+        adapterId: elements.taskCardAdapter.value,
+        runtimeEnvironment: {
+          executionEnvironment: elements.taskCardExecutionEnvironment.value,
+          proxyMode: elements.taskCardProxyMode.value,
+          isolationMode: elements.taskCardEnvironmentIsolation.value,
+          networkDiagnostics: elements.taskCardNetworkDiagnostics.value,
+        },
+        ...(workflowMode === "overnight" ? { strategy: elements.taskCardStrategy.value } : {
+          timing: balancedTimingFromControls(),
+          budget: balancedBudgetFromControls(),
+        }),
+      }),
+    });
+    renderTaskCardPreflight(result);
+  } catch (error) {
+    elements.taskCardPreflightState.className = "task-card-state invalid";
+    elements.taskCardPreflightState.textContent = "检查失败";
+    elements.taskCardPreflightResult.textContent = error.message;
+  } finally {
+    elements.taskCardPreflightRun.disabled = !validatedTaskCard;
+  }
 }
 
 function renderHistoryList() {
@@ -888,6 +1759,52 @@ function initializeAgentSelectors() {
   for (const agent of builders) elements.builderAgent.append(option(agent.id, agent.displayName));
 }
 
+function selectedOvernightPolicy() {
+  return (
+    OVERNIGHT_LOOP_POLICIES.find(
+      (policy) => `${policy.id}@${policy.version}` === elements.overnightLoopPolicy.value,
+    ) ?? DEFAULT_OVERNIGHT_LOOP_POLICY
+  );
+}
+
+function renderOvernightPolicySummary() {
+  const policy = selectedOvernightPolicy();
+  if (!policy) return;
+  elements.overnightPolicyVersion.textContent = `${policy.id}@${policy.version}`;
+  elements.overnightPolicyDescription.textContent = policy.description;
+  elements.overnightScopeRule.textContent =
+    policy.scopePolicy === "monotonic-non-expanding"
+      ? "逐轮收缩；下一轮允许路径必须是前一轮子集"
+      : "通过审阅的新周期可以扩张；禁止与授权边界保持不变";
+  elements.overnightCompletionRule.textContent =
+    policy.completionPolicy === "terminal-on-acceptance"
+      ? "验收通过即结束，不再重复唤醒"
+      : "用户指标只是最低线；持续运行直到用户中断";
+}
+
+function initializeOvernightControls() {
+  for (const policy of OVERNIGHT_LOOP_POLICIES) {
+    elements.overnightLoopPolicy.append(
+      option(`${policy.id}@${policy.version}`, policy.displayName),
+    );
+  }
+  if (DEFAULT_OVERNIGHT_LOOP_POLICY) {
+    elements.overnightLoopPolicy.value =
+      `${DEFAULT_OVERNIGHT_LOOP_POLICY.id}@${DEFAULT_OVERNIGHT_LOOP_POLICY.version}`;
+  }
+  renderOvernightPolicySummary();
+}
+
+function applyOvernightLoopPolicyToControls(reference) {
+  const selected = OVERNIGHT_LOOP_POLICIES.find(
+    (policy) => policy.id === reference?.id && policy.version === reference?.version,
+  );
+  const policy = selected ?? DEFAULT_OVERNIGHT_LOOP_POLICY;
+  if (!policy) return;
+  elements.overnightLoopPolicy.value = `${policy.id}@${policy.version}`;
+  renderOvernightPolicySummary();
+}
+
 function balancedBudgetFromControls() {
   return {
     mainReviewCalls: Number(elements.balancedMainCalls.value),
@@ -1046,7 +1963,8 @@ function renderBalancedRuns() {
     const budget = document.createElement("small");
     const used = run.budgetState?.used ?? {};
     const limits = run.budgetState?.limits ?? {};
-    budget.textContent = `轮次 ${run.rounds ?? 0} · 下游 ${used.downstream ?? 0}/${limits.downstreamCalls ?? 0} · 审阅 ${used.main ?? 0}/${limits.mainReviewCalls ?? 0} · Token ${formatTokens(run.budgetState?.totalTokens ?? 0)}`;
+    const failure = run.latestFailureCategory ? ` · ${run.latestFailureCategory}` : "";
+    budget.textContent = `轮次 ${run.rounds ?? 0} · 下游 ${used.downstream ?? 0}/${limits.downstreamCalls ?? 0} · 审阅 ${used.main ?? 0}/${limits.mainReviewCalls ?? 0} · Token ${formatTokens(run.budgetState?.totalTokens ?? 0)}${failure}`;
     item.append(id, state, budget);
     elements.balancedRunList.append(item);
   }
@@ -1062,6 +1980,68 @@ async function loadBalancedRuns() {
     balancedRunsAvailable = false;
   }
   renderBalancedRuns();
+}
+
+function renderOvernightRuns() {
+  elements.overnightRunList.replaceChildren();
+  elements.overnightRuntimeSummary.textContent =
+    !overnightRunsAvailable
+      ? "运行记录不可用"
+      : overnightRuns.length === 0
+        ? "尚无运行记录"
+        : `${overnightRuns.length} 个持久化运行`;
+  for (const run of overnightRuns.slice(0, 3)) {
+    const item = document.createElement("div");
+    item.className = "balanced-run";
+    const id = document.createElement("code");
+    id.textContent = run.taskId ?? run.runId;
+    id.title = run.runId;
+    const state = document.createElement("b");
+    state.textContent = run.state;
+    const stateActions = document.createElement("div");
+    stateActions.className = "overnight-run-actions";
+    stateActions.append(state);
+    if (!["accepted", "stopped", "interrupted"].includes(run.state)) {
+      const interrupt = document.createElement("button");
+      interrupt.type = "button";
+      interrupt.className = "overnight-interrupt";
+      interrupt.textContent = "中断";
+      interrupt.addEventListener("click", async () => {
+        interrupt.disabled = true;
+        try {
+          const result = await requestJson(
+            `/api/overnight/runs/${encodeURIComponent(run.runId)}/interrupt`,
+            { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+          );
+          showToast(result.state === "interrupt_requested" ? "已提交中断请求" : "运行已中断");
+          await loadOvernightRuns();
+        } catch (error) {
+          showToast(`中断失败：${error.message}`);
+          interrupt.disabled = false;
+        }
+      });
+      stateActions.append(interrupt);
+    }
+    const detail = document.createElement("small");
+    const strategy = run.strategy === "continuous-improvement" ? "持续改进" : "收缩式";
+    const delivery = run.wakeDelivery?.status ? ` · 唤醒 ${run.wakeDelivery.status}` : "";
+    const failure = run.latestFailureCategory ? ` · ${run.latestFailureCategory}` : "";
+    detail.textContent = `${strategy} · 周期 ${run.cycle ?? 0} · ${run.adapterId ?? "未知下游"}${delivery}${failure}`;
+    item.append(id, stateActions, detail);
+    elements.overnightRunList.append(item);
+  }
+}
+
+async function loadOvernightRuns() {
+  try {
+    const result = await requestJson("/api/overnight/runs");
+    overnightRuns = result.runs ?? [];
+    overnightRunsAvailable = true;
+  } catch {
+    overnightRuns = [];
+    overnightRunsAvailable = false;
+  }
+  renderOvernightRuns();
 }
 
 function renderModeCards() {
@@ -1151,6 +2131,10 @@ function createProfile(modeId = selectedModeId) {
           { role: "reviewer", target: { kind: "main" } },
         ],
   };
+  if (mode.kind === "overnight") {
+    const policy = selectedOvernightPolicy();
+    if (policy) profile.overnightLoopPolicy = { id: policy.id, version: policy.version };
+  }
   if (mode.kind === "balanced") {
     profile.balancedBudget = balancedBudgetFromControls();
     profile.balancedTiming = balancedTimingFromControls();
@@ -1414,6 +2398,9 @@ function renderStoreStatus() {
 
 const INTERACTIVE_AGENT_STATUS_LABELS = Object.freeze({
   installed: "已安装",
+  imported: "已读取",
+  modified: "待覆盖",
+  stale: "外部已修改",
   missing: "待安装",
   "update-available": "可更新",
   conflict: "冲突",
@@ -1600,7 +2587,7 @@ function buildInteractiveRoleEditor(agent, index, states) {
   badge.dataset.roleState = agent.name;
   const state = states.get(agent.name) ?? "unavailable";
   badge.textContent = INTERACTIVE_AGENT_STATUS_LABELS[state] ?? state;
-  badge.classList.toggle("conflict", state === "conflict" || state === "unsafe");
+  badge.classList.toggle("conflict", state === "conflict" || state === "unsafe" || state === "stale");
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "interactive-delete-role";
@@ -1732,7 +2719,7 @@ function renderInteractiveAgentConfig() {
     for (const badge of elements.interactiveAgentList.querySelectorAll("[data-role-state]")) {
       const state = states.get(badge.dataset.roleState) ?? "unavailable";
       badge.textContent = INTERACTIVE_AGENT_STATUS_LABELS[state] ?? state;
-      badge.classList.toggle("conflict", state === "conflict" || state === "unsafe");
+      badge.classList.toggle("conflict", state === "conflict" || state === "unsafe" || state === "stale");
     }
   }
 
@@ -1760,9 +2747,14 @@ function renderInteractiveAgentConfig() {
     elements.interactiveInstallTitle.textContent = `${interactiveAgentConfiguration.agents.length} 个角色已就绪`;
     elements.interactiveInstallDetail.textContent = interactiveAgentStatus.agentsDir ?? "~/.codex/agents";
   } else if (health === "ready") {
-    elements.interactiveAgentHealth.textContent = "等待安装";
-    elements.interactiveInstallTitle.textContent = "激活时同步安装";
-    elements.interactiveInstallDetail.textContent = interactiveAgentStatus.agentsDir ?? "~/.codex/agents";
+    const imported = interactiveAgentStatus.configurationOrigin === "existing";
+    elements.interactiveAgentHealth.textContent = imported ? "已读取现有配置" : "等待安装";
+    elements.interactiveInstallTitle.textContent = imported
+      ? `${interactiveAgentConfiguration.agents.length} 个现有角色可编辑`
+      : "已加载推荐角色；激活时安装";
+    elements.interactiveInstallDetail.textContent = imported
+      ? "激活后备份并覆盖对应原文件"
+      : interactiveAgentStatus.agentsDir ?? "~/.codex/agents";
   } else if (health === "conflict") {
     elements.interactiveAgentHealth.textContent = "检测到同名配置";
     elements.interactiveInstallTitle.textContent = "需要覆写授权";
@@ -1807,6 +2799,7 @@ function interactiveAgentIssue() {
 
 function refresh(options = {}) {
   const preserveEditor = options?.preserveEditor === true;
+  const overnight = selectedModeId === "overnight";
   const interactive = selectedModeId === "interactive";
   const balanced = selectedModeId === "balanced";
   elements.builderAgent.disabled = interactive;
@@ -1815,8 +2808,10 @@ function refresh(options = {}) {
     ? "Interactive 使用主 Agent 原生 subagent"
     : "接收实现任务的外部 Agent";
   elements.interactiveConfig.hidden = !interactive;
+  elements.overnightConfig.hidden = !overnight;
   elements.balancedConfig.hidden = !balanced;
-  elements.activationStep.textContent = balanced || interactive ? "04" : "03";
+  elements.activationStep.textContent = overnight || balanced || interactive ? "04" : "03";
+  if (overnight) renderOvernightPolicySummary();
   renderInteractiveAgentConfig();
 
   const draft = resolveSkillDraft();
@@ -1925,6 +2920,10 @@ function showToast(message) {
 
 elements.mainAgent.addEventListener("change", refresh);
 elements.builderAgent.addEventListener("change", refresh);
+elements.overnightLoopPolicy.addEventListener("change", () => {
+  renderOvernightPolicySummary();
+  refresh();
+});
 for (const input of [
   elements.balancedMainCalls,
   elements.balancedDownstreamCalls,
@@ -1956,7 +2955,12 @@ async function requestJson(path, options) {
   const response = await fetch(path, options);
   const body = await response.json();
   if (!response.ok) {
-    throw new Error(body.message ?? body.error ?? `Request failed: ${response.status}`);
+    const error = new Error(body.message ?? body.error ?? `Request failed: ${response.status}`);
+    error.code = body.error;
+    error.path = body.path;
+    error.status = response.status;
+    error.body = body;
+    throw error;
   }
   return body;
 }
@@ -1973,6 +2977,7 @@ function synchronizeControlsWithActiveSkill() {
     if (BUILTIN_MODE_CATALOG.modes.some((mode) => mode.id === previewModeId)) {
       selectedModeId = previewModeId;
     }
+    applyOvernightLoopPolicyToControls(preview?.overnightLoopPolicy);
     applyBalancedBudgetToControls(preview?.balancedBudget);
     applyBalancedTimingToControls(preview?.balancedTiming);
     seedStoredSkillDraft(preview);
@@ -1993,6 +2998,7 @@ function synchronizeControlsWithActiveSkill() {
       [...elements.builderAgent.options].some((option) => option.value === agentId),
   );
   if (builderId) elements.builderAgent.value = builderId;
+  applyOvernightLoopPolicyToControls(active.overnightLoopPolicy);
   applyBalancedBudgetToControls(active.balancedBudget);
   applyBalancedTimingToControls(active.balancedTiming);
   seedStoredSkillDraft(active);
@@ -2012,6 +3018,7 @@ function savePreviewSelection(modeId) {
       relativeSkillPath: resolution.relativeSkillPath,
       contentFingerprint: resolution.contentFingerprint,
       content: resolution.content,
+      overnightLoopPolicy: resolution.overnightLoopPolicy ?? null,
       balancedBudget: resolution.balancedBudget ?? null,
       balancedTiming: resolution.balancedTiming ?? null,
     }),
@@ -2167,9 +3174,13 @@ async function loadInteractiveAgentStatus() {
       } catch {
         localStorage.removeItem(INTERACTIVE_DRAFT_KEY);
       }
-      interactiveAgentConfiguration = cloneJson(
-        saved ?? interactiveAgentStatus.configuration ?? interactiveAgentStatus.preset,
-      );
+      const serverConfiguration = interactiveAgentStatus.configuration ?? interactiveAgentStatus.preset;
+      const sameSources = saved && JSON.stringify(saved.sourceAgents ?? []) === JSON.stringify(serverConfiguration?.sourceAgents ?? []);
+      if (saved && !sameSources) {
+        saved = null;
+        localStorage.removeItem(INTERACTIVE_DRAFT_KEY);
+      }
+      interactiveAgentConfiguration = cloneJson(saved ?? serverConfiguration);
       interactiveBaselineConfiguration = cloneJson(
         interactiveAgentStatus.configuration ?? interactiveAgentStatus.preset,
       );
@@ -2216,7 +3227,13 @@ elements.activateButton.addEventListener("click", async () => {
       serverStatus = result.status;
       if (result.interactiveAgentInstall?.status) {
         interactiveAgentStatus = result.interactiveAgentInstall.status;
+        interactiveAgentConfiguration = cloneJson(
+          result.interactiveAgentInstall.status.configuration ?? interactiveAgentConfiguration,
+        );
         interactiveBaselineConfiguration = cloneJson(interactiveAgentConfiguration);
+        localStorage.removeItem(INTERACTIVE_DRAFT_KEY);
+        initializeInteractiveHistory();
+        interactiveEditorFingerprint = null;
         interactiveAgentStatusLoaded = true;
         elements.interactiveAgentOverwrite.checked = false;
       }
@@ -2304,7 +3321,18 @@ elements.interactiveRevert.addEventListener("click", () => {
 });
 elements.interactiveResetRoles.addEventListener("click", () => {
   if (!interactiveAgentStatus.preset) return;
-  interactiveAgentConfiguration = cloneJson(interactiveAgentStatus.preset);
+  const preset = cloneJson(interactiveAgentStatus.preset);
+  const sources = cloneJson(interactiveAgentConfiguration?.sourceAgents ?? []);
+  const sourceByName = new Map(sources.map((source) => [source.name, source]));
+  preset.sourceAgents = sources;
+  preset.configurationOrigin = sources.length > 0 ? "existing" : "recommended";
+  preset.agents = preset.agents.map((agent) => {
+    const source = sourceByName.get(agent.name);
+    return source
+      ? { ...agent, sourceFileName: source.fileName, sourceHash: source.hash }
+      : agent;
+  });
+  interactiveAgentConfiguration = preset;
   interactiveOpenRoles.clear();
   markInteractiveConfigurationChanged({ rebuild: true });
   showToast("已恢复默认角色草稿；激活后写入 Codex。");
@@ -2408,8 +3436,158 @@ elements.tokenDimension.addEventListener("click", (event) => {
 });
 
 elements.navConfiguration.addEventListener("click", () => switchView("configuration"));
+elements.navTaskCard.addEventListener("click", () => switchView("task-card"));
 elements.navUsage.addEventListener("click", () => switchView("usage"));
 elements.navHistory.addEventListener("click", () => switchView("history"));
+elements.taskCardEditor.addEventListener("input", () => {
+  recordTaskCardHistory(taskCardLastEditorValue, "json-editor");
+  taskCardLastEditorValue = elements.taskCardEditor.value;
+  try {
+    taskCardDraft = JSON.parse(elements.taskCardEditor.value);
+  } catch {
+    taskCardDraft = null;
+  }
+  queueTaskCardValidation({ preserveHistoryGroup: true });
+});
+elements.taskCardEditorSwitch.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-task-card-editor-view]");
+  if (!button || !elements.taskCardEditorSwitch.contains(button)) return;
+  setTaskCardEditorView(button.dataset.taskCardEditorView);
+});
+elements.taskCardForm.addEventListener("input", (event) => {
+  const control = event.target.closest("[data-task-path]");
+  if (!control || !elements.taskCardForm.contains(control)) return;
+  const path = JSON.parse(control.dataset.taskPath);
+  let value = control.value;
+  if (control.dataset.taskValueType === "boolean") value = control.checked;
+  if (control.dataset.taskValueType === "json") {
+    try {
+      value = JSON.parse(value);
+      control.setCustomValidity("");
+    } catch (error) {
+      control.setCustomValidity(`JSON 语法错误：${error.message}`);
+      setTaskCardState("invalid", `extensions JSON 语法错误：${error.message}`);
+      validatedTaskCard = null;
+      elements.taskCardExport.disabled = true;
+      elements.taskCardPreflightRun.disabled = true;
+      return;
+    }
+  }
+  const previous = taskCardSnapshot();
+  commitTaskCardMutation(
+    (task) => setTaskCardValue(task, path, value, {
+      removeEmpty: control.dataset.taskRemoveEmpty === "true",
+    }),
+    `form:${taskCardPathLabel(path)}`,
+  );
+  if (control.dataset.taskValueType === "json" && taskCardSnapshot() === previous) {
+    queueTaskCardValidation({ preserveHistoryGroup: true });
+  }
+});
+elements.taskCardForm.addEventListener("change", (event) => {
+  const control = event.target.closest("[data-task-rerender='true']");
+  if (control) renderTaskCardForm();
+});
+elements.taskCardForm.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-task-action]");
+  if (!button || !elements.taskCardForm.contains(button)) return;
+  const path = JSON.parse(button.dataset.taskPath);
+  if (button.dataset.taskAction === "add") {
+    commitTaskCardMutation((task) => {
+      let list = taskCardArrayAt(task, path);
+      if (!Array.isArray(list)) {
+        setTaskCardValue(task, path, []);
+        list = taskCardArrayAt(task, path);
+      }
+      list.push(taskCardAddedValue(button.dataset.taskKind, list.length));
+    }, `add:${taskCardPathLabel(path)}`, { render: true });
+  }
+  if (button.dataset.taskAction === "remove") {
+    commitTaskCardMutation((task) => {
+      const list = taskCardArrayAt(task, path);
+      if (Array.isArray(list)) list.splice(Number(button.dataset.taskIndex), 1);
+    }, `remove:${taskCardPathLabel(path)}`, { render: true });
+  }
+});
+elements.taskCardViewSwitch.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-task-card-view]");
+  if (!button || !elements.taskCardViewSwitch.contains(button)) return;
+  taskCardProjectionView = button.dataset.taskCardView;
+  for (const candidate of elements.taskCardViewSwitch.querySelectorAll("button")) {
+    const active = candidate === button;
+    candidate.classList.toggle("active", active);
+    candidate.setAttribute("aria-pressed", String(active));
+  }
+  renderTaskCardProjection();
+});
+elements.taskCardExport.addEventListener("click", exportTaskCard);
+elements.taskCardUndo.addEventListener("click", () => restoreTaskCardHistory(taskCardUndoStack, taskCardRedoStack));
+elements.taskCardRedo.addEventListener("click", () => restoreTaskCardHistory(taskCardRedoStack, taskCardUndoStack));
+elements.taskCardRevert.addEventListener("click", () => {
+  if (!taskCardBaseline || taskCardSnapshot() === taskCardBaseline) return;
+  recordTaskCardHistory(taskCardSnapshot(), "revert");
+  replaceTaskCardSnapshot(taskCardBaseline);
+  showToast("已回退到本次载入时的 Task Card。");
+});
+elements.taskCardImport.addEventListener("click", () => elements.taskCardImportInput.click());
+elements.taskCardImportInput.addEventListener("change", async () => {
+  const file = elements.taskCardImportInput.files?.[0];
+  elements.taskCardImportInput.value = "";
+  if (!file) return;
+  if (file.size > 1024 * 1024) {
+    showToast("导入失败：Task Card 不能超过 1 MiB。");
+    return;
+  }
+  try {
+    const imported = await file.text();
+    recordTaskCardHistory(taskCardSnapshot(), "import");
+    elements.taskCardEditor.value = imported;
+    taskCardLastEditorValue = imported;
+    taskCardSetBaselineOnValidation = true;
+    try {
+      taskCardDraft = JSON.parse(imported);
+      renderTaskCardForm();
+    } catch {
+      taskCardDraft = null;
+      setTaskCardEditorView("json");
+    }
+    queueTaskCardValidation({ preserveHistoryGroup: true });
+    showToast(`已载入 ${file.name}，正在校验。`);
+  } catch (error) {
+    showToast(`导入失败：${error.message}`);
+  }
+});
+elements.taskCardReset.addEventListener("click", () => {
+  if (!taskCardTemplate) return;
+  if (!window.confirm("恢复标准 Task Card 模板？当前浏览器草稿会被替换。")) return;
+  recordTaskCardHistory(taskCardSnapshot(), "reset-template");
+  const template = JSON.stringify(taskCardTemplate, null, 2);
+  elements.taskCardEditor.value = template;
+  taskCardLastEditorValue = template;
+  taskCardDraft = taskCardClone(taskCardTemplate);
+  taskCardSetBaselineOnValidation = true;
+  localStorage.removeItem(TASK_CARD_DRAFT_KEY);
+  renderTaskCardForm();
+  validateTaskCardDraft();
+  showToast("已恢复标准 Task Card 模板。");
+});
+elements.taskCardWorkflowMode.addEventListener("change", () => {
+  synchronizeTaskCardStrategy();
+  savePreflightConfiguration();
+});
+elements.taskCardAdapter.addEventListener("change", () => {
+  savePreflightConfiguration();
+  updateTaskCardConnectivityAvailability();
+});
+elements.taskCardExecutionEnvironment.addEventListener("change", savePreflightConfiguration);
+elements.taskCardProxyMode.addEventListener("change", savePreflightConfiguration);
+elements.taskCardEnvironmentIsolation.addEventListener("change", savePreflightConfiguration);
+elements.taskCardNetworkDiagnostics.addEventListener("change", savePreflightConfiguration);
+elements.taskCardWorktree.addEventListener("input", updateTaskCardConnectivityAvailability);
+elements.taskCardWorktree.addEventListener("change", savePreflightConfiguration);
+elements.taskCardStrategy.addEventListener("change", savePreflightConfiguration);
+elements.taskCardPreflightRun.addEventListener("click", runTaskCardPreflight);
+elements.taskCardConnectivityRun.addEventListener("click", runTaskCardConnectivityProbe);
 elements.historyRefresh.addEventListener("click", () =>
   loadHistory({ selectEntry: activeView === "history" }),
 );
@@ -2453,6 +3631,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 initializeAgentSelectors();
+initializeOvernightControls();
 initializeBalancedControls();
 renderModeCards();
 refresh();
@@ -2460,9 +3639,14 @@ loadServerStatus();
 loadInteractiveAgentStatus();
 loadHistory();
 loadBalancedRuns();
+loadOvernightRuns();
+loadTaskCard();
 window.setInterval(() => {
   if (!document.hidden && activeView === "usage") loadRuntimeUsage();
   if (!document.hidden && activeView === "configuration" && selectedModeId === "balanced") {
     loadBalancedRuns();
+  }
+  if (!document.hidden && activeView === "configuration" && selectedModeId === "overnight") {
+    loadOvernightRuns();
   }
 }, 5000);

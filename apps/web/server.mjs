@@ -1,7 +1,8 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
-import { basename, dirname, extname, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -16,14 +17,29 @@ import { createCcSwitchUsageSource } from "./cc-switch-usage-source.mjs";
 import { createClaudeUsageSource } from "./claude-usage-source.mjs";
 import { createPreferredUsageSource } from "./preferred-usage-source.mjs";
 import { createBalancedRuntime } from "./balanced-runtime.mjs";
+import { createOvernightRuntime } from "./overnight-runtime.mjs";
 import { createEditableCodexAgentStore } from "./codex-agent-role-store.mjs";
 import { createSkillStore, SkillStoreError } from "./skill-store.mjs";
+import {
+  createTaskCardTemplate,
+  normalizeTaskCard,
+  renderTaskCardMarkdown,
+} from "./task-card.mjs";
+import {
+  preflightTaskCard,
+  TASK_CARD_PREFLIGHT_OPTIONS,
+} from "./task-card-preflight.mjs";
+import {
+  createClaudeConnectivityAdapter,
+  probeDownstreamConnectivity,
+} from "./runtime-connectivity.mjs";
 import { createUsageMonitor } from "./usage-monitor.mjs";
 
 const PUBLIC_ROOT = fileURLToPath(new URL("./public/", import.meta.url));
 const CONTRACTS_ROOT = fileURLToPath(
   new URL("../../packages/contracts/dist/", import.meta.url),
 );
+const TASK_CARD_SCHEMA_ROOT = fileURLToPath(new URL("./", import.meta.url));
 
 const MIME_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -130,6 +146,33 @@ export function createAppServer(options = {}) {
   const balancedRuntime = options.balancedRuntime ?? createBalancedRuntime({
     runtimeRoot: options.balancedRuntimeRoot,
   });
+  const overnightRuntime = options.overnightRuntime ?? createOvernightRuntime({
+    runtimeRoot: options.overnightRuntimeRoot,
+  });
+  const preflightAdapters = options.preflightAdapters ?? EXAMPLE_AGENTS
+    .filter((agent) => agent.capabilities.includes("bounded-execution"))
+    .map((agent) => ({
+      id: agent.id,
+      displayName: agent.displayName,
+      requiresNetwork: true,
+      providerEnvironmentPrefixes: agent.id === "claude-code"
+        ? ["ANTHROPIC_", "CLAUDE_", "CC_SWITCH_"]
+        : [],
+      filesystemIsolation: "post-run-only",
+      command: agent.id === "claude-code"
+        ? (process.env.AGENT_CONTROL_CLAUDE_COMMAND ?? "claude")
+        : null,
+    }));
+  const connectivityAdapters = options.connectivityAdapters ?? [
+    createClaudeConnectivityAdapter({
+      command: process.env.AGENT_CONTROL_CLAUDE_COMMAND ?? "claude",
+    }),
+  ];
+  const connectivityProbe = options.connectivityProbe ?? ((input) =>
+    probeDownstreamConnectivity(input, {
+      adapters: connectivityAdapters,
+      environment: options.preflightEnvironment ?? process.env,
+    }));
   let usageMonitor = options.usageMonitor;
   if (!usageMonitor) {
     let usageSources = options.usageSources;
@@ -237,6 +280,102 @@ export function createAppServer(options = {}) {
         return;
       }
 
+      if (
+        pathname === "/api/task-card/template" &&
+        (request.method === "GET" || request.method === "HEAD")
+      ) {
+        const task = createTaskCardTemplate();
+        sendJson(
+          response,
+          200,
+          {
+            task,
+            sourceFormat: "task-card-v1",
+            projections: {
+              audit: renderTaskCardMarkdown(task, { view: "audit" }),
+              execution: renderTaskCardMarkdown(task, { view: "execution" }),
+            },
+          },
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      if (
+        pathname === "/api/task-card/schema" &&
+        (request.method === "GET" || request.method === "HEAD")
+      ) {
+        await serveFile(
+          request,
+          response,
+          TASK_CARD_SCHEMA_ROOT,
+          "task-card-v1.schema.json",
+        );
+        return;
+      }
+
+      if (pathname === "/api/task-card/validate" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const normalized = normalizeTaskCard(await readJsonBody(request));
+        sendJson(response, 200, {
+          valid: true,
+          ...normalized,
+          projections: {
+            audit: renderTaskCardMarkdown(normalized.task, { view: "audit" }),
+            execution: renderTaskCardMarkdown(normalized.task, { view: "execution" }),
+          },
+        });
+        return;
+      }
+
+      if (
+        pathname === "/api/task-card/preflight" &&
+        (request.method === "GET" || request.method === "HEAD")
+      ) {
+        const diagnosticAdapterIds = new Set(connectivityAdapters.map((adapter) => adapter.id));
+        sendJson(
+          response,
+          200,
+          {
+            ...TASK_CARD_PREFLIGHT_OPTIONS,
+            adapters: preflightAdapters.map((adapter) => ({
+              ...adapter,
+              connectivityProbeSupported: diagnosticAdapterIds.has(adapter.id),
+            })),
+          },
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      if (pathname === "/api/task-card/preflight" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          await preflightTaskCard(await readJsonBody(request), {
+            adapters: preflightAdapters,
+            environment: options.preflightEnvironment ?? process.env,
+          }),
+        );
+        return;
+      }
+
+      if (pathname === "/api/runtime/connectivity-probe" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        sendJson(response, 200, await connectivityProbe(await readJsonBody(request)));
+        return;
+      }
+
       if (pathname === "/api/balanced/config" && (request.method === "GET" || request.method === "HEAD")) {
         const mode = BUILTIN_MODE_CATALOG.modes.find((candidate) => candidate.kind === "balanced");
         const policy = BUILTIN_MODE_CATALOG.tunedWindowPolicies.find(
@@ -272,6 +411,26 @@ export function createAppServer(options = {}) {
           { runs: await balancedRuntime.listRuns() },
           request.method === "HEAD",
         );
+        return;
+      }
+
+      if (pathname === "/api/overnight/runs" && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(
+          response,
+          200,
+          { runs: await overnightRuntime.listRuns() },
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      const overnightInterrupt = pathname.match(/^\/api\/overnight\/runs\/([^/]+)\/interrupt$/);
+      if (overnightInterrupt && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        sendJson(response, 200, await overnightRuntime.interruptById(overnightInterrupt[1]));
         return;
       }
 
@@ -357,7 +516,11 @@ export function createAppServer(options = {}) {
         return;
       }
       if (typeof error?.status === "number" && typeof error?.code === "string") {
-        sendJson(response, error.status, { error: error.code, message: error.message });
+        sendJson(response, error.status, {
+          error: error.code,
+          message: error.message,
+          ...(error.path ? { path: error.path } : {}),
+        });
         return;
       }
       sendJson(response, 500, { error: "server.internal" });
@@ -388,12 +551,27 @@ function isEntryPoint() {
   return entry !== undefined && import.meta.url === pathToFileURL(entry).href;
 }
 
+export function resolveLocalCodexPaths(environment = process.env, userHome = homedir()) {
+  if (environment.AGENT_WORKFLOW_PREVIEW_ONLY === "1") {
+    return { codexHome: undefined, skillsDir: undefined, source: "preview-only" };
+  }
+  const explicitCodexHome = environment.AGENT_WORKFLOW_CODEX_HOME?.trim();
+  const explicitSkillsDir = environment.AGENT_WORKFLOW_SKILLS_DIR?.trim();
+  const codexHome = resolve(explicitCodexHome || join(userHome, ".codex"));
+  return {
+    codexHome,
+    skillsDir: resolve(explicitSkillsDir || join(codexHome, "skills")),
+    source: explicitCodexHome || explicitSkillsDir ? "explicit" : "auto",
+  };
+}
+
 if (isEntryPoint()) {
   const host = process.env.AGENT_WORKFLOW_HOST ?? "127.0.0.1";
   const parsedPort = Number.parseInt(process.env.AGENT_WORKFLOW_PORT ?? "4173", 10);
   const port = Number.isInteger(parsedPort) && parsedPort >= 0 ? parsedPort : 4173;
+  const localPaths = resolveLocalCodexPaths();
   if (
-    process.env.AGENT_WORKFLOW_SKILLS_DIR &&
+    localPaths.skillsDir &&
     host !== "127.0.0.1" &&
     host !== "localhost" &&
     host !== "::1"
@@ -401,12 +579,13 @@ if (isEntryPoint()) {
     throw new Error("Filesystem activation may only listen on a loopback host.");
   }
   const server = createAppServer({
-    skillsDir: process.env.AGENT_WORKFLOW_SKILLS_DIR,
-    codexHome: process.env.AGENT_WORKFLOW_CODEX_HOME,
+    skillsDir: localPaths.skillsDir,
+    codexHome: localPaths.codexHome,
   });
   server.listen(port, host, () => {
     const address = server.address();
     const activePort = typeof address === "object" && address ? address.port : port;
-    process.stdout.write(`Agent Workflow Switch: http://${host}:${activePort}\n`);
+    const storage = localPaths.codexHome ? ` · Codex home: ${localPaths.codexHome}` : " · preview only";
+    process.stdout.write(`Agent Workflow Switch: http://${host}:${activePort}${storage}\n`);
   });
 }

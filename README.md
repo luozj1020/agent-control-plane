@@ -52,6 +52,8 @@ It owns:
 - compatibility checks, activation previews, atomic writes, and backups;
 - import, export, health status, and one-click switching.
 - a versioned Balanced timing policy with configurable wait/extension overrides and call budgets;
+- two versioned Overnight loop policies with independent minimal Skill output;
+- versioned external-monitor policies shared by Overnight and Balanced;
 - an on-demand Balanced Runner with pluggable downstream adapters;
 - hash-bound round evidence, Revision Delta continuation, and budget receipts.
 
@@ -60,6 +62,7 @@ The selected main agent, following the activated instructions, owns:
 - task planning and intent freeze;
 - native or external subagent coordination;
 - starting the Balanced Runner when the active Skill requires it;
+- submitting an Overnight durable task when the active Skill requires it;
 - completion and revision decisions.
 
 For Balanced, the Runner owns downstream invocation, execution windows,
@@ -85,6 +88,49 @@ After activation, the user starts `codex` as usual. No separate orchestration
 daemon is required; Balanced starts its foreground Runner only when a task is
 delegated.
 
+## Sleep and external monitoring
+
+Overnight and Balanced now use a common versioned monitoring contract with five
+ordered layers: `process -> activity -> state -> evidence -> wake`. The external
+control plane observes the downstream runtime and durable run state. It does
+not monitor the upstream agent process, keep that process alive, or infer
+semantic progress from elapsed time.
+
+"Sleep" describes the upstream model lifecycle rather than an OS-level sleep.
+Overnight has two independently activated policies:
+
+- **Convergent / 收缩式修改:** freeze and durably submit the task, retain the
+  returned Bookend state path, then end the current inference episode without
+  polling. Every rejected review produces a narrower Revision Delta:
+  `next.scope.write_paths` must be a subset of `previous.scope.write_paths`, while
+  forbidden and authority boundaries cannot be relaxed. Accepted
+  `review_ready` is globally terminal and schedules no duplicate wake.
+- **Continuous improvement / 持续扩张改进:** treat the user's metrics as the
+  minimum completion floor. Each successful cycle is a checkpoint rather than
+  global completion. Before the next cycle, the upstream freezes one improvement
+  hypothesis with rationale, expected measurable gain, added paths, validation,
+  and rollback scope. Only that reviewed contract may expand allowed paths;
+  destructive, permission, migration, deployment, billing, production-data,
+  forbidden-path, and human-authority boundaries stay fixed. The same logical
+  improvement run continues until the user interrupts it. Semantic, authority,
+  and runtime blockers pause rather than silently broaden the task.
+- Balanced starts one on-demand tuned Runner round, then yields while that
+  invocation owns context acquisition, active execution, progress extensions,
+  completion/idle checks, and the hard deadline. It wakes at `review_pending`
+  or a machine-reported blocker, reads hash-bound `balanced-review.json`, and
+  decides accept, stop, or a bounded continuation.
+- Interactive remains foreground ownership with native subagents and has no
+  external sleep/monitor policy.
+
+The current contract exposes durable wake states to target adapters. It does
+not add an always-running daemon or claim a universal remote-wake API for every
+main-agent harness.
+
+The Overnight strategy selector is shown only while Overnight is selected. Its
+choice is included in the effective Skill identity, activation manifest,
+history, backup, and rollback data. Only the selected strategy is rendered into
+`SKILL.md`, keeping the inactive policy out of the loaded context.
+
 ## Status
 
 Early product development. The first milestone defines the workflow Skill
@@ -107,7 +153,92 @@ through the real contracts package, previews the minimal generated `SKILL.md`,
 compares the generated token footprint of all three mode Skills, and exports the
 selected one. A separate Usage page presents actual local-agent token usage and
 model-call counts in an API-console style dashboard with 1 hour, 24 hour,
-7 day, and 30 day ranges. Filesystem activation is disabled by default.
+7 day, and 30 day ranges. The local entrypoint automatically discovers the
+current user's `~/.codex` directory and keeps filesystem activation restricted
+to the loopback server and explicit UI activation actions. Set
+`AGENT_WORKFLOW_PREVIEW_ONLY=1` to run without filesystem writes.
+
+The overwrite-only Skill is always installed as
+`agent-workflow-active/SKILL.md` with frontmatter name
+`agent-workflow-active`. Mode, policy version, and upstream/downstream display
+declarations remain in the manifest and activation history instead of entering
+model context. The Skill body contains only an enforceable operating contract,
+ordered procedure, and short product commands. Task and next-cycle schemas are
+owned by the CLI rather than copied into model context. Interactive omits all
+external Runner and Task Card material. Tests cap generated size and reject
+cross-mode instruction leakage.
+
+## Task Cards
+
+JSON is the canonical Task Card format because scope, forbidden boundaries,
+argv validation commands, revisions, and evidence hashes must be machine
+validated. Create a non-overwriting scaffold, edit it, and validate it before
+submission:
+
+```bash
+agent-control-plane task init --output TASK.json
+agent-control-plane task validate --task TASK.json
+agent-control-plane task migrate --task LEGACY.json --output TASK.json
+agent-control-plane task render --task TASK.json --view execution --output TASK.md
+```
+
+Continuous improvement creates its next-cycle Card from the current frozen
+run, preserving the acceptance and forbidden floors by default:
+
+```bash
+agent-control-plane overnight next-init --run RUN_DIR --output NEXT.json
+```
+
+The CLI refuses to overwrite an existing scaffold or migration/render target.
+The Task Card page can import, edit, validate, autosave, and export the same
+JSON. Its default structured editor uses collapsible sections for identity,
+scope, acceptance, risk, handoff, argv validation, stop conditions, and
+extensions; JSON expert mode edits the identical draft. Both views share
+undo/redo and a session-baseline revert action. Legacy seven-field drafts are
+converted in place after validation. The Markdown pane switches between
+complete Audit and compact Execution projections; both are regenerated by the
+server-side validator and are never accepted as runtime input, so there is
+still only one authoritative contract.
+
+The page also has a read-only Preflight. It verifies the canonical Task Card,
+absolute accessible worktree, workflow mode, downstream adapter, Overnight
+strategy, and Balanced timing/call-budget constraints, then shows the frozen
+task SHA-256 and runtime-envelope preview. Preflight never launches an Agent;
+the actual submit/run action remains a separate, explicit operation.
+
+Preflight also freezes the downstream runtime environment. The default is
+`executionEnvironment=auto`, `proxyMode=direct`,
+`isolationMode=provider-scoped`, and metadata-only network diagnostics.
+`direct` removes common upper/lowercase proxy variables from the child while
+`inherit` passes them through without persisting their values. Provider-scoped
+isolation passes the basic process environment plus adapter-declared provider
+prefixes (for Claude Code: `ANTHROPIC_`, `CLAUDE_`, and `CC_SWITCH_`) instead of
+blindly copying every parent secret.
+
+When `CODEX_SANDBOX_NETWORK_DISABLED` is visible, a network-dependent adapter
+does not start and the result is classified as
+`sandbox-network-host-handoff`. This is an inconclusive environment failure,
+not model no-progress or provider unavailability: restart the control plane in
+an authorized host terminal and rerun the identical Preflight. Process evidence
+records only proxy variable names, isolation mode, stream initialization,
+stdout/stderr byte counts, and failure category; it never records proxy URLs,
+tokens, prompts, or credentials. Exact write-path filesystem sandboxing is
+reported separately as an adapter capability. Until an adapter declares
+`exact-write-paths`, the UI shows a warning because post-run scope evidence is
+not equivalent to OS-enforced isolation.
+
+The adjacent **主动连接诊断 · 1 次调用** button is intentionally separate from
+Preflight. After explicit confirmation it sends one fixed minimal prompt through
+only the currently selected `direct` or `inherit` route; it never performs an
+automatic two-route comparison or retry. The receipt contains elapsed time,
+stream initialization, terminal-result presence, byte counts, usage visibility,
+Token totals when available, and a failure category. It does not return the
+model response, prompt, Task Card, proxy values, or credentials. A successful
+probe establishes current connectivity only and is not task acceptance evidence;
+switching routes and probing again consumes another explicitly confirmed call.
+
+The checked-in normative schema is `apps/web/task-card-v1.schema.json` and the
+local server exposes it at `GET /api/task-card/schema` for editors and adapters.
 
 ## Interactive subagent installation
 
@@ -120,9 +251,8 @@ roles, and uses `gpt-5.6-terra` with high reasoning for the read-only
 route these roles while retaining planning, architecture, synthesis, and final
 validation.
 
-Set the Codex home explicitly when it cannot be inferred. If the configured
-Skill directory is exactly `<CODEX_HOME>/skills`, the server infers the parent
-automatically:
+By default, `npm run dev` uses `~/.codex` and `~/.codex/skills`. Set the paths
+explicitly when managing another Codex installation:
 
 ```bash
 AGENT_WORKFLOW_SKILLS_DIR=/absolute/path/to/.codex/skills \
@@ -138,6 +268,61 @@ checkbox. Backups and ownership hashes are stored under
 so the new global configuration and custom agents are loaded. The supported
 configuration fields and personal agent directory follow the
 [official Codex subagents documentation](https://developers.openai.com/codex/subagents).
+
+## Overnight Runner
+
+Overnight now has a product-owned, run-scoped supervisor. Submission persists
+the frozen contract first, launches the supervisor as a detached child, prints
+the durable run directory, and returns so the upstream agent can end its
+inference episode:
+
+```bash
+agent-control-plane overnight submit \
+  --task TASK.json \
+  --worktree /absolute/repository/path \
+  --adapter claude-code \
+  --strategy convergent \
+  --wake-adapter durable-file \
+  --execution-env auto \
+  --proxy-mode direct \
+  --environment-isolation provider-scoped \
+  --network-diagnostics metadata
+```
+
+The supervisor records process/activity/state/evidence/wake events under
+`~/.agent-control-plane/overnight-runs/<run-id>/`. Each completed cycle writes
+hash-bound `evidence.json` and `wake-request.json`; no foreground Codex polling
+is required. The wake transport is intentionally adapter-neutral: a harness can
+watch the durable wake file and start a new upstream review episode. Every
+delivery attempt receives its own `wake-delivery.json` receipt; the default
+`durable-file` adapter records `scheduled` without assuming that Codex, Claude
+Code, OpenCode, Cursor, or another host supports the same resume mechanism.
+Target integrations can register a wake adapter without changing the state
+machine; a process-based adapter is available for harnesses that accept
+`--wake-request` and `--wake-sha256` argv parameters.
+
+Convergent review either accepts, stops, or supplies a non-expanding revision:
+
+```bash
+agent-control-plane overnight review --run RUN_DIR --decision accept
+agent-control-plane overnight review --run RUN_DIR --decision stop
+agent-control-plane overnight review --run RUN_DIR --decision revise --revision REVISION.json
+```
+
+Continuous improvement uses the same Task schema, but a successful cycle is a
+checkpoint. `NEXT.json` must contain `rationale`, `expected_gain`,
+`rollback_boundary`, an exact `added_paths` declaration, and the next `task`.
+The initial acceptance floor and forbidden boundaries cannot be removed:
+
+```bash
+agent-control-plane overnight review --run RUN_DIR --decision continue --next NEXT.json
+agent-control-plane overnight interrupt --run RUN_DIR
+agent-control-plane overnight status --run RUN_DIR
+agent-control-plane overnight list
+```
+
+`AGENT_CONTROL_OVERNIGHT_RUNS_DIR` overrides the external artifact root. The
+runner reuses the downstream session when the selected adapter supports it.
 
 ## Balanced Runner
 
@@ -163,28 +348,78 @@ agent-control-plane balanced run \
   --task TASK.json \
   --worktree /absolute/repository/path \
   --adapter claude-code \
-  --policy balanced-default@1.0.0 \
   --context-seconds 600 \
   --first-progress-seconds 600 \
   --active-seconds 600 \
   --extension-seconds 300 \
   --growing-extension-seconds 300 \
-  --hard-cap-seconds 1500
+  --hard-cap-seconds 1500 \
+  --execution-env auto \
+  --proxy-mode direct \
+  --environment-isolation provider-scoped \
+  --network-diagnostics metadata
 ```
 
-Task JSON is deliberately small and shell-free:
+Task JSON uses the versioned `task-card-v1` contract. Workflow mode, Agent
+bindings, timing, budgets, and worktree remain in the separate runtime
+envelope rather than entering this task contract:
 
 ```json
 {
+  "schema_version": 1,
   "id": "task-id",
-  "objective": "Implement the requested bounded change",
-  "acceptance": ["Exact externally observable result"],
-  "allowedPaths": ["src/**", "test/**"],
-  "forbiddenPaths": [".env", "secrets/**"],
-  "validationCommands": [["npm", "test"]],
-  "allowNoChanges": false
+  "mode": "builder",
+  "goal": "Implement the requested bounded change",
+  "profiles": ["base"],
+  "scope": {
+    "write_paths": ["src/**", "test/**"],
+    "read_paths": [],
+    "forbidden_paths": [".env", "secrets/**"]
+  },
+  "acceptance": [
+    {
+      "id": "behavior",
+      "description": "Exact externally observable result",
+      "validation_id": "tests"
+    }
+  ],
+  "risk": {
+    "public_api": "unknown",
+    "data_model": "unknown",
+    "security": "unknown",
+    "migration": "unknown",
+    "permission": "unknown",
+    "concurrency": "unknown",
+    "cross_module": "unknown",
+    "production_impact": "unknown"
+  },
+  "handoff": {
+    "must_do": ["Implement the frozen goal"],
+    "must_not_do": ["Broaden scope"],
+    "may_decide": ["Implementation details within the contract"],
+    "must_report": ["Changed paths", "Validation", "Remaining risks"]
+  },
+  "validation": [
+    {
+      "id": "tests",
+      "command": ["npm", "test"],
+      "local_allowed": true
+    }
+  ],
+  "stop_conditions": [
+    "scope_boundary_crossed",
+    "acceptance_unreachable",
+    "external_blocker"
+  ],
+  "extensions": {}
 }
 ```
+
+Legacy seven-field cards are accepted at import, CLI validation, and runtime
+boundaries, then deterministically normalized to v1. New scaffolds and exports
+are always v1. `agent-control-plane task migrate` performs the conversion
+explicitly; `agent-control-plane task render` creates immutable `audit` or
+compact `execution` Markdown projections.
 
 Every round is persisted under
 `~/.agent-control-plane/balanced-runs/<run-id>/`. The Runner records the frozen
