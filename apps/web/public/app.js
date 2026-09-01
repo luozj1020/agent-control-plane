@@ -61,6 +61,38 @@ const elements = {
   builderField: document.querySelector("#builder-field"),
   builderHelp: document.querySelector("#builder-help"),
   compatibilityBadge: document.querySelector("#compatibility-badge"),
+  coordinationCoverageInvoke: document.querySelector("#coordination-coverage-invoke"),
+  coordinationCoverageMessage: document.querySelector("#coordination-coverage-message"),
+  coordinationCoverageRead: document.querySelector("#coordination-coverage-read"),
+  coordinationCoverageWrite: document.querySelector("#coordination-coverage-write"),
+  coordinationDetailClose: document.querySelector("#coordination-detail-close"),
+  coordinationDetailPanel: document.querySelector("#coordination-detail-panel"),
+  coordinationDetailStatus: document.querySelector("#coordination-detail-status"),
+  coordinationDetailTitle: document.querySelector("#coordination-detail-title"),
+  coordinationEventList: document.querySelector("#coordination-event-list"),
+  coordinationEvents: document.querySelector("#coordination-events"),
+  coordinationInvocations: document.querySelector("#coordination-invocations"),
+  coordinationGraphShell: document.querySelector("#coordination-graph-shell"),
+  coordinationReads: document.querySelector("#coordination-reads"),
+  coordinationReadsAllowed: document.querySelector("#coordination-reads-allowed"),
+  coordinationReadsOutOfScope: document.querySelector("#coordination-reads-out-of-scope"),
+  coordinationReadsForbidden: document.querySelector("#coordination-reads-forbidden"),
+  coordinationReadsUnknown: document.querySelector("#coordination-reads-unknown"),
+  coordinationReadsRepeated: document.querySelector("#coordination-reads-repeated"),
+  coordinationReadArtifacts: document.querySelector("#coordination-read-artifacts"),
+  coordinationReadViolations: document.querySelector("#coordination-read-violations"),
+  coordinationTopologyNodes: document.querySelector("#coordination-topology-nodes"),
+  coordinationTopologyRelationships: document.querySelector("#coordination-topology-relationships"),
+  coordinationMaxReaderFanOut: document.querySelector("#coordination-max-reader-fanout"),
+  coordinationReaderLinks: document.querySelector("#coordination-reader-links"),
+  coordinationRefresh: document.querySelector("#coordination-refresh"),
+  coordinationReviews: document.querySelector("#coordination-reviews"),
+  coordinationRunList: document.querySelector("#coordination-run-list"),
+  coordinationRuns: document.querySelector("#coordination-runs"),
+  coordinationTransitions: document.querySelector("#coordination-transitions"),
+  coordinationUpdated: document.querySelector("#coordination-updated"),
+  coordinationView: document.querySelector("#coordination-view"),
+  coordinationWrites: document.querySelector("#coordination-writes"),
   copyButton: document.querySelector("#copy-button"),
   exportButton: document.querySelector("#export-button"),
   configurationTopbar: document.querySelector("#configuration-topbar"),
@@ -91,6 +123,30 @@ const elements = {
   historyView: document.querySelector("#history-view"),
   includedAgents: document.querySelector("#included-agents"),
   includedModes: document.querySelector("#included-modes"),
+  integrationList: document.querySelector("#integration-list"),
+  integrationPlanClose: document.querySelector("#integration-plan-close"),
+  integrationPlanMeta: document.querySelector("#integration-plan-meta"),
+  integrationPlanPanel: document.querySelector("#integration-plan-panel"),
+  integrationPlanSteps: document.querySelector("#integration-plan-steps"),
+  integrationPlanTitle: document.querySelector("#integration-plan-title"),
+  integrationsConfigured: document.querySelector("#integrations-configured"),
+  integrationsHarness: document.querySelector("#integrations-harness"),
+  integrationsInstalled: document.querySelector("#integrations-installed"),
+  integrationsProjectRoot: document.querySelector("#integrations-project-root"),
+  integrationsRefresh: document.querySelector("#integrations-refresh"),
+  integrationsScope: document.querySelector("#integrations-scope"),
+  integrationsStatus: document.querySelector("#integrations-status"),
+  integrationsTotal: document.querySelector("#integrations-total"),
+  integrationsView: document.querySelector("#integrations-view"),
+  workflowSourcePanel: document.querySelector("#workflow-source-panel"),
+  workflowSourceHealth: document.querySelector("#workflow-source-health"),
+  workflowSourceVersion: document.querySelector("#workflow-source-version"),
+  workflowSourceSupport: document.querySelector("#workflow-source-support"),
+  workflowSourceHash: document.querySelector("#workflow-source-hash"),
+  workflowSourceRuntime: document.querySelector("#workflow-source-runtime"),
+  workflowSourcePath: document.querySelector("#workflow-source-path"),
+  workflowSourceDiagnostic: document.querySelector("#workflow-source-diagnostic"),
+  workflowSourceDiagnose: document.querySelector("#workflow-source-diagnose"),
   interactiveAgentHealth: document.querySelector("#interactive-agent-health"),
   interactiveAddRole: document.querySelector("#interactive-add-role"),
   interactiveAgentList: document.querySelector("#interactive-agent-list"),
@@ -121,7 +177,9 @@ const elements = {
   overnightRuntimeSummary: document.querySelector("#overnight-runtime-summary"),
   overnightScopeRule: document.querySelector("#overnight-scope-rule"),
   navConfiguration: document.querySelector("#nav-configuration"),
+  navCoordination: document.querySelector("#nav-coordination"),
   navHistory: document.querySelector("#nav-history"),
+  navIntegrations: document.querySelector("#nav-integrations"),
   navTaskCard: document.querySelector("#nav-task-card"),
   navUsage: document.querySelector("#nav-usage"),
   operationList: document.querySelector("#operation-list"),
@@ -261,6 +319,13 @@ let taskCardHistoryAt = 0;
 let taskCardSetBaselineOnValidation = false;
 let taskCardPreflightOptions = { workflowModes: [], overnightStrategies: [], adapters: [] };
 let taskCardConnectivityRunning = false;
+let integrationsData = null;
+let integrationsLoading = false;
+let workflowSourceData = null;
+let selectedCoordinationRun = null;
+let coordinationDetailRequest = 0;
+let coordinationRunsCache = [];
+const integrationDiagnostics = new Map();
 const taskCardUndoStack = [];
 const taskCardRedoStack = [];
 const taskCardOpenSections = new Set([
@@ -288,6 +353,7 @@ const LANE_LABELS = Object.freeze({
 
 const TASK_CARD_DRAFT_KEY = "agent-workflow-task-card-draft";
 const TASK_CARD_PREFLIGHT_KEY = "agent-workflow-task-card-preflight";
+const INTEGRATION_PROJECT_KEY = "agent-workflow-integration-project-root";
 const TASK_CARD_MODES = ["builder", "checker-test", "mixed-exception", "control-plane"];
 const TASK_CARD_RISKS = [
   "public_api", "data_model", "security", "migration", "permission",
@@ -743,22 +809,30 @@ function switchView(view) {
   activeView = view;
   const configuration = view === "configuration";
   const taskCard = view === "task-card";
+  const integrations = view === "integrations";
   const usage = view === "usage";
+  const coordination = view === "coordination";
   const history = view === "history";
   elements.configurationTopbar.hidden = !configuration;
   elements.configurationWorkspace.hidden = !configuration;
   elements.taskCardView.hidden = !taskCard;
+  elements.integrationsView.hidden = !integrations;
   elements.usageView.hidden = !usage;
+  elements.coordinationView.hidden = !coordination;
   elements.historyView.hidden = !history;
   elements.navConfiguration.classList.toggle("active", configuration);
   elements.navTaskCard.classList.toggle("active", taskCard);
+  elements.navIntegrations.classList.toggle("active", integrations);
   elements.navUsage.classList.toggle("active", usage);
+  elements.navCoordination.classList.toggle("active", coordination);
   elements.navHistory.classList.toggle("active", history);
   if (taskCard && ["overnight", "balanced"].includes(selectedModeId)) {
     elements.taskCardWorkflowMode.value = selectedModeId;
     synchronizeTaskCardStrategy();
   }
+  if (integrations && !integrationsData) loadIntegrations();
   if (usage) loadRuntimeUsage();
+  if (coordination) loadCoordination();
   if (history) loadHistory({ selectEntry: true });
 }
 
@@ -1118,7 +1192,7 @@ function renderTaskCardForm() {
     "extensions",
     extensionEditor,
     ["extensions"],
-    "用于 task_shape、complex_gate_contract 与产品扩展；仍会经过严格运行时校验。",
+    "用于 task_shape、participants、interfaces、complex_gate_contract 与产品扩展；仍会经过严格运行时校验。",
   ));
   elements.taskCardForm.append(extensions.section);
 }
@@ -3101,6 +3175,355 @@ const modeSwitchCoordinator = createLatestSwitchCoordinator({
   },
 });
 
+function integrationHealthCopy(health) {
+  const labels = {
+    ready: "已就绪",
+    "ready-to-activate": "可激活",
+    "project-setup-required": "待初始化项目",
+    "not-installed": "未安装",
+    unhealthy: "诊断异常",
+    blocked: "已阻断",
+    "registration-required": "待登记 Server",
+    available: "可用",
+    compatible: "契约兼容",
+    "drift-detected": "检测到漂移",
+    incompatible: "协议不兼容",
+    unavailable: "核心缺失",
+  };
+  return labels[health] ?? health ?? "未知";
+}
+
+function shortHash(value) {
+  if (typeof value !== "string") return "—";
+  return value.length > 24 ? `${value.slice(0, 18)}…${value.slice(-6)}` : value;
+}
+
+function renderWorkflowSource() {
+  const source = workflowSourceData;
+  const health = source?.health ?? "unavailable";
+  elements.workflowSourcePanel.className = `workflow-source-panel health-${health}`;
+  elements.workflowSourceHealth.textContent = integrationHealthCopy(health);
+  elements.workflowSourceVersion.textContent = source?.contractVersion ? `v${source.contractVersion}` : "未发现";
+  elements.workflowSourceSupport.textContent = `Contract ${source?.supported?.contractMajor ?? 1}.${source?.supported?.minimumContractMinor ?? 1}+`;
+  elements.workflowSourceHash.textContent = shortHash(source?.contractSha256);
+  elements.workflowSourceHash.title = source?.contractSha256 ?? "";
+  elements.workflowSourceRuntime.textContent = source?.authority?.localRuntime === "embedded-projection"
+    ? "内置投影"
+    : source?.authority?.localRuntime === "compatibility-layer" ? "安全默认值" : "未知";
+  elements.workflowSourcePath.textContent = source?.source?.contractPath
+    ? `内置核心：${source.source.contractPath}`
+    : `内置核心缺失：${source?.source?.root ?? "packages/workflow-core"}`;
+  elements.workflowSourceDiagnostic.replaceChildren();
+
+  for (const item of source?.checks ?? []) {
+    const row = document.createElement("p");
+    row.className = item.status;
+    const marker = document.createElement("i");
+    marker.textContent = item.status === "passed" ? "✓" : item.status === "failed" ? "×" : "·";
+    const copy = document.createElement("span");
+    copy.textContent = `${item.label}：${item.detail}`;
+    row.append(marker, copy);
+    elements.workflowSourceDiagnostic.append(row);
+  }
+  for (const drift of source?.drift ?? []) {
+    const row = document.createElement("p");
+    row.className = drift.severity === "warning" ? "warning" : "info";
+    const marker = document.createElement("i");
+    marker.textContent = drift.severity === "warning" ? "!" : "i";
+    const copy = document.createElement("span");
+    copy.textContent = `漂移 · ${drift.id}：${drift.detail}`;
+    row.append(marker, copy);
+    elements.workflowSourceDiagnostic.append(row);
+  }
+}
+
+function integrationKindCopy(kind) {
+  return kind === "mcp-server" ? "MCP SERVER" : "LOCAL TOOL";
+}
+
+function integrationStatusMetric(label, value) {
+  const item = document.createElement("div");
+  const name = document.createElement("span");
+  name.textContent = label;
+  const data = document.createElement("strong");
+  data.textContent = value;
+  item.append(name, data);
+  return item;
+}
+
+function renderIntegrationDiagnostic(target, diagnostic) {
+  const receipt = document.createElement("div");
+  receipt.className = "integration-diagnostic";
+  const heading = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = "只读诊断回执";
+  const time = document.createElement("span");
+  time.textContent = diagnostic.testedAt
+    ? new Date(diagnostic.testedAt).toLocaleTimeString("zh-CN", { hour12: false })
+    : "刚刚";
+  heading.append(title, time);
+  receipt.append(heading);
+  for (const entry of diagnostic.checks ?? []) {
+    const row = document.createElement("p");
+    row.className = entry.status;
+    const marker = document.createElement("i");
+    marker.textContent = entry.status === "passed" ? "✓" : entry.status === "failed" ? "×" : "·";
+    const copy = document.createElement("span");
+    copy.textContent = `${entry.label}：${entry.detail}`;
+    row.append(marker, copy);
+    receipt.append(row);
+  }
+  target.append(receipt);
+}
+
+function renderIntegrations() {
+  elements.integrationList.replaceChildren();
+  const integrations = integrationsData?.integrations ?? [];
+  elements.integrationsTotal.textContent = String(integrations.length);
+  elements.integrationsInstalled.textContent = String(
+    integrations.filter((entry) => entry.status.installed).length,
+  );
+  elements.integrationsConfigured.textContent = String(
+    integrations.filter((entry) => entry.status.projectConfigured).length,
+  );
+  elements.integrationsStatus.textContent = integrationsData
+    ? `${integrationsData.projectRoot} · 安装执行关闭`
+    : "等待首次发现";
+
+  if (integrations.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "integration-empty";
+    empty.textContent = "没有可用的 Integration Manifest。";
+    elements.integrationList.append(empty);
+    return;
+  }
+
+  for (const entry of integrations) {
+    const { manifest, status } = entry;
+    const card = document.createElement("article");
+    card.className = `integration-card health-${status.health}`;
+
+    const heading = document.createElement("div");
+    heading.className = "integration-card-heading";
+    const identity = document.createElement("div");
+    const kind = document.createElement("span");
+    kind.className = "integration-kind";
+    kind.textContent = integrationKindCopy(manifest.kind);
+    const title = document.createElement("h2");
+    title.textContent = manifest.displayName;
+    const version = document.createElement("code");
+    version.textContent = `${manifest.id}@${manifest.manifestVersion}`;
+    identity.append(kind, title, version);
+    const badge = document.createElement("span");
+    badge.className = "integration-health";
+    badge.textContent = integrationHealthCopy(status.health);
+    heading.append(identity, badge);
+
+    const summary = document.createElement("p");
+    summary.className = "integration-summary-copy";
+    summary.textContent = manifest.summary;
+
+    const metrics = document.createElement("div");
+    metrics.className = "integration-status-grid";
+    metrics.append(
+      integrationStatusMetric(
+        "本地命令",
+        status.installed
+          ? "已检测"
+          : manifest.id === "custom-mcp-server" ? "无需固定命令" : "未找到",
+      ),
+      integrationStatusMetric("版本", status.version ?? "不可见"),
+      integrationStatusMetric(
+        "项目配置",
+        status.projectConfigured
+          ? `${status.projectMarker}/`
+          : status.projectMarker ? "未初始化" : "等待登记",
+      ),
+    );
+
+    const capabilityList = document.createElement("div");
+    capabilityList.className = "integration-capabilities";
+    for (const capability of manifest.capabilities ?? []) {
+      const chip = document.createElement("span");
+      chip.textContent = capability;
+      capabilityList.append(chip);
+    }
+
+    const support = document.createElement("p");
+    support.className = "integration-support";
+    support.textContent = `Harness：${(manifest.harnessSupport ?? [])
+      .map((item) => item.displayName)
+      .join(" · ")}`;
+
+    const actions = document.createElement("div");
+    actions.className = "integration-actions";
+    const diagnose = document.createElement("button");
+    diagnose.className = "button ghost";
+    diagnose.type = "button";
+    diagnose.dataset.integrationId = manifest.id;
+    diagnose.dataset.integrationAction = "diagnose";
+    diagnose.textContent = "只读诊断";
+    const plan = document.createElement("button");
+    plan.className = "button ghost";
+    plan.type = "button";
+    plan.dataset.integrationId = manifest.id;
+    plan.dataset.integrationAction = "plan";
+    plan.textContent = "查看安装计划";
+    actions.append(diagnose, plan);
+
+    card.append(heading, summary, metrics, capabilityList, support, actions);
+    const diagnostic = integrationDiagnostics.get(manifest.id);
+    if (diagnostic) renderIntegrationDiagnostic(card, diagnostic);
+    elements.integrationList.append(card);
+  }
+}
+
+function integrationPlanMeta(label, value) {
+  const item = document.createElement("div");
+  const name = document.createElement("span");
+  name.textContent = label;
+  const data = document.createElement("strong");
+  data.textContent = value;
+  item.append(name, data);
+  return item;
+}
+
+function renderIntegrationPlan(plan) {
+  elements.integrationPlanPanel.hidden = false;
+  elements.integrationPlanTitle.textContent = `${plan.integrationId} 安装计划`;
+  elements.integrationPlanMeta.replaceChildren(
+    integrationPlanMeta("Manifest", `${plan.integrationId}@${plan.manifestVersion}`),
+    integrationPlanMeta("Harness", plan.harnessId),
+    integrationPlanMeta("范围", plan.scope === "global" ? "全局" : "项目级"),
+    integrationPlanMeta("执行状态", plan.executable ? "允许执行" : "仅预览"),
+  );
+  elements.integrationPlanSteps.replaceChildren();
+  for (const [index, step] of (plan.steps ?? []).entries()) {
+    const row = document.createElement("article");
+    const marker = document.createElement("span");
+    marker.textContent = String(index + 1).padStart(2, "0");
+    const content = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = step.summary;
+    const kind = document.createElement("small");
+    kind.textContent = `${step.kind} · ${step.requiresNetwork ? "需要网络" : "无需网络"}`;
+    content.append(title, kind);
+    if (step.argv) {
+      const command = document.createElement("code");
+      command.textContent = JSON.stringify({ cwd: step.cwd, argv: step.argv });
+      content.append(command);
+    }
+    if ((step.mutates ?? []).length > 0) {
+      const mutates = document.createElement("p");
+      mutates.textContent = `预计写入：${step.mutates.join("、")}`;
+      content.append(mutates);
+    }
+    row.append(marker, content);
+    elements.integrationPlanSteps.append(row);
+  }
+  elements.integrationPlanPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function loadIntegrations() {
+  if (integrationsLoading) return;
+  integrationsLoading = true;
+  elements.integrationsRefresh.disabled = true;
+  elements.integrationsStatus.textContent = "正在发现本地工具与项目配置…";
+  const storedProject = localStorage.getItem(INTEGRATION_PROJECT_KEY) ?? "";
+  if (!elements.integrationsProjectRoot.value && storedProject) {
+    elements.integrationsProjectRoot.value = storedProject;
+  }
+  const requestedProject = elements.integrationsProjectRoot.value.trim();
+  const query = new URLSearchParams();
+  if (requestedProject) query.set("projectRoot", requestedProject);
+  try {
+    const suffix = query.size > 0 ? `?${query}` : "";
+    const [result, source] = await Promise.all([
+      requestJson(`/api/integrations${suffix}`),
+      requestJson("/api/workflow-core"),
+    ]);
+    const projectChanged = integrationsData?.projectRoot && integrationsData.projectRoot !== result.projectRoot;
+    integrationsData = result;
+    workflowSourceData = source;
+    elements.integrationsProjectRoot.value = result.projectRoot;
+    localStorage.setItem(INTEGRATION_PROJECT_KEY, result.projectRoot);
+    if (projectChanged) integrationDiagnostics.clear();
+    renderIntegrations();
+    renderWorkflowSource();
+  } catch (error) {
+    integrationsData = null;
+    elements.integrationList.replaceChildren();
+    const empty = document.createElement("div");
+    empty.className = "integration-empty error";
+    empty.textContent = `集成发现失败：${error.message}`;
+    elements.integrationList.append(empty);
+    elements.integrationsTotal.textContent = "—";
+    elements.integrationsInstalled.textContent = "—";
+    elements.integrationsConfigured.textContent = "—";
+    elements.integrationsStatus.textContent = "项目路径或本地环境不可用";
+    workflowSourceData = null;
+    renderWorkflowSource();
+  } finally {
+    integrationsLoading = false;
+    elements.integrationsRefresh.disabled = false;
+  }
+}
+
+async function diagnoseWorkflowSource() {
+  elements.workflowSourceDiagnose.disabled = true;
+  const original = elements.workflowSourceDiagnose.textContent;
+  elements.workflowSourceDiagnose.textContent = "检查中…";
+  try {
+    workflowSourceData = await requestJson("/api/workflow-core/diagnose", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    renderWorkflowSource();
+    showToast(`Workflow Contract：${integrationHealthCopy(workflowSourceData.health)}。`);
+  } catch (error) {
+    showToast(`Workflow Contract 诊断失败：${error.message}`);
+  } finally {
+    elements.workflowSourceDiagnose.disabled = false;
+    elements.workflowSourceDiagnose.textContent = original;
+  }
+}
+
+async function runIntegrationAction(button) {
+  const integrationId = button.dataset.integrationId;
+  const action = button.dataset.integrationAction;
+  if (!integrationId || !["diagnose", "plan"].includes(action)) return;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = action === "diagnose" ? "诊断中…" : "生成中…";
+  try {
+    const result = await requestJson(
+      `/api/integrations/${encodeURIComponent(integrationId)}/${action}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectRoot: elements.integrationsProjectRoot.value,
+          harnessId: elements.integrationsHarness.value,
+          scope: elements.integrationsScope.value,
+        }),
+      },
+    );
+    if (action === "diagnose") {
+      integrationDiagnostics.set(integrationId, result);
+      renderIntegrations();
+      showToast(`${integrationId} 只读诊断已完成。`);
+    } else {
+      renderIntegrationPlan(result);
+    }
+  } catch (error) {
+    showToast(`${action === "diagnose" ? "诊断" : "计划生成"}失败：${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
 async function loadRuntimeUsage() {
   if (usageLoading) {
     usageRefreshQueued = true;
@@ -3139,6 +3562,259 @@ async function loadRuntimeUsage() {
       usageRefreshQueued = false;
       loadRuntimeUsage();
     }
+  }
+}
+
+const COORDINATION_COVERAGE_LABELS = {
+  enforced: "已强制",
+  observed: "已观测",
+  "not-observed": "尚无事件",
+  unsupported: "不支持",
+  mixed: "混合覆盖",
+};
+
+function renderCoordinationCoverage(element, label, status) {
+  element.className = status;
+  element.replaceChildren();
+  const dot = document.createElement("i");
+  element.append(dot, `${label}：${COORDINATION_COVERAGE_LABELS[status] ?? "未知"}`);
+}
+
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+const COORDINATION_KIND_COLORS = Object.freeze({
+  artifact_read: "#7ea7ff",
+  artifact_write: "#c78cff",
+  agent_invoke_started: "#d8ff4f",
+  agent_invoke_completed: "#9fd36a",
+  state_transition: "#ffcf66",
+  review_decision: "#ff8f70",
+  validation_completed: "#67d8c4",
+  wake_requested: "#f49ac2",
+  wake_delivered: "#cf8cff",
+});
+
+function coordinationSvgElement(name, attributes = {}) {
+  const element = document.createElementNS(SVG_NAMESPACE, name);
+  for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, String(value));
+  return element;
+}
+
+function renderCoordinationGraph(detail) {
+  elements.coordinationGraphShell.replaceChildren();
+  const nodes = detail.graph?.nodes ?? [];
+  const edges = detail.graph?.edges ?? [];
+  if (nodes.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "coordination-empty";
+    empty.textContent = "返回范围内没有可绘制的端点关系。无目标事件仍会显示在时间线中。";
+    elements.coordinationGraphShell.append(empty);
+    return;
+  }
+  const laneHeight = 48;
+  const labelWidth = 190;
+  const width = Math.max(860, labelWidth + edges.length * 38 + 80);
+  const height = Math.max(180, nodes.length * laneHeight + 42);
+  const svg = coordinationSvgElement("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    width,
+    height,
+    role: "presentation",
+  });
+  const laneByNode = new Map();
+  nodes.forEach((node, index) => {
+    const y = 30 + index * laneHeight;
+    laneByNode.set(node.id, y);
+    svg.append(coordinationSvgElement("line", {
+      x1: labelWidth,
+      y1: y,
+      x2: width - 18,
+      y2: y,
+      class: "coordination-graph-lane",
+    }));
+    const label = coordinationSvgElement("text", {
+      x: 12,
+      y: y + 4,
+      class: `coordination-graph-label ${node.type}`,
+    });
+    label.textContent = `${node.type} · ${node.label}`;
+    svg.append(label);
+  });
+  edges.forEach((edge, index) => {
+    const x = labelWidth + 24 + index * 38;
+    const sourceY = laneByNode.get(edge.source);
+    const targetY = laneByNode.get(edge.target);
+    if (sourceY === undefined || targetY === undefined) return;
+    const color = COORDINATION_KIND_COLORS[edge.kind] ?? "#8b97a3";
+    const line = coordinationSvgElement("line", {
+      x1: x,
+      y1: sourceY,
+      x2: x,
+      y2: targetY,
+      class: "coordination-graph-edge",
+      stroke: color,
+    });
+    const title = coordinationSvgElement("title");
+    title.textContent = `#${edge.sequence} ${edge.kind} · ${formatHistoryDate(edge.recordedAt)}`;
+    line.append(title);
+    svg.append(line);
+    svg.append(coordinationSvgElement("circle", { cx: x, cy: sourceY, r: 4, fill: color }));
+    svg.append(coordinationSvgElement("circle", { cx: x, cy: targetY, r: 4, fill: color }));
+    if (index % 5 === 0 || index === edges.length - 1) {
+      const sequence = coordinationSvgElement("text", {
+        x,
+        y: 14,
+        class: "coordination-graph-sequence",
+        "text-anchor": "middle",
+      });
+      sequence.textContent = `#${edge.sequence}`;
+      svg.append(sequence);
+    }
+  });
+  elements.coordinationGraphShell.append(svg);
+}
+
+function renderCoordinationEventTimeline(detail) {
+  elements.coordinationEventList.replaceChildren();
+  const events = detail.timeline?.events ?? [];
+  if (events.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "coordination-empty";
+    empty.textContent = "返回范围内没有可展示的事件。";
+    elements.coordinationEventList.append(empty);
+    return;
+  }
+  for (const event of events) {
+    const article = document.createElement("article");
+    const heading = document.createElement("div");
+    const kind = document.createElement("strong");
+    kind.textContent = `#${event.sequence} · ${event.kind}`;
+    const time = document.createElement("time");
+    time.dateTime = event.recordedAt;
+    time.textContent = formatHistoryDate(event.recordedAt);
+    heading.append(kind, time);
+    const path = document.createElement("p");
+    path.textContent = `${event.actor.type}:${event.actor.id}${event.target ? ` → ${event.target.type}:${event.target.id}` : ""}`;
+    const attributes = document.createElement("small");
+    const values = [
+      ...Object.entries(event.detail ?? {}).map(([key, value]) => `${key}=${value}`),
+      ...["tokens", "bytes", "elapsedMilliseconds"]
+        .filter((key) => event.measurement?.[key] !== undefined)
+        .map((key) => `${key}=${event.measurement[key]}`),
+    ];
+    attributes.textContent = values.length > 0 ? values.join(" · ") : `${event.measurement.source} · ${event.measurement.confidence}`;
+    article.append(heading, path, attributes);
+    elements.coordinationEventList.append(article);
+  }
+}
+
+async function loadCoordinationDetail(run) {
+  const requestId = ++coordinationDetailRequest;
+  selectedCoordinationRun = `${run.mode}:${run.runId}`;
+  elements.coordinationDetailPanel.hidden = false;
+  elements.coordinationDetailTitle.textContent = run.runId;
+  elements.coordinationDetailStatus.textContent = "正在读取经过脱敏投影的协调事件…";
+  elements.coordinationGraphShell.replaceChildren();
+  elements.coordinationEventList.replaceChildren();
+  renderCoordinationRuns(coordinationRunsCache);
+  try {
+    const detail = await requestJson(
+      `/api/coordination/${encodeURIComponent(run.mode)}/${encodeURIComponent(run.runId)}?limit=200`,
+    );
+    if (requestId !== coordinationDetailRequest) return;
+    const rejected = detail.timeline.invalidLines + detail.timeline.rejectedEvents;
+    elements.coordinationDetailStatus.textContent = `显示 ${detail.timeline.returnedEvents} / ${detail.timeline.totalEvents} 条事件${detail.timeline.truncated ? " · 已截取最近事件" : ""}${rejected > 0 ? ` · 拒绝 ${rejected} 条无效记录` : ""}`;
+    renderCoordinationGraph(detail);
+    renderCoordinationEventTimeline(detail);
+    elements.coordinationDetailPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    if (requestId !== coordinationDetailRequest) return;
+    elements.coordinationDetailStatus.textContent = `详情加载失败：${error.message}`;
+    renderCoordinationGraph({ graph: { nodes: [], edges: [] } });
+  }
+}
+
+function renderCoordinationRuns(runs) {
+  elements.coordinationRunList.replaceChildren();
+  if (runs.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "coordination-empty";
+    empty.textContent = "尚无带协调遥测的 Balanced 或 Overnight 运行。新运行会自动写入追加式事件流。";
+    elements.coordinationRunList.append(empty);
+    return;
+  }
+  for (const run of runs) {
+    const article = document.createElement("article");
+    article.classList.toggle("selected", selectedCoordinationRun === `${run.mode}:${run.runId}`);
+    const identity = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = run.runId;
+    const subtitle = document.createElement("span");
+    subtitle.textContent = `${run.mode} · ${run.adapterId ?? "adapter 未知"} · ${run.state ?? "状态未知"}`;
+    identity.append(title, subtitle);
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "coordination-run-open";
+    open.textContent = "查看时序";
+    open.addEventListener("click", () => loadCoordinationDetail(run));
+    identity.append(open);
+    const metrics = document.createElement("div");
+    metrics.className = "coordination-run-metrics";
+    for (const [label, value] of [
+      ["调用", run.agentInvocations],
+      ["读取", run.artifactReads],
+      ["制品", run.artifactWrites],
+      ["违规", run.readViolations],
+      ["重复", run.topology?.repeatedArtifactReads],
+      ["转换", run.stateTransitions],
+      ["审阅", run.reviewDecisions],
+      ["事件", run.eventCount],
+    ]) {
+      const item = document.createElement("span");
+      item.textContent = `${label} ${exactNumber.format(value ?? 0)}`;
+      metrics.append(item);
+    }
+    const coverage = document.createElement("small");
+    coverage.textContent = `读取 ${COORDINATION_COVERAGE_LABELS[run.coverage?.read] ?? "未知"} (${run.containment?.read ?? "能力未知"}) · 分类 允许 ${run.readClassifications?.allowed ?? 0} / 越界 ${run.readClassifications?.outOfScope ?? 0} / 禁止 ${run.readClassifications?.forbidden ?? 0} / 未知 ${run.readClassifications?.unknown ?? 0} · 拓扑 ${run.topology?.nodeCount ?? 0} 节点 / ${run.topology?.relationshipCount ?? 0} 边`;
+    article.append(identity, metrics, coverage);
+    elements.coordinationRunList.append(article);
+  }
+}
+
+async function loadCoordination() {
+  elements.coordinationRefresh.disabled = true;
+  try {
+    const result = await requestJson("/api/coordination?limit=50");
+    coordinationRunsCache = result.runs;
+    elements.coordinationRuns.textContent = exactNumber.format(result.aggregate.runs);
+    elements.coordinationEvents.textContent = exactNumber.format(result.aggregate.events);
+    elements.coordinationInvocations.textContent = exactNumber.format(result.aggregate.agentInvocations);
+    elements.coordinationReads.textContent = exactNumber.format(result.aggregate.artifactReads);
+    elements.coordinationWrites.textContent = exactNumber.format(result.aggregate.artifactWrites);
+    elements.coordinationReadViolations.textContent = exactNumber.format(result.aggregate.readViolations);
+    elements.coordinationReadsAllowed.textContent = exactNumber.format(result.aggregate.readClassifications.allowed);
+    elements.coordinationReadsOutOfScope.textContent = exactNumber.format(result.aggregate.readClassifications.outOfScope);
+    elements.coordinationReadsForbidden.textContent = exactNumber.format(result.aggregate.readClassifications.forbidden);
+    elements.coordinationReadsUnknown.textContent = exactNumber.format(result.aggregate.readClassifications.unknown);
+    elements.coordinationReadsRepeated.textContent = exactNumber.format(result.aggregate.topology.repeatedArtifactReads);
+    elements.coordinationReadArtifacts.textContent = exactNumber.format(result.aggregate.topology.uniqueReadArtifacts);
+    elements.coordinationTopologyNodes.textContent = exactNumber.format(result.aggregate.topology.nodeCount);
+    elements.coordinationTopologyRelationships.textContent = exactNumber.format(result.aggregate.topology.relationshipCount);
+    elements.coordinationReaderLinks.textContent = exactNumber.format(result.aggregate.topology.artifactReaderLinks);
+    elements.coordinationMaxReaderFanOut.textContent = exactNumber.format(result.aggregate.topology.maxArtifactReaderFanOut);
+    elements.coordinationTransitions.textContent = exactNumber.format(result.aggregate.stateTransitions);
+    elements.coordinationReviews.textContent = exactNumber.format(result.aggregate.reviewDecisions);
+    elements.coordinationUpdated.textContent = `更新于 ${formatHistoryDate(result.generatedAt)}`;
+    renderCoordinationCoverage(elements.coordinationCoverageInvoke, "调用", result.coverage.invoke);
+    renderCoordinationCoverage(elements.coordinationCoverageWrite, "写入", result.coverage.write);
+    renderCoordinationCoverage(elements.coordinationCoverageRead, "读取", result.coverage.read);
+    renderCoordinationCoverage(elements.coordinationCoverageMessage, "消息", result.coverage.message);
+    renderCoordinationRuns(result.runs);
+  } catch (error) {
+    elements.coordinationUpdated.textContent = `采集失败：${error.message}`;
+    coordinationRunsCache = [];
+    renderCoordinationRuns([]);
+  } finally {
+    elements.coordinationRefresh.disabled = false;
   }
 }
 
@@ -3437,8 +4113,37 @@ elements.tokenDimension.addEventListener("click", (event) => {
 
 elements.navConfiguration.addEventListener("click", () => switchView("configuration"));
 elements.navTaskCard.addEventListener("click", () => switchView("task-card"));
+elements.navIntegrations.addEventListener("click", () => switchView("integrations"));
 elements.navUsage.addEventListener("click", () => switchView("usage"));
+elements.navCoordination.addEventListener("click", () => switchView("coordination"));
 elements.navHistory.addEventListener("click", () => switchView("history"));
+elements.coordinationRefresh.addEventListener("click", loadCoordination);
+elements.coordinationDetailClose.addEventListener("click", () => {
+  coordinationDetailRequest += 1;
+  selectedCoordinationRun = null;
+  elements.coordinationDetailPanel.hidden = true;
+  renderCoordinationRuns(coordinationRunsCache);
+});
+elements.integrationsRefresh.addEventListener("click", loadIntegrations);
+elements.workflowSourceDiagnose.addEventListener("click", diagnoseWorkflowSource);
+elements.integrationsProjectRoot.addEventListener("change", loadIntegrations);
+elements.integrationsProjectRoot.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") loadIntegrations();
+});
+elements.integrationList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-integration-action]");
+  if (!button || !elements.integrationList.contains(button)) return;
+  runIntegrationAction(button);
+});
+elements.integrationPlanClose.addEventListener("click", () => {
+  elements.integrationPlanPanel.hidden = true;
+});
+elements.integrationsHarness.addEventListener("change", () => {
+  elements.integrationPlanPanel.hidden = true;
+});
+elements.integrationsScope.addEventListener("change", () => {
+  elements.integrationPlanPanel.hidden = true;
+});
 elements.taskCardEditor.addEventListener("input", () => {
   recordTaskCardHistory(taskCardLastEditorValue, "json-editor");
   taskCardLastEditorValue = elements.taskCardEditor.value;

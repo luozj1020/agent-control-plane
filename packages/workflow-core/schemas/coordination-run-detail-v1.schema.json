@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-coding-workflow/schemas/coordination-run-detail-v1.schema.json",
+  "title": "Coordination Run Detail v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "runId", "mode", "summary", "timeline", "graph"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,159}$" },
+    "mode": { "enum": ["overnight", "balanced"] },
+    "summary": { "$ref": "coordination-run-summary-v1.schema.json" },
+    "timeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totalEvents", "returnedEvents", "offset", "truncated",
+        "invalidLines", "rejectedEvents", "events"
+      ],
+      "properties": {
+        "totalEvents": { "type": "integer", "minimum": 0 },
+        "returnedEvents": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "invalidLines": { "type": "integer", "minimum": 0 },
+        "rejectedEvents": { "type": "integer", "minimum": 0 },
+        "events": {
+          "type": "array",
+          "maxItems": 500,
+          "items": { "$ref": "#/$defs/event" }
+        }
+      }
+    },
+    "graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "nodes", "edges"],
+      "properties": {
+        "scope": { "const": "returned-events" },
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/node" }
+        },
+        "edges": {
+          "type": "array",
+          "maxItems": 500,
+          "items": { "$ref": "#/$defs/edge" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "metadataId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9@][A-Za-z0-9@._/:-]{0,239}$"
+    },
+    "graphNodeId": {
+      "type": "string",
+      "pattern": "^(control_plane|agent|artifact|state|operator|validator|transport):[A-Za-z0-9@][A-Za-z0-9@._/:-]{0,239}$"
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "enum": ["control_plane", "agent", "artifact", "state", "operator", "validator", "transport"] },
+        "id": { "$ref": "#/$defs/metadataId" }
+      }
+    },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "confidence"],
+      "properties": {
+        "source": { "enum": ["runtime", "filesystem_snapshot", "provider_reported", "derived", "agent_claimed"] },
+        "confidence": { "enum": ["observed", "reported", "derived", "unknown"] },
+        "tokens": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "elapsedMilliseconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "detail": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": { "$ref": "#/$defs/metadataId" },
+        "to": { "$ref": "#/$defs/metadataId" },
+        "status": { "$ref": "#/$defs/metadataId" },
+        "decision": { "$ref": "#/$defs/metadataId" },
+        "classification": { "$ref": "#/$defs/metadataId" },
+        "coverage": { "$ref": "#/$defs/metadataId" },
+        "tool": { "$ref": "#/$defs/metadataId" },
+        "artifactKind": { "$ref": "#/$defs/metadataId" },
+        "round": { "type": "integer", "minimum": 0 },
+        "cycle": { "type": "integer", "minimum": 0 },
+        "exitCode": { "type": "integer" },
+        "resumed": { "type": "boolean" },
+        "interrupted": { "type": "boolean" },
+        "timedOut": { "type": "boolean" }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "eventId", "recordedAt", "kind", "actor", "measurement"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "eventId": { "$ref": "#/$defs/metadataId" },
+        "recordedAt": { "type": "string", "format": "date-time" },
+        "kind": {
+          "enum": [
+            "run_created", "agent_invoke_started", "agent_invoke_completed",
+            "artifact_read", "artifact_write", "state_transition", "review_decision",
+            "validation_completed", "wake_requested", "wake_delivered", "interrupt_requested"
+          ]
+        },
+        "actor": { "$ref": "#/$defs/endpoint" },
+        "target": { "$ref": "#/$defs/endpoint" },
+        "correlationId": { "$ref": "#/$defs/metadataId" },
+        "measurement": { "$ref": "#/$defs/measurement" },
+        "detail": { "$ref": "#/$defs/detail" }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/graphNodeId" },
+        "type": { "enum": ["control_plane", "agent", "artifact", "state", "operator", "validator", "transport"] },
+        "label": { "$ref": "#/$defs/metadataId" }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sequence", "recordedAt", "kind", "source", "target"],
+      "properties": {
+        "id": { "$ref": "#/$defs/metadataId" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "recordedAt": { "type": "string", "format": "date-time" },
+        "kind": { "$ref": "#/$defs/event/properties/kind" },
+        "source": { "$ref": "#/$defs/graphNodeId" },
+        "target": { "$ref": "#/$defs/graphNodeId" }
+      }
+    }
+  }
+}

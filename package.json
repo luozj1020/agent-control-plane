@@ -2,7 +2,7 @@
   "name": "agent-control-plane",
   "version": "0.0.0",
   "private": true,
-  "description": "Local-first workflow Skill manager for coding-agent collaboration.",
+  "description": "Local-first control plane for selecting, activating, and observing AI coding workflows.",
   "bin": {
     "agent-control-plane": "apps/web/balanced-cli.mjs"
   },
@@ -16,6 +16,10 @@
     "balanced": "node apps/web/balanced-cli.mjs balanced",
     "overnight": "node apps/web/balanced-cli.mjs overnight",
     "task": "node apps/web/balanced-cli.mjs task",
+    "workflow": "python3 packages/workflow-core/scripts/aiwf.py",
+    "workflow:contract": "python3 packages/workflow-core/scripts/workflow-contract.py check",
+    "workflow:test": "npm --workspace @agent-control-plane/workflow-core test",
+    "workflow:test:full": "npm --workspace @agent-control-plane/workflow-core run test:full",
     "start": "npm --workspace @agent-control-plane/web run start",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"

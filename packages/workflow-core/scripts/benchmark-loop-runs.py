@@ -1,0 +1,508 @@
+#!/usr/bin/env python3
+"""Aggregate loop quality summaries into a lightweight workflow benchmark."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+from pathlib import Path
+
+
+def explicit_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def load_summarizer():
+    script = Path(__file__).resolve().with_name("summarize-loop-run.py")
+    spec = importlib.util.spec_from_file_location("summarize_loop_run", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load summarizer: {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def discover_runs(paths: list[Path], repo_root: Path) -> list[Path]:
+    if paths:
+        return [path.resolve() for path in paths]
+    worktrees = repo_root / ".worktrees"
+    return sorted(path.resolve() for path in worktrees.glob("loop-*") if path.is_dir())
+
+
+def cost_value(cost: dict, key: str) -> float:
+    value = cost.get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
+
+
+def field_number(fields: dict, key: str) -> float:
+    value = fields.get(key, "")
+    if not value:
+        return 0.0
+    token = str(value).strip().split()[0]
+    try:
+        return float(token)
+    except ValueError:
+        return 0.0
+
+
+def benchmark(paths: list[Path], repo_root: Path) -> dict:
+    summarizer = load_summarizer()
+    runs = []
+    for path in discover_runs(paths, repo_root):
+        summary = summarizer.summarize(path)
+        advisor_gate = summary.get("advisor_gate", {})
+        advisor_followup = summary.get("advisor_followup", {})
+        codex_spark_gate = summary.get("codex_spark_gate", {})
+        codex_spark_followup = summary.get("codex_spark_followup", {})
+        spark_status = summary.get("spark_status", {})
+        parallel_gate = summary.get("parallel_execution_gate", {})
+        parallel_followup = summary.get("parallel_execution_followup", {})
+        spec_gate = summary.get("spec_gate", {})
+        spec_followup = summary.get("spec_followup", {})
+        root_cause_followup = summary.get("root_cause_followup", {})
+        tdd_followup = summary.get("tdd_followup", {})
+        claude_attempts = summary.get("claude_attempts", {})
+        economics = summary.get("economics", {})
+        model_usage = summary.get("model_usage", {})
+        context_reuse = summary.get("context_reuse", {})
+        context_routes = context_reuse.get("routes", {})
+        checkpoint_modes = context_reuse.get("checkpoint_modes", {})
+        recovery_delta_modes = context_reuse.get("recovery_delta_modes", {})
+        compilation_strategies = context_reuse.get("context_compilation_strategies", {})
+        runs.append(
+            {
+                "run_path": summary["run_path"],
+                "decision": summary["decision"],
+                "quality_score": summary["quality_score"],
+                "elapsed_seconds": summary["speed"]["elapsed_seconds_from_progress"],
+                "claude_startup_seconds": summary["speed"].get("claude_startup_seconds"),
+                "claude_execution_seconds": summary["speed"].get("claude_execution_seconds"),
+                "claude_first_progress_seconds": summary["speed"].get("first_substantive_progress_seconds"),
+                "checker_seconds": summary["speed"].get("checker_seconds"),
+                "artifact_finalization_seconds": summary["speed"].get("artifact_finalization_seconds"),
+                "input_tokens": cost_value(summary["cost"], "input_tokens"),
+                "output_tokens": cost_value(summary["cost"], "output_tokens"),
+                "total_cost_usd": cost_value(summary["cost"], "total_cost_usd"),
+                "stability_findings": summary["stability"]["finding_count"],
+                "loop_type": summary["goal_loop_contract"].get("loop_type", ""),
+                "benchmark_tags": summary["goal_loop_contract"].get("benchmark_tags", ""),
+                "advisor_required": advisor_gate.get("advisor_required", ""),
+                "advisor_model": advisor_gate.get("advisor_model_or_person", ""),
+                "advisor_calls": field_number(advisor_followup, "advisor_calls_used"),
+                "advisor_input_tokens": field_number(advisor_followup, "advisor_input_tokens"),
+                "advisor_output_tokens": field_number(advisor_followup, "advisor_output_tokens"),
+                "advisor_cost_usd": field_number(advisor_followup, "advisor_cost_usd"),
+                "spark_enabled": spark_status.get("enabled", codex_spark_gate.get("spark_enabled", "")),
+                "spark_purpose": spark_status.get("mode", codex_spark_gate.get("spark_purpose", "")),
+                "spark_requested_mode": spark_status.get("requested_mode", ""),
+                "spark_invoked": spark_status.get("invoked", codex_spark_followup.get("spark_invoked", "")),
+                "spark_model": spark_status.get("model", codex_spark_followup.get("spark_model_used", "")),
+                "spark_exit_code": field_number(spark_status, "exit_code"),
+                "spark_auto_disabled": spark_status.get("auto_disabled", ""),
+                "spark_artifact": spark_status.get("artifact", ""),
+                "spark_task_size": spark_status.get("task_size_classification", ""),
+                "spark_route": spark_status.get("routing_recommendation", ""),
+                "spark_confidence": spark_status.get("classification_confidence", ""),
+                "spark_accepted_suggestions": spark_status.get("accepted_suggestions", ""),
+                "spark_ignored_suggestions": spark_status.get("ignored_suggestions", ""),
+                "spark_conflicts_with_claude": spark_status.get("conflicts_with_claude", ""),
+                "spark_acceptance_satisfied": spark_status.get("acceptance_satisfied_by_spark", ""),
+                "spark_helper_invocations": spark_status.get("helper_invocation_count", 0),
+                "spark_total_calls": field_number(spark_status, "total_spark_calls"),
+                "spark_unique_modes": spark_status.get("unique_modes", []),
+                "spark_unique_pipeline_stages": spark_status.get("unique_pipeline_stages", []),
+                "spark_unique_roles": spark_status.get("unique_roles_executed", []),
+                "spark_budget_requested": spark_status.get("unique_budget_requested", []),
+                "spark_budget_effective": spark_status.get("unique_budget_effective", []),
+                "spark_provisional_acceptance": spark_status.get("unique_provisional_acceptance", []),
+                "spark_strong_review_required": spark_status.get("unique_strong_review_required", []),
+                "spark_merge_authorized": spark_status.get("unique_merge_authorized", []),
+                "spark_auto_disabled_count": spark_status.get("auto_disabled_occurrences", 0),
+                "spark_strong_fallback_used": spark_status.get(
+                    "strong_model_fallback",
+                    codex_spark_followup.get("strong_model_fallback_used", ""),
+                ),
+                "parallel_allowed": parallel_gate.get("parallel_allowed", ""),
+                "parallel_group_id": parallel_gate.get("parallel_group_id", ""),
+                "parallel_helper_invoked": parallel_followup.get("parallel_helper_invoked", ""),
+                "parallel_max_concurrency": field_number(parallel_followup, "max_concurrency_used"),
+                "spec_required": spec_gate.get("spec_required", ""),
+                "spec_matched": spec_followup.get("implementation_matched_spec", ""),
+                "root_cause_identified": root_cause_followup.get("root_cause_identified", ""),
+                "tdd_mode": tdd_followup.get("tdd_mode", ""),
+                "tdd_red_captured": tdd_followup.get("failing_test_or_failing_evidence_captured_before_production_edit", ""),
+                "claude_attempt_count": claude_attempts.get("count", 0),
+                "claude_takeover_counted": claude_attempts.get("takeover_counted", 0),
+                "claude_transient_transport": claude_attempts.get("transient_transport", 0),
+                "claude_useful_interactions": claude_attempts.get("useful_interactions", 0),
+                # Advisor continuation metrics
+                "continuation_requested": summary.get("advisor_continuation", {}).get("continuation_requested", 0),
+                "continuation_accepted": summary.get("advisor_continuation", {}).get("continuation_accepted", 0),
+                "continuation_succeeded": summary.get("advisor_continuation", {}).get("continuation_succeeded", 0),
+                "same_worktree_success": summary.get("advisor_continuation", {}).get("same_worktree_success", 0),
+                "full_redispatch_avoided": summary.get("advisor_continuation", {}).get("full_redispatch_avoided", 0),
+                "estimated_tokens_avoided": summary.get("advisor_continuation", {}).get("estimated_tokens_avoided"),
+                "estimated_time_avoided": summary.get("advisor_continuation", {}).get("estimated_time_avoided"),
+                "reexploration_yes": summary.get("advisor_continuation", {}).get("reexploration_yes", 0),
+                "reexploration_no": summary.get("advisor_continuation", {}).get("reexploration_no", 0),
+                "reexploration_unknown": summary.get("advisor_continuation", {}).get("reexploration_unknown", 0),
+                # Diagnostic probe metrics
+                "diagnostic_call_count": summary.get("diagnostic_probes", {}).get("diagnostic_call_count", 0),
+                "diagnostic_success_count": summary.get("diagnostic_probes", {}).get("diagnostic_success_count", 0),
+                "diagnostic_input_tokens": summary.get("diagnostic_probes", {}).get("diagnostic_input_tokens"),
+                "diagnostic_output_tokens": summary.get("diagnostic_probes", {}).get("diagnostic_output_tokens"),
+                "diagnostic_cost_usd": summary.get("diagnostic_probes", {}).get("diagnostic_cost_usd"),
+                "diagnostic_unavailable_usage": summary.get("diagnostic_probes", {}).get("diagnostic_unavailable_usage", 0),
+                "execution_owner": economics.get("execution_owner"),
+                "task_card_bytes": economics.get("task_card_bytes"),
+                "review_packet_bytes": economics.get("review_packet_bytes"),
+                "control_plane_seconds": economics.get("control_plane_seconds"),
+                "checker_model_dispatched": economics.get("checker_model_dispatched"),
+                "claude_reuse_ratio": economics.get("claude_reuse_ratio"),
+                "model_usage_complete": model_usage.get("totals", {}).get("usage_complete"),
+                "model_usage_by_role": model_usage.get("by_role", {}),
+                "context_reuse_samples": context_reuse.get("samples", 0),
+                "context_warm_resume_count": context_routes.get("warm-resume", 0),
+                "context_capsule_rehydrate_count": context_routes.get(
+                    "capsule-rehydrate", 0,
+                ),
+                "context_auto_checkpoint_count": checkpoint_modes.get("automatic", 0),
+                "context_checkpoint_bytes": context_reuse.get(
+                    "context_checkpoint_bytes", 0,
+                ),
+                "execution_capsule_bytes": context_reuse.get(
+                    "execution_capsule_bytes", 0,
+                ),
+                "skill_context_packet_bytes": context_reuse.get(
+                    "skill_context_packet_bytes", 0,
+                ),
+                "cache_stable_prefix_bytes": context_reuse.get(
+                    "cache_stable_prefix_bytes", 0,
+                ),
+                "cache_task_suffix_bytes": context_reuse.get(
+                    "cache_task_suffix_bytes", 0,
+                ),
+                "recovery_delta_count": recovery_delta_modes.get(
+                    "classification-bound", 0,
+                ),
+                "context_compilation_coverage_count": compilation_strategies.get(
+                    "coverage", 0,
+                ),
+                "context_compilation_anchors_only_count": compilation_strategies.get(
+                    "anchors-only", 0,
+                ),
+                "context_minimum_sufficient_count": context_reuse.get(
+                    "context_minimum_sufficient_count", 0,
+                ),
+                "context_coverage_required_count": context_reuse.get(
+                    "context_coverage_required_count", 0,
+                ),
+                "context_coverage_uncovered_count": context_reuse.get(
+                    "context_coverage_uncovered_count", 0,
+                ),
+                "context_candidate_topdown_count": context_reuse.get(
+                    "context_candidate_topdown_count", 0,
+                ),
+                "context_candidate_bottomup_count": context_reuse.get(
+                    "context_candidate_bottomup_count", 0,
+                ),
+                "context_zero_marginal_omitted_count": context_reuse.get(
+                    "context_zero_marginal_omitted_count", 0,
+                ),
+                "context_rescue_marginal_coverage_count": context_reuse.get(
+                    "context_rescue_marginal_coverage_count", 0,
+                ),
+            }
+        )
+
+    total = len(runs)
+    accepted = sum(1 for run in runs if run["decision"] == "ACCEPT")
+    quality_average = round(sum(run["quality_score"] for run in runs) / total, 3) if total else 0.0
+    elapsed_total = sum((run["elapsed_seconds"] or 0) for run in runs)
+    role_usage = {}
+    for run in runs:
+        for role, values in run["model_usage_by_role"].items():
+            target = role_usage.setdefault(role, {"calls": 0, "complete_calls": 0})
+            for field in (
+                "calls", "complete_calls", "input_tokens", "cached_input_tokens",
+                "cache_creation_input_tokens", "output_tokens", "reasoning_tokens",
+                "total_tokens", "cost_usd", "wall_time_ms", "api_time_ms",
+            ):
+                value = values.get(field)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    target[field] = target.get(field, 0) + value
+    for values in role_usage.values():
+        values["usage_complete"] = bool(values["calls"]) and values["calls"] == values["complete_calls"]
+    return {
+        "run_count": total,
+        "accepted_count": accepted,
+        "accept_rate": round(accepted / total, 3) if total else 0.0,
+        "quality_average": quality_average,
+        "elapsed_seconds_total": elapsed_total,
+        "input_tokens_total": sum(run["input_tokens"] for run in runs),
+        "output_tokens_total": sum(run["output_tokens"] for run in runs),
+        "total_cost_usd": round(sum(run["total_cost_usd"] for run in runs), 6),
+        "model_usage_by_role": role_usage,
+        "model_usage_complete_run_count": sum(run["model_usage_complete"] is True for run in runs),
+        "advisor_calls_total": sum(run["advisor_calls"] for run in runs),
+        "advisor_input_tokens_total": sum(run["advisor_input_tokens"] for run in runs),
+        "advisor_output_tokens_total": sum(run["advisor_output_tokens"] for run in runs),
+        "advisor_cost_usd_total": round(sum(run["advisor_cost_usd"] for run in runs), 6),
+        "spark_enabled_count": sum(1 for run in runs if str(run["spark_enabled"]).startswith("yes")),
+        "spark_auto_disabled_count": sum(1 for run in runs if str(run["spark_auto_disabled"]).startswith("yes")),
+        "spark_invoked_count": sum(1 for run in runs if str(run["spark_invoked"]).startswith("yes")),
+        "spark_strong_fallback_count": sum(1 for run in runs if str(run["spark_strong_fallback_used"]).startswith("yes")),
+        "spark_helper_invocations_total": sum(
+            run["spark_helper_invocations"] for run in runs
+        ),
+        "spark_calls_total": sum(run["spark_total_calls"] for run in runs),
+        "codex_direct_owner_count": sum(1 for run in runs if run["execution_owner"] == "codex-fast-path"),
+        "claude_owner_count": sum(1 for run in runs if run["execution_owner"] == "claude-builder"),
+        "task_card_bytes_total": sum(run["task_card_bytes"] or 0 for run in runs),
+        "review_packet_bytes_total": sum(run["review_packet_bytes"] or 0 for run in runs),
+        "control_plane_seconds_total": sum(run["control_plane_seconds"] or 0 for run in runs),
+        "checker_model_dispatch_count": sum(1 for run in runs if run["checker_model_dispatched"] is True),
+        "claude_reuse_ratio_average": round(
+            sum(run["claude_reuse_ratio"] for run in runs if isinstance(run["claude_reuse_ratio"], (int, float))) /
+            sum(1 for run in runs if isinstance(run["claude_reuse_ratio"], (int, float))), 4
+        ) if any(isinstance(run["claude_reuse_ratio"], (int, float)) for run in runs) else None,
+        "parallel_allowed_count": sum(1 for run in runs if str(run["parallel_allowed"]).startswith("yes")),
+        "parallel_invoked_count": sum(1 for run in runs if str(run["parallel_helper_invoked"]).startswith("yes")),
+        "spec_required_count": sum(1 for run in runs if str(run["spec_required"]).startswith("yes")),
+        "tdd_required_count": sum(1 for run in runs if str(run["tdd_mode"]).startswith("required")),
+        "claude_attempts_total": sum(run["claude_attempt_count"] for run in runs),
+        "claude_takeover_counted_total": sum(run["claude_takeover_counted"] for run in runs),
+        "claude_transient_transport_total": sum(run["claude_transient_transport"] for run in runs),
+        "claude_useful_interactions_total": sum(run["claude_useful_interactions"] for run in runs),
+        "claude_effective_implementation_rate": round(
+            sum(run["claude_useful_interactions"] for run in runs)
+            / sum(run["claude_attempt_count"] for run in runs), 3
+        ) if sum(run["claude_attempt_count"] for run in runs) else 0.0,
+        "context_reuse_samples_total": sum(
+            run["context_reuse_samples"] for run in runs
+        ),
+        "context_warm_resume_total": sum(
+            run["context_warm_resume_count"] for run in runs
+        ),
+        "context_capsule_rehydrate_total": sum(
+            run["context_capsule_rehydrate_count"] for run in runs
+        ),
+        "context_auto_checkpoint_total": sum(
+            run["context_auto_checkpoint_count"] for run in runs
+        ),
+        "context_checkpoint_bytes_total": sum(
+            run["context_checkpoint_bytes"] for run in runs
+        ),
+        "execution_capsule_bytes_total": sum(
+            run["execution_capsule_bytes"] for run in runs
+        ),
+        "skill_context_packet_bytes_total": sum(
+            run["skill_context_packet_bytes"] for run in runs
+        ),
+        "cache_stable_prefix_bytes_total": sum(
+            run["cache_stable_prefix_bytes"] for run in runs
+        ),
+        "cache_task_suffix_bytes_total": sum(
+            run["cache_task_suffix_bytes"] for run in runs
+        ),
+        "recovery_delta_total": sum(
+            run["recovery_delta_count"] for run in runs
+        ),
+        "context_compilation_coverage_total": sum(
+            run["context_compilation_coverage_count"] for run in runs
+        ),
+        "context_compilation_anchors_only_total": sum(
+            run["context_compilation_anchors_only_count"] for run in runs
+        ),
+        "context_minimum_sufficient_total": sum(
+            run["context_minimum_sufficient_count"] for run in runs
+        ),
+        "context_coverage_required_total": sum(
+            run["context_coverage_required_count"] for run in runs
+        ),
+        "context_coverage_uncovered_total": sum(
+            run["context_coverage_uncovered_count"] for run in runs
+        ),
+        "context_candidate_topdown_total": sum(
+            run["context_candidate_topdown_count"] for run in runs
+        ),
+        "context_candidate_bottomup_total": sum(
+            run["context_candidate_bottomup_count"] for run in runs
+        ),
+        "context_zero_marginal_omitted_total": sum(
+            run["context_zero_marginal_omitted_count"] for run in runs
+        ),
+        "context_rescue_marginal_coverage_total": sum(
+            run["context_rescue_marginal_coverage_count"] for run in runs
+        ),
+        # Advisor continuation aggregates
+        "advisor_continuation_requested_total": sum(run["continuation_requested"] for run in runs),
+        "advisor_continuation_accepted_total": sum(run["continuation_accepted"] for run in runs),
+        "advisor_continuation_succeeded_total": sum(run["continuation_succeeded"] for run in runs),
+        "same_worktree_success_total": sum(run["same_worktree_success"] for run in runs),
+        "full_redispatch_avoided_total": sum(run["full_redispatch_avoided"] for run in runs),
+        "reexploration_yes_total": sum(run["reexploration_yes"] for run in runs),
+        "reexploration_no_total": sum(run["reexploration_no"] for run in runs),
+        "reexploration_unknown_total": sum(run["reexploration_unknown"] for run in runs),
+        # Diagnostic probe aggregates (only sum explicit numeric evidence)
+        "diagnostic_calls_total": sum(run["diagnostic_call_count"] for run in runs),
+        "diagnostic_success_total": sum(run["diagnostic_success_count"] for run in runs),
+        "diagnostic_unavailable_usage_total": sum(run["diagnostic_unavailable_usage"] for run in runs),
+        "diagnostic_input_tokens_total": sum(
+            v for v in (run["diagnostic_input_tokens"] for run in runs) if explicit_number(v)
+        ) if any(explicit_number(run["diagnostic_input_tokens"]) for run in runs) else None,
+        "diagnostic_output_tokens_total": sum(
+            v for v in (run["diagnostic_output_tokens"] for run in runs) if explicit_number(v)
+        ) if any(explicit_number(run["diagnostic_output_tokens"]) for run in runs) else None,
+        "diagnostic_cost_usd_total": round(sum(
+            v for v in (run["diagnostic_cost_usd"] for run in runs) if explicit_number(v)
+        ), 6) if any(explicit_number(run["diagnostic_cost_usd"]) for run in runs) else None,
+        "estimated_tokens_avoided_total": sum(
+            v for v in (run["estimated_tokens_avoided"] for run in runs) if explicit_number(v)
+        ) if any(explicit_number(run["estimated_tokens_avoided"]) for run in runs) else None,
+        "estimated_time_avoided_total": sum(
+            v for v in (run["estimated_time_avoided"] for run in runs) if explicit_number(v)
+        ) if any(explicit_number(run["estimated_time_avoided"]) for run in runs) else None,
+        "advisor_calls_per_accepted": round(
+            sum(run["advisor_calls"] for run in runs) / accepted, 3
+        ) if accepted else 0.0,
+        "runs": runs,
+    }
+
+
+def format_value(value) -> str:
+    if value is None:
+        return "unavailable"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def render_markdown(report: dict) -> str:
+    lines = [
+        "# Workflow Benchmark Summary",
+        "",
+        "## Headline",
+        "",
+        "| Metric | Value |",
+        "|--------|-------|",
+        f"| Runs | {report['run_count']} |",
+        f"| Accepted | {report['accepted_count']} |",
+        f"| Accept rate | {report['accept_rate']} |",
+        f"| Average quality | {report['quality_average']} |",
+        f"| Total elapsed seconds | {format_value(report['elapsed_seconds_total'])} |",
+        f"| Input tokens | {format_value(report['input_tokens_total'])} |",
+        f"| Output tokens | {format_value(report['output_tokens_total'])} |",
+        f"| Total cost USD | {format_value(report['total_cost_usd'])} |",
+        f"| Advisor calls | {format_value(report['advisor_calls_total'])} |",
+        f"| Advisor input tokens | {format_value(report['advisor_input_tokens_total'])} |",
+        f"| Advisor output tokens | {format_value(report['advisor_output_tokens_total'])} |",
+        f"| Advisor cost USD | {format_value(report['advisor_cost_usd_total'])} |",
+        f"| Context reuse samples | {format_value(report['context_reuse_samples_total'])} |",
+        f"| Warm resumes | {format_value(report['context_warm_resume_total'])} |",
+        f"| Capsule rehydrates | {format_value(report['context_capsule_rehydrate_total'])} |",
+        f"| Automatic checkpoints | {format_value(report['context_auto_checkpoint_total'])} |",
+        f"| Checkpoint bytes | {format_value(report['context_checkpoint_bytes_total'])} |",
+        f"| Execution capsule bytes | {format_value(report['execution_capsule_bytes_total'])} |",
+        f"| Compiled guidance bytes | {format_value(report['skill_context_packet_bytes_total'])} |",
+        f"| Stable prompt-prefix bytes | {format_value(report['cache_stable_prefix_bytes_total'])} |",
+        f"| Task suffix bytes | {format_value(report['cache_task_suffix_bytes_total'])} |",
+        f"| Classification-bound recovery deltas | {format_value(report['recovery_delta_total'])} |",
+        f"| Coverage-compiled contexts | {format_value(report['context_compilation_coverage_total'])} |",
+        f"| Anchors-only ablations | {format_value(report['context_compilation_anchors_only_total'])} |",
+        f"| Minimum-sufficient contexts | {format_value(report['context_minimum_sufficient_total'])} |",
+        f"| Required cue coverage | {format_value(report['context_coverage_required_total'])} |",
+        f"| Uncovered cue requirements | {format_value(report['context_coverage_uncovered_total'])} |",
+        f"| Top-down candidates | {format_value(report['context_candidate_topdown_total'])} |",
+        f"| Bottom-up candidates | {format_value(report['context_candidate_bottomup_total'])} |",
+        f"| Zero-marginal cues omitted | {format_value(report['context_zero_marginal_omitted_total'])} |",
+        f"| Rescue marginal coverage | {format_value(report['context_rescue_marginal_coverage_total'])} |",
+        f"| Spark-enabled runs | {format_value(report['spark_enabled_count'])} |",
+        f"| Spark-invoked runs | {format_value(report['spark_invoked_count'])} |",
+        f"| Spark auto-disabled runs | {format_value(report['spark_auto_disabled_count'])} |",
+        f"| Spark strong-fallback runs | {format_value(report['spark_strong_fallback_count'])} |",
+        f"| Spark helper invocations | {format_value(report['spark_helper_invocations_total'])} |",
+        f"| Spark calls total | {format_value(report['spark_calls_total'])} |",
+        f"| Parallel-allowed runs | {format_value(report['parallel_allowed_count'])} |",
+        f"| Parallel-invoked runs | {format_value(report['parallel_invoked_count'])} |",
+        f"| Spec-required runs | {format_value(report['spec_required_count'])} |",
+        f"| TDD-required runs | {format_value(report['tdd_required_count'])} |",
+        f"| Advisor calls per accepted | {format_value(report['advisor_calls_per_accepted'])} |",
+        f"| Continuation requested | {format_value(report['advisor_continuation_requested_total'])} |",
+        f"| Continuation succeeded | {format_value(report['advisor_continuation_succeeded_total'])} |",
+        f"| Same-worktree success | {format_value(report['same_worktree_success_total'])} |",
+        f"| Full redispatches avoided | {format_value(report['full_redispatch_avoided_total'])} |",
+        f"| Re-exploration yes | {format_value(report['reexploration_yes_total'])} |",
+        f"| Re-exploration no | {format_value(report['reexploration_no_total'])} |",
+        f"| Re-exploration unknown | {format_value(report['reexploration_unknown_total'])} |",
+        f"| Diagnostic calls | {format_value(report['diagnostic_calls_total'])} |",
+        f"| Diagnostic unavailable usage | {format_value(report['diagnostic_unavailable_usage_total'])} |",
+        f"| Diagnostic input tokens | {format_value(report['diagnostic_input_tokens_total'])} |",
+        f"| Diagnostic output tokens | {format_value(report['diagnostic_output_tokens_total'])} |",
+        f"| Diagnostic cost USD | {format_value(report['diagnostic_cost_usd_total'])} |",
+        f"| Estimated tokens avoided | {format_value(report['estimated_tokens_avoided_total'])} |",
+        f"| Estimated time avoided | {format_value(report['estimated_time_avoided_total'])} |",
+        "",
+        "## Runs",
+        "",
+        "| Run | Decision | Quality | Seconds | Claude Startup | Claude Exec | Checker | Finalize | Input | Output | Cost | Loop | Tags | Advisor | Advisor Calls | Spark | Spark Mode | Spark Size | Spark Route | Spark Confidence | Spark Model | Spark Accepted | Spark Ignored | Spark Conflicts | Spark Acceptance | Spark Invocations | Spark Calls | Spark Stages | Spark Roles | Spark Budget Req | Spark Budget Eff | Spark Provisional | Spark Strong-Review | Spark Merge-Auth | Parallel | Spec | TDD | Stability | Cont. Req | Cont. OK | Redispatch Avoided | Reexplor. | Diag Calls | Diag In | Diag Out | Diag Cost | Diag Unavail | Saved Tokens | Saved Seconds |",
+        "|-----|----------|---------|---------|----------------|-------------|---------|----------|-------|--------|------|------|------|---------|---------------|-------|------------|------------|-------------|------------------|-------------|----------------|---------------|-----------------|------------------|-------------------|-------------|--------------|-------------|------------------|------------------|-------------------|---------------------|------------------|----------|------|-----|-----------|-----------|----------|-------------------|-----------|------------|---------|----------|-----------|--------------|--------------|---------------|---------------|",
+    ]
+    if report["runs"]:
+        for run in report["runs"]:
+            # Format list fields as comma-separated strings
+            formatted = {}
+            for key, value in run.items():
+                if isinstance(value, list):
+                    formatted[key] = ", ".join(str(v) for v in value) if value else "none"
+                else:
+                    formatted[key] = format_value(value)
+            lines.append(
+                "| {run_path} | {decision} | {quality_score} | {elapsed_seconds} | {claude_startup_seconds} | "
+                "{claude_execution_seconds} | {checker_seconds} | {artifact_finalization_seconds} | {input_tokens} | "
+                "{output_tokens} | {total_cost_usd} | {loop_type} | {benchmark_tags} | {advisor_model} | "
+                "{advisor_calls} | {spark_invoked} | {spark_purpose} | {spark_task_size} | {spark_route} | "
+                "{spark_confidence} | {spark_model} | {spark_accepted_suggestions} | "
+                "{spark_ignored_suggestions} | {spark_conflicts_with_claude} | {spark_acceptance_satisfied} | "
+                "{spark_helper_invocations} | {spark_total_calls} | {spark_unique_pipeline_stages} | "
+                "{spark_unique_roles} | {spark_budget_requested} | {spark_budget_effective} | "
+                "{spark_provisional_acceptance} | {spark_strong_review_required} | {spark_merge_authorized} | "
+                "{parallel_helper_invoked} | {spec_matched} | {tdd_mode} | {stability_findings} | "
+                "{continuation_requested} | {continuation_succeeded} | {full_redispatch_avoided} | "
+                "{reexploration_yes} | {diagnostic_call_count} | {diagnostic_input_tokens} | "
+                "{diagnostic_output_tokens} | {diagnostic_cost_usd} | {diagnostic_unavailable_usage} | "
+                "{estimated_tokens_avoided} | {estimated_time_avoided} |".format(
+                    **formatted
+                )
+            )
+    else:
+        lines.append("| no runs | UNKNOWN | 0 | unavailable | unavailable | unavailable | unavailable | unavailable | 0 | 0 | 0 | | | | 0 | | | | | | | | | | | | 0 | 0 | none | none | none | none | none | none | none | none | | | | 0 | 0 | 0 | 0 | 0 | unavailable | unavailable | unavailable | 0 | unavailable | unavailable |")
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("runs", nargs="*", type=Path, help="Loop run directories. Defaults to .worktrees/loop-*.")
+    parser.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root for default discovery.")
+    parser.add_argument("--output", type=Path, help="Write Markdown benchmark report.")
+    parser.add_argument("--json-output", type=Path, help="Write machine-readable JSON benchmark report.")
+    args = parser.parse_args(argv)
+
+    report = benchmark(args.runs, args.repo.resolve())
+    markdown = render_markdown(report)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(markdown, encoding="utf-8")
+    else:
+        print(markdown, end="")
+    if args.json_output:
+        args.json_output.parent.mkdir(parents=True, exist_ok=True)
+        args.json_output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

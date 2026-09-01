@@ -1,0 +1,1056 @@
+#!/usr/bin/env python3
+"""
+install_workflow.py  -  Install or update the AI coding workflow in a target repository.
+
+Usage:
+    python scripts/install_workflow.py /path/to/repo
+    python scripts/install_workflow.py /path/to/repo --update-workflow-files
+    python scripts/install_workflow.py /path/to/repo --local-only
+
+This script:
+    1. Copies assets into the target repo.
+    2. If AGENTS.md or CLAUDE.md exist, preserves user content and replaces only managed blocks.
+    3. Keeps CLAUDE.md as a compact standalone execution core.
+    4. Makes shell scripts executable.
+    5. Runs bash -n on installed shell scripts (if bash is available).
+    6. Optionally keeps control-plane ignores local through .git/info/exclude.
+    7. Prints a summary of created, updated, outdated, skipped, and validated files.
+
+Uses only the Python standard library.
+"""
+
+import os
+import stat
+import subprocess
+import sys
+import argparse
+import tempfile
+
+
+def _to_bash_path(path):
+    """Convert a Windows path to a Unix-style path for bash."""
+    p = path.replace("\\", "/")
+    if len(p) >= 2 and p[1] == ":":
+        p = "/" + p[0].lower() + p[2:]
+    return p
+
+# Managed block markers
+BEGIN_MARKER = "<!-- AI-CODING-WORKFLOW:BEGIN managed -->"
+END_MARKER = "<!-- AI-CODING-WORKFLOW:END managed -->"
+
+LEGACY_AGENTS_IMPORT = "@AGENTS.md"
+
+# Files to copy directly (source relative to assets/, dest relative to repo root)
+DIRECT_COPY = [
+    ("codex/ai-coding-workflow.rules", ".codex/rules/ai-coding-workflow.rules"),
+    ("task-card-template.md", "ai/task-card-template.md"),
+    ("skill-context/rules-v1.json", "ai/skill-context/rules-v1.json"),
+    ("task-card-components/catalog.json", "ai/task-card-components/catalog.json"),
+    ("task-card-components/catalog.md", "ai/task-card-components/catalog.md"),
+    ("task-card-components/core.md", "ai/task-card-components/core.md"),
+    ("task-card-components/builder.md", "ai/task-card-components/builder.md"),
+    ("task-card-components/batch-builder.md", "ai/task-card-components/batch-builder.md"),
+    ("task-card-components/solution-planner.md", "ai/task-card-components/solution-planner.md"),
+    ("task-card-components/exploratory-builder.md", "ai/task-card-components/exploratory-builder.md"),
+    ("task-card-components/checker.md", "ai/task-card-components/checker.md"),
+    ("task-card-components/revision.md", "ai/task-card-components/revision.md"),
+    ("task-card-components/control-plane.md", "ai/task-card-components/control-plane.md"),
+    ("task-card-components/spec.md", "ai/task-card-components/spec.md"),
+    ("task-card-components/root-cause.md", "ai/task-card-components/root-cause.md"),
+    ("task-card-components/tdd.md", "ai/task-card-components/tdd.md"),
+    ("task-card-components/large-repo.md", "ai/task-card-components/large-repo.md"),
+    ("task-card-components/parallel.md", "ai/task-card-components/parallel.md"),
+    ("task-card-components/advisor.md", "ai/task-card-components/advisor.md"),
+    ("task-card-components/spark.md", "ai/task-card-components/spark.md"),
+    ("evidence-packet-template.md", "ai/evidence-packet-template.md"),
+    ("spec-template.md", "ai/spec-template.md"),
+    ("plan-task-template.md", "ai/plan-task-template.md"),
+    ("plan-findings-template.md", "ai/plan-findings-template.md"),
+    ("plan-progress-template.md", "ai/plan-progress-template.md"),
+    ("README.md", "ai/README.md"),
+]
+
+# Shell scripts to install (source relative to scripts/, dest relative to repo root)
+SCRIPTS = [
+    ("dispatch-to-claude.sh", "ai/dispatch-to-claude.sh"),
+    ("check-worktree.sh", "ai/check-worktree.sh"),
+    ("review-with-codex.sh", "ai/review-with-codex.sh"),
+    ("run-codex-spark.sh", "ai/run-codex-spark.sh"),
+    ("run-parallel-loop.sh", "ai/run-parallel-loop.sh"),
+    ("run-loop.sh", "ai/run-loop.sh"),
+    ("status-claude.sh", "ai/status-claude.sh"),
+    ("watch-claude.sh", "ai/watch-claude.sh"),
+    ("monitor-claude.sh", "ai/monitor-claude.sh"),
+    ("kill-claude.sh", "ai/kill-claude.sh"),
+    ("cleanup-worktree.sh", "ai/cleanup-worktree.sh"),
+]
+
+# PowerShell helpers to install (source relative to scripts/, dest relative to repo root)
+POWERSHELL_SCRIPTS = [
+    ("pwsh-utf8.ps1", "ai/pwsh-utf8.ps1"),
+]
+
+# Python helpers to install (source relative to scripts/, dest relative to repo root)
+PYTHON_SCRIPTS = [
+    ("validate-worktree-diff.py", "ai/validate-worktree-diff.py"),
+    ("compose_task_card.py", "ai/compose_task_card.py"),
+    ("doctor_workflow.py", "ai/doctor_workflow.py"),
+    ("claude-healthcheck.py", "ai/claude-healthcheck.py"),
+    ("claude-monitor-decision.py", "ai/claude-monitor-decision.py"),
+    ("claude_task_id.py", "ai/claude_task_id.py"),
+    ("direct-change.py", "ai/direct-change.py"),
+    ("claude-extension-capsule.py", "ai/claude-extension-capsule.py"),
+    ("claude-process-state.py", "ai/claude-process-state.py"),
+    ("codegraph-worktree-guard.py", "ai/codegraph-worktree-guard.py"),
+    ("process-identity.py", "ai/process-identity.py"),
+    ("dispatch-preflight.py", "ai/dispatch-preflight.py"),
+    ("archive-control-files.py", "ai/archive-control-files.py"),
+    ("build-acceptance-bundle.py", "ai/build-acceptance-bundle.py"),
+    ("build-takeover-receipt.py", "ai/build-takeover-receipt.py"),
+    ("prepare-codex-takeover.py", "ai/prepare-codex-takeover.py"),
+    ("prepare-write-sandbox.py", "ai/prepare-write-sandbox.py"),
+    ("write-approved-file.py", "ai/write-approved-file.py"),
+    ("build-invariant-acceptance-matrix.py", "ai/build-invariant-acceptance-matrix.py"),
+    ("change-size-advisory.py", "ai/change-size-advisory.py"),
+    ("archive-terminal-runtime.py", "ai/archive-terminal-runtime.py"),
+    ("create-dirty-snapshot.py", "ai/create-dirty-snapshot.py"),
+    ("enforce-checker-contract.py", "ai/enforce-checker-contract.py"),
+    ("compare-transfer-pilot.py", "ai/compare-transfer-pilot.py"),
+    ("classify-claude-attempt.py", "ai/classify-claude-attempt.py"),
+    ("verify-claude-report.py", "ai/verify-claude-report.py"),
+    ("validate-claude-report.py", "ai/validate-claude-report.py"),
+    ("validate-revision-card.py", "ai/validate-revision-card.py"),
+    ("repository-scale.py", "ai/repository-scale.py"),
+    ("prepare-advisor-continuation.py", "ai/prepare-advisor-continuation.py"),
+    ("prepare-worktree-continuation.py", "ai/prepare-worktree-continuation.py"),
+    ("context-lease.py", "ai/context-lease.py"),
+    ("build-execution-capsule.py", "ai/build-execution-capsule.py"),
+    ("build-context-checkpoint.py", "ai/build-context-checkpoint.py"),
+    ("build-recovery-delta.py", "ai/build-recovery-delta.py"),
+    ("compile-skill-context.py", "ai/compile-skill-context.py"),
+    ("validate-claude-context.py", "ai/validate-claude-context.py"),
+    ("code-search-service.py", "ai/code-search-service.py"),
+    ("clean_runtime.py", "ai/clean_runtime.py"),
+    ("install_context_tools.py", "ai/install_context_tools.py"),
+    ("locate-code.py", "ai/locate-code.py"),
+    ("summarize-loop-run.py", "ai/summarize-loop-run.py"),
+    ("benchmark-loop-runs.py", "ai/benchmark-loop-runs.py"),
+    ("init-spec.py", "ai/init-spec.py"),
+    ("plan-to-task-cards.py", "ai/plan-to-task-cards.py"),
+    ("solution-contract.py", "ai/solution-contract.py"),
+    ("init-plan.py", "ai/init-plan.py"),
+    ("session-catchup.py", "ai/session-catchup.py"),
+    ("validate-parallel-plan.py", "ai/validate-parallel-plan.py"),
+    ("parallel-task-gate.py", "ai/parallel-task-gate.py"),
+    ("assess-parallel-opportunity.py", "ai/assess-parallel-opportunity.py"),
+    ("task_schema.py", "ai/task_schema.py"),
+    ("compose-profiles.py", "ai/compose-profiles.py"),
+    ("lint-task-card.py", "ai/lint-task-card.py"),
+    ("render-task-card.py", "ai/render-task-card.py"),
+    ("review_decision.py", "ai/review_decision.py"),
+    ("parse-review-decision.py", "ai/parse-review-decision.py"),
+    ("event_writer.py", "ai/event_writer.py"),
+    ("workflow_state.py", "ai/workflow_state.py"),
+    ("handoff_protocol.py", "ai/handoff_protocol.py"),
+    ("hypothesis_ledger.py", "ai/hypothesis_ledger.py"),
+    ("evidence_store.py", "ai/evidence_store.py"),
+    ("init-workflow-state.py", "ai/init-workflow-state.py"),
+    ("apply-workflow-delta.py", "ai/apply-workflow-delta.py"),
+    ("validate-workflow-state.py", "ai/validate-workflow-state.py"),
+    ("recover-workflow-state.py", "ai/recover-workflow-state.py"),
+    ("render-task-card-from-state.py", "ai/render-task-card-from-state.py"),
+    ("build-handoff-delta.py", "ai/build-handoff-delta.py"),
+    ("validate-handoff-ack.py", "ai/validate-handoff-ack.py"),
+    ("merge-handoff-ack.py", "ai/merge-handoff-ack.py"),
+    ("update-hypothesis-ledger.py", "ai/update-hypothesis-ledger.py"),
+    ("check-revisited-hypothesis.py", "ai/check-revisited-hypothesis.py"),
+    ("evidence-store.py", "ai/evidence-store.py"),
+    ("evidence-invalidate.py", "ai/evidence-invalidate.py"),
+    ("context-broker.py", "ai/context-broker.py"),
+    ("acceptance_graph.py", "ai/acceptance_graph.py"),
+    ("build-acceptance-graph.py", "ai/build-acceptance-graph.py"),
+    ("build-delta-review-packet.py", "ai/build-delta-review-packet.py"),
+    ("validate-review-receipt.py", "ai/validate-review-receipt.py"),
+    ("owner_lease.py", "ai/owner_lease.py"),
+    ("select-continuation-owner.py", "ai/select-continuation-owner.py"),
+    ("handoff_routing.py", "ai/handoff_routing.py"),
+    ("estimate-handoff-tax.py", "ai/estimate-handoff-tax.py"),
+    ("calibrate-handoff-routing.py", "ai/calibrate-handoff-routing.py"),
+    ("record-handoff-event.py", "ai/record-handoff-event.py"),
+    ("summarize-handoff-metrics.py", "ai/summarize-handoff-metrics.py"),
+    ("validate-run-events.py", "ai/validate-run-events.py"),
+    ("build_review_packet.py", "ai/build_review_packet.py"),
+    ("build-review-packet.py", "ai/build-review-packet.py"),
+    ("resume-run.py", "ai/resume-run.py"),
+    ("replay-run.py", "ai/replay-run.py"),
+    ("detect-cpp-bazel.py", "ai/detect-cpp-bazel.py"),
+    ("build-bazel-context.py", "ai/build-bazel-context.py"),
+    ("generate-handoff.py", "ai/generate-handoff.py"),
+    ("build-scoped-handoff.py", "ai/build-scoped-handoff.py"),
+    ("learn-store.py", "ai/learn-store.py"),
+    ("aiwf.py", "ai/aiwf.py"),
+    ("workflow-contract.py", "ai/workflow-contract.py"),
+    ("bookend-task.py", "ai/bookend-task.py"),
+    ("run-benchmark-suite.py", "ai/run-benchmark-suite.py"),
+    ("route-task.py", "ai/route-task.py"),
+    ("collect-task-facts.py", "ai/collect-task-facts.py"),
+    ("quota-ledger.py", "ai/quota-ledger.py"),
+    ("model-call-broker.py", "ai/model-call-broker.py"),
+    ("claude-route-preference.py", "ai/claude-route-preference.py"),
+    ("claude-api-availability.py", "ai/claude-api-availability.py"),
+    ("spark_execution_availability.py", "ai/spark_execution_availability.py"),
+    ("latency-policy.py", "ai/latency-policy.py"),
+    ("evaluate-acceptance.py", "ai/evaluate-acceptance.py"),
+    ("select-review-tier.py", "ai/select-review-tier.py"),
+    ("context-cache.py", "ai/context-cache.py"),
+    ("check-retry-evidence.py", "ai/check-retry-evidence.py"),
+    ("validation-ingest.py", "ai/validation-ingest.py"),
+    ("compare-efficiency.py", "ai/compare-efficiency.py"),
+    ("workflow_economics.py", "ai/workflow_economics.py"),
+    ("model-usage.py", "ai/model-usage.py"),
+    ("audit-codex-wakeups.py", "ai/audit-codex-wakeups.py"),
+    ("run-approved-validation.py", "ai/run-approved-validation.py"),
+    ("economics-experiment.py", "ai/economics-experiment.py"),
+    ("parse-spark-output.py", "ai/parse-spark-output.py"),
+    ("evidence_capsule.py", "ai/evidence_capsule.py"),
+    ("build-spark-summary-capsule.py", "ai/build-spark-summary-capsule.py"),
+    ("verify-evidence-capsule.py", "ai/verify-evidence-capsule.py"),
+    ("spark_control_protocol.py", "ai/spark_control_protocol.py"),
+    ("efficiency-control.py", "ai/efficiency-control.py"),
+    ("dispatch-efficient.py", "ai/dispatch-efficient.py"),
+    ("remote-precheck.py", "ai/remote-precheck.py"),
+    ("route-recovery.py", "ai/route-recovery.py"),
+    ("review-ladder.py", "ai/review-ladder.py"),
+    ("evidence_hash.py", "ai/evidence_hash.py"),
+    ("worktree_state_hash.py", "ai/worktree_state_hash.py"),
+    ("evidence-builder.py", "ai/evidence-builder.py"),
+    ("run-workflow.py", "ai/run-workflow.py"),
+    ("validate-advisor-request.py", "ai/validate-advisor-request.py"),
+    ("validate-advisor-response.py", "ai/validate-advisor-response.py"),
+    ("advisor-call.py", "ai/advisor-call.py"),
+]
+
+# Structured assets: schemas (source relative to repo root, dest relative to repo root)
+SCHEMA_ASSETS = [
+    ("schemas/workflow-contract-v1.schema.json", "ai/schemas/workflow-contract-v1.schema.json"),
+    ("contracts/workflow-contract-v1.json", "ai/contracts/workflow-contract-v1.json"),
+    ("schemas/task-card-v1.schema.json", "ai/schemas/task-card-v1.schema.json"),
+    ("schemas/review-decision-v1.schema.json", "ai/schemas/review-decision-v1.schema.json"),
+    ("schemas/coordination-event-v1.schema.json", "ai/schemas/coordination-event-v1.schema.json"),
+    ("schemas/coordination-run-summary-v1.schema.json", "ai/schemas/coordination-run-summary-v1.schema.json"),
+    ("schemas/coordination-run-detail-v1.schema.json", "ai/schemas/coordination-run-detail-v1.schema.json"),
+    ("schemas/run-event-v2.schema.json", "ai/schemas/run-event-v2.schema.json"),
+    ("schemas/handoff-event-v1.schema.json", "ai/schemas/handoff-event-v1.schema.json"),
+    ("schemas/workflow-state.schema.json", "ai/schemas/workflow-state.schema.json"),
+    ("schemas/workflow-event.schema.json", "ai/schemas/workflow-event.schema.json"),
+    ("schemas/handoff-delta.schema.json", "ai/schemas/handoff-delta.schema.json"),
+    ("schemas/handoff-ack.schema.json", "ai/schemas/handoff-ack.schema.json"),
+    ("schemas/rejected-hypothesis.schema.json", "ai/schemas/rejected-hypothesis.schema.json"),
+    ("schemas/evidence-object.schema.json", "ai/schemas/evidence-object.schema.json"),
+    ("schemas/context-query.schema.json", "ai/schemas/context-query.schema.json"),
+    ("schemas/context-response.schema.json", "ai/schemas/context-response.schema.json"),
+    ("schemas/acceptance-graph.schema.json", "ai/schemas/acceptance-graph.schema.json"),
+    ("schemas/review-receipt.schema.json", "ai/schemas/review-receipt.schema.json"),
+    ("schemas/owner-lease.schema.json", "ai/schemas/owner-lease.schema.json"),
+    ("schemas/artifact-manifest-v1.schema.json", "ai/schemas/artifact-manifest-v1.schema.json"),
+    ("schemas/review-packet-v1.schema.json", "ai/schemas/review-packet-v1.schema.json"),
+    ("schemas/handoff-v1.schema.json", "ai/schemas/handoff-v1.schema.json"),
+    ("schemas/efficiency-plan-v1.schema.json", "ai/schemas/efficiency-plan-v1.schema.json"),
+    ("schemas/routing-facts-v1.schema.json", "ai/schemas/routing-facts-v1.schema.json"),
+    ("schemas/solution-contract-v1.schema.json", "ai/schemas/solution-contract-v1.schema.json"),
+    ("schemas/solution-contract-v2.schema.json", "ai/schemas/solution-contract-v2.schema.json"),
+    ("schemas/context-lease-v1.schema.json", "ai/schemas/context-lease-v1.schema.json"),
+    ("schemas/context-checkpoint-v1.schema.json", "ai/schemas/context-checkpoint-v1.schema.json"),
+    ("schemas/context-compilation-v1.schema.json", "ai/schemas/context-compilation-v1.schema.json"),
+    ("schemas/recovery-delta-v1.schema.json", "ai/schemas/recovery-delta-v1.schema.json"),
+]
+
+# Structured assets: profiles (source relative to repo root, dest relative to repo root)
+PROFILE_ASSETS = [
+    ("profiles/base.json", "ai/profiles/base.json"),
+    ("profiles/bugfix.json", "ai/profiles/bugfix.json"),
+    ("profiles/cpp-bazel.json", "ai/profiles/cpp-bazel.json"),
+    ("profiles/manual-remote-validation.json", "ai/profiles/manual-remote-validation.json"),
+    ("profiles/quota-efficient-balanced.json", "ai/profiles/quota-efficient-balanced.json"),
+]
+
+# Structured assets: examples (source relative to repo root, dest relative to repo root)
+EXAMPLE_ASSETS = [
+    ("examples/fix-typo-in-readme.json", "ai/examples/fix-typo-in-readme.json"),
+    ("benchmarks/real-project-task.example.json", "ai/examples/real-project-task.json"),
+    ("benchmarks/model-pricing.example.json", "ai/examples/model-pricing.json"),
+]
+
+WORKTREES_GITIGNORE_LINES = [
+    "/.worktrees/*",
+    "!/.worktrees/.gitkeep",
+]
+
+RETIRED_WORKFLOW_FILES = [
+    "ai/claude-monitor-supervisor.py",
+    "ai/collect-workflow-feedback.py",
+    "ai/schemas/workflow-feedback-v1.schema.json",
+]
+
+LOCAL_ONLY_EXCLUDE_LINES = [
+    "/AGENTS.md",
+    "/CLAUDE.md",
+    "/ai/",
+    "/.codex/rules/ai-coding-workflow.rules",
+    "/.worktrees/",
+]
+
+
+def get_script_dir():
+    """Return the directory containing this script."""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_assets_dir():
+    """Return the assets directory path."""
+    return os.path.join(os.path.dirname(get_script_dir()), "assets")
+
+
+def read_file(path):
+    """Read a file and return its contents with normalized line endings."""
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    # Normalize line endings to \n
+    return content.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def write_file(path, content):
+    """Atomically write normalized content, preserving an existing file mode."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    normalized = normalize_text(content)
+    existing_mode = None
+    try:
+        existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        pass
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=directory,
+            prefix=".aiwf-update-",
+            delete=False,
+        ) as f:
+            temp_path = f.name
+            f.write(normalized)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(temp_path, existing_mode if existing_mode is not None else 0o644)
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+
+def build_install_manifest(assets_dir, scripts_dir):
+    """Return required (source, destination) pairs for one project install."""
+    repo_root = os.path.dirname(assets_dir)
+    entries = [
+        (os.path.join(assets_dir, "AGENTS.md"), "AGENTS.md"),
+        (os.path.join(assets_dir, "CLAUDE.md"), "CLAUDE.md"),
+    ]
+    entries.extend(
+        (os.path.join(assets_dir, src_name), dest_rel)
+        for src_name, dest_rel in DIRECT_COPY
+    )
+    entries.extend(
+        (os.path.join(scripts_dir, src_name), dest_rel)
+        for src_name, dest_rel in SCRIPTS + POWERSHELL_SCRIPTS + PYTHON_SCRIPTS
+    )
+    entries.extend(
+        (os.path.join(repo_root, src_rel), dest_rel)
+        for src_rel, dest_rel in SCHEMA_ASSETS + PROFILE_ASSETS + EXAMPLE_ASSETS
+    )
+    return entries
+
+
+def validate_install_manifest(assets_dir, scripts_dir):
+    """Fail before destination mutation when the source package is incomplete."""
+    entries = build_install_manifest(assets_dir, scripts_dir)
+    missing = [source for source, _ in entries if not os.path.isfile(source)]
+    unreadable = []
+    for source, _ in entries:
+        if source in missing:
+            continue
+        try:
+            read_file(source)
+        except (OSError, UnicodeError) as exc:
+            unreadable.append("{} ({})".format(source, exc))
+    destinations = [dest for _, dest in entries]
+    duplicates = sorted({dest for dest in destinations if destinations.count(dest) > 1})
+    problems = []
+    if missing:
+        problems.append("missing required source files:\n  " + "\n  ".join(sorted(missing)))
+    if unreadable:
+        problems.append("unreadable required source files:\n  " + "\n  ".join(unreadable))
+    if duplicates:
+        problems.append("duplicate install destinations:\n  " + "\n  ".join(duplicates))
+    if problems:
+        raise ValueError("invalid workflow install manifest: " + "\n".join(problems))
+    return entries
+
+
+def normalize_text(text):
+    """Normalize text to canonical form: LF line endings, single trailing newline,
+    no trailing whitespace per line, no trailing blank lines."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    lines = [line.rstrip() for line in lines]
+    # Strip trailing blank lines
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def normalize_for_compare(content):
+    """Normalize content for comparison: strip trailing whitespace per line,
+    collapse runs of 3+ blank lines to 2, strip trailing blank lines.
+    Returns a canonical string for equality comparison."""
+    lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # Strip trailing whitespace per line
+    lines = [line.rstrip() for line in lines]
+    # Collapse runs of 3+ blank lines to 2
+    result = []
+    blank_count = 0
+    for line in lines:
+        if line == "":
+            blank_count += 1
+            if blank_count <= 2:
+                result.append(line)
+        else:
+            blank_count = 0
+            result.append(line)
+    # Strip trailing blank lines
+    while result and result[-1] == "":
+        result.pop()
+    return "\n".join(result)
+
+
+def extract_managed_block(content):
+    """Extract the managed block from content.
+    Returns the block content (between markers), or None."""
+    begin_idx = content.find(BEGIN_MARKER)
+    end_idx = content.find(END_MARKER)
+    if begin_idx == -1 or end_idx == -1:
+        return None
+    block_start = begin_idx + len(BEGIN_MARKER)
+    # Include leading newline after BEGIN marker if present
+    if block_start < len(content) and content[block_start] == "\n":
+        block_start += 1
+    return content[block_start:end_idx]
+
+
+def build_managed_file(header, block, footer):
+    """Build a file with a managed block.
+    Produces deterministic output: header, blank line, BEGIN, block, END,
+    blank line (if footer), footer, single trailing newline."""
+    parts = []
+    if header:
+        # Normalize header: strip trailing blank lines, keep content
+        header_lines = header.rstrip("\n").split("\n")
+        while header_lines and header_lines[-1].strip() == "":
+            header_lines.pop()
+        parts.extend(header_lines)
+        parts.append("")
+    parts.append(BEGIN_MARKER)
+    # Normalize block: strip leading/trailing blank lines
+    block_lines = block.rstrip("\n").split("\n")
+    while block_lines and block_lines[0].strip() == "":
+        block_lines.pop(0)
+    while block_lines and block_lines[-1].strip() == "":
+        block_lines.pop()
+    parts.extend(block_lines)
+    parts.append(END_MARKER)
+    if footer:
+        # Normalize footer: strip leading blank lines, keep content
+        footer_lines = footer.rstrip("\n").split("\n")
+        while footer_lines and footer_lines[0].strip() == "":
+            footer_lines.pop(0)
+        if footer_lines:
+            parts.append("")
+            parts.extend(footer_lines)
+    # Ensure single trailing newline
+    result = "\n".join(parts) + "\n"
+    return result
+
+
+def merge_with_managed_block(existing_content, new_block):
+    """Replace or insert managed block. Returns the full file content."""
+    existing_norm = existing_content.replace("\r\n", "\n").replace("\r", "\n")
+
+    if BEGIN_MARKER in existing_norm and END_MARKER in existing_norm:
+        # Replace existing managed block
+        begin_idx = existing_norm.find(BEGIN_MARKER)
+        end_idx = existing_norm.find(END_MARKER)
+        end_of_block = end_idx + len(END_MARKER)
+
+        header = existing_norm[:begin_idx]
+        # Skip newline after END marker
+        if end_of_block < len(existing_norm) and existing_norm[end_of_block] == "\n":
+            end_of_block += 1
+        footer = existing_norm[end_of_block:]
+
+        return build_managed_file(header, new_block, footer)
+    else:
+        # No managed block  -  insert near the top, after the first heading if present
+        lines = existing_norm.split("\n")
+        insert_idx = 0
+        for i, line in enumerate(lines):
+            if line.startswith("#"):
+                insert_idx = i + 1
+            else:
+                break
+
+        header = "\n".join(lines[:insert_idx])
+        footer = "\n".join(lines[insert_idx:])
+        return build_managed_file(header, new_block, footer)
+
+
+def get_managed_block_from_asset(asset_content):
+    """Extract the managed block content from an asset file."""
+    block = extract_managed_block(asset_content)
+    if block is None:
+        return asset_content
+    return block
+
+
+def remove_legacy_default_agents_import(content):
+    """Remove only the old installer-owned bare ``@AGENTS.md`` header.
+
+    Earlier releases injected the import between the default title and managed
+    block.  It made every non-bare Claude session load the full repository
+    handbook.  A user-owned import is preserved unless the header is exactly
+    the old title-plus-import shape.
+    """
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    begin = normalized.find(BEGIN_MARKER)
+    header = normalized[:begin] if begin >= 0 else normalized
+    lines = header.split("\n")
+    nonblank = [line.strip() for line in lines if line.strip()]
+    imports = [line for line in nonblank if line == LEGACY_AGENTS_IMPORT]
+    remaining = [line for line in nonblank if line != LEGACY_AGENTS_IMPORT]
+    if len(imports) != 1 or len(remaining) != 1 or not remaining[0].startswith("#"):
+        return normalized
+    compact_header = "\n".join(
+        line for line in lines if line.strip() != LEGACY_AGENTS_IMPORT
+    ).rstrip()
+    if begin < 0:
+        return compact_header + "\n"
+    return compact_header + "\n\n" + normalized[begin:]
+
+
+def install_or_update_agents(src_content, dest_path):
+    """Install or update AGENTS.md. Returns status string."""
+    new_block = get_managed_block_from_asset(src_content)
+
+    if not os.path.exists(dest_path):
+        content = merge_with_managed_block("", new_block)
+        write_file(dest_path, content)
+        return "created"
+
+    existing = read_file(dest_path)
+    merged = merge_with_managed_block(existing, new_block)
+
+    if normalize_for_compare(merged) == normalize_for_compare(existing):
+        return "skipped"
+
+    write_file(dest_path, merged)
+    return "updated"
+
+
+def install_or_update_claude(src_content, dest_path):
+    """Install or update the compact CLAUDE.md managed block.
+
+    CLAUDE.md intentionally does not import AGENTS.md.  The narrow execution
+    capsule supplies task-specific instructions, while user-owned headers and
+    footers remain intact.
+    """
+    new_block = get_managed_block_from_asset(src_content)
+
+    if not os.path.exists(dest_path):
+        # Extract the small source header before the managed block.
+        src_norm = src_content.replace("\r\n", "\n").replace("\r", "\n")
+        begin_idx = src_norm.find(BEGIN_MARKER)
+        if begin_idx >= 0:
+            header = src_norm[:begin_idx]
+        else:
+            header = ""
+
+        content = build_managed_file(header, new_block, "")
+        write_file(dest_path, content)
+        return "created"
+
+    existing = read_file(dest_path)
+    existing_norm = existing.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Remove the exact legacy default shape before a no-managed-block merge
+    # would otherwise preserve the old import as a footer.
+    existing = remove_legacy_default_agents_import(existing)
+    merged = merge_with_managed_block(existing, new_block)
+    merged = remove_legacy_default_agents_import(merged)
+
+    if normalize_for_compare(merged) == normalize_for_compare(existing_norm):
+        return "skipped"
+
+    write_file(dest_path, merged)
+    return "updated"
+
+
+def install_or_update_plain(src_content, dest_path, update_existing=False):
+    """Install or optionally update a plain workflow file.
+
+    Existing plain files are not overwritten by default because target
+    repositories may carry local edits. With update_existing=True, differing
+    files are refreshed from the current skill assets/scripts.
+    """
+    if not os.path.exists(dest_path):
+        write_file(dest_path, src_content)
+        return "created"
+    existing = read_file(dest_path)
+    if normalize_for_compare(existing) == normalize_for_compare(src_content):
+        return "skipped"
+    if update_existing:
+        write_file(dest_path, src_content)
+        return "updated"
+    return "outdated"
+    return "skipped"
+
+
+def verify_refresh_postcondition(repo_path, assets_dir, scripts_dir):
+    """Return managed destinations that do not match this Skill after refresh."""
+    mismatches = []
+    entries = build_install_manifest(assets_dir, scripts_dir)
+    for source, dest_rel in entries:
+        destination = os.path.join(repo_path, dest_rel)
+        if not os.path.isfile(destination):
+            mismatches.append(dest_rel + " (missing)")
+            continue
+        expected = read_file(source)
+        actual = read_file(destination)
+        if dest_rel in {"AGENTS.md", "CLAUDE.md"}:
+            expected_block = get_managed_block_from_asset(expected)
+            actual_block = extract_managed_block(actual)
+            if (
+                actual_block is None
+                or normalize_for_compare(actual_block)
+                != normalize_for_compare(expected_block)
+            ):
+                mismatches.append(dest_rel + " (managed block mismatch)")
+                continue
+        elif normalize_for_compare(actual) != normalize_for_compare(expected):
+            mismatches.append(dest_rel + " (content mismatch)")
+    for dest_rel in RETIRED_WORKFLOW_FILES:
+        if os.path.lexists(os.path.join(repo_path, dest_rel)):
+            mismatches.append(dest_rel + " (retired file remains)")
+    return mismatches
+
+
+def ensure_worktrees_gitignore(repo_path):
+    """Ensure workflow runtime artifacts under .worktrees stay ignored."""
+    gitignore_path = os.path.join(repo_path, ".gitignore")
+    if os.path.exists(gitignore_path):
+        existing = read_file(gitignore_path)
+    else:
+        existing = ""
+
+    existing_lines = existing.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # Older bootstraps or hand-written ignores may ignore the whole directory,
+    # which prevents the negated .gitkeep rule from taking effect.
+    normalized_lines = [
+        line for line in existing_lines
+        if line.strip() not in {".worktrees/", "/.worktrees/"}
+    ]
+    changed_legacy_rule = normalized_lines != existing_lines
+    existing_lines = normalized_lines
+    present = {line.strip() for line in existing_lines}
+    missing = [line for line in WORKTREES_GITIGNORE_LINES if line not in present]
+    if not missing and not changed_legacy_rule:
+        return "skipped"
+
+    lines = [line.rstrip() for line in existing_lines]
+    while lines and lines[-1] == "":
+        lines.pop()
+    if lines:
+        lines.append("")
+    lines.extend(missing)
+    write_file(gitignore_path, "\n".join(lines))
+    return "updated" if existing else "created"
+
+
+def git_info_exclude_path(repo_path):
+    """Return the repo-local git info/exclude path, or None if unavailable."""
+    try:
+        root_result = subprocess.run(
+            ["git", "-C", repo_path, "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if root_result.returncode != 0:
+            return None
+        git_root = os.path.abspath(root_result.stdout.strip())
+        repo_abs = os.path.abspath(repo_path)
+        try:
+            same_root = os.path.samefile(git_root, repo_abs)
+        except OSError:
+            same_root = os.path.normcase(os.path.realpath(git_root)) == os.path.normcase(
+                os.path.realpath(repo_abs)
+            )
+        if not same_root:
+            return None
+        result = subprocess.run(
+            ["git", "-C", repo_path, "rev-parse", "--git-path", "info/exclude"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            path = result.stdout.strip()
+            if not os.path.isabs(path):
+                path = os.path.join(repo_path, path)
+            return path
+    except (FileNotFoundError, OSError):
+        pass
+
+    fallback = os.path.join(repo_path, ".git", "info", "exclude")
+    if os.path.isdir(os.path.join(repo_path, ".git")):
+        return fallback
+    return None
+
+
+def ensure_local_only_exclude(repo_path):
+    """Ignore workflow control-plane files locally through .git/info/exclude."""
+    exclude_path = git_info_exclude_path(repo_path)
+    if not exclude_path:
+        return "warned", "git info/exclude unavailable; initialize git before using --local-only"
+
+    if os.path.exists(exclude_path):
+        existing = read_file(exclude_path)
+    else:
+        existing = ""
+
+    existing_lines = existing.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    present = {line.strip() for line in existing_lines}
+    missing = [line for line in LOCAL_ONLY_EXCLUDE_LINES if line not in present]
+    if not missing:
+        return "skipped", ".git/info/exclude"
+
+    lines = [line.rstrip() for line in existing_lines]
+    while lines and lines[-1] == "":
+        lines.pop()
+    if lines:
+        lines.append("")
+    lines.append("# ai-coding-workflow local-only control plane")
+    lines.extend(missing)
+    write_file(exclude_path, "\n".join(lines))
+    return ("updated" if existing else "created"), ".git/info/exclude"
+
+
+def make_executable(path):
+    """Make a file executable (no-op on Windows, sets mode on Unix)."""
+    try:
+        current = os.stat(path).st_mode
+        os.chmod(path, current | 0o755)
+    except (OSError, AttributeError):
+        pass
+
+
+def _find_bash():
+    """Find a usable bash executable. Returns the path or None."""
+    # On Windows, prefer Git Bash over WSL bash
+    if sys.platform == "win32":
+        candidates = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+    # Fall back to whatever is in PATH
+    return "bash"
+
+
+def validate_shell_script(path):
+    """Run bash -n on a shell script to validate syntax.
+
+    Returns one of:
+        "PASS"         -  bash validated the script successfully.
+        "WARN_SKIPPED"  -  bash is unavailable or broken; skipped validation.
+        "FAIL"         -  bash found a syntax error.
+    """
+    bash_exe = _find_bash()
+    bash_path = _to_bash_path(path)
+    try:
+        result = subprocess.run(
+            [bash_exe, "-n", bash_path],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode == 0:
+            return "PASS"
+        else:
+            stderr_snippet = result.stderr.strip().split("\n")[-1] if result.stderr else ""
+            print(f"  WARNING: bash -n failed for {path}: {stderr_snippet}")
+            return "FAIL"
+    except FileNotFoundError:
+        print(f"  WARNING: bash not found, skipping syntax validation for {path}")
+        return "WARN_SKIPPED"
+    except UnicodeDecodeError as e:
+        print(f"  WARNING: bash -n produced undecodable output for {path}: {e}")
+        return "WARN_SKIPPED"
+    except subprocess.SubprocessError as e:
+        print(f"  WARNING: bash -n subprocess error for {path}: {e}")
+        return "WARN_SKIPPED"
+    except OSError as e:
+        print(f"  WARNING: bash -n OS error for {path}: {e}")
+        return "WARN_SKIPPED"
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Install or update ai-coding-workflow files in a target repository."
+    )
+    parser.add_argument("repo", help="Target repository path.")
+    parser.add_argument(
+        "--update-workflow-files",
+        action="store_true",
+        help="Refresh existing plain ai/* workflow files from the current skill copy.",
+    )
+    parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="Install workflow control-plane files for local use only by updating .git/info/exclude instead of .gitignore.",
+    )
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Print one compact result line instead of per-file status and expanded summaries.",
+    )
+    args = parser.parse_args(argv)
+    return (
+        os.path.abspath(args.repo),
+        args.update_workflow_files,
+        args.local_only,
+        args.summary_only,
+    )
+
+
+def main(argv=None):
+    repo_path, update_workflow_files, local_only, summary_only = parse_args(argv)
+    assets_dir = get_assets_dir()
+    scripts_dir = get_script_dir()
+
+    def detail(message):
+        if not summary_only:
+            print(message)
+
+    if not os.path.isdir(assets_dir):
+        print(f"Error: Assets directory not found: {assets_dir}")
+        return 1
+
+    try:
+        validate_install_manifest(assets_dir, scripts_dir)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
+
+    os.makedirs(repo_path, exist_ok=True)
+
+    results = {
+        "created": [],
+        "updated": [],
+        "outdated": [],
+        "skipped": [],
+        "validated": [],
+        "warned": [],
+        "failed": [],
+        "removed": [],
+    }
+
+    if local_only:
+        detail("  mode: local-only control plane (.git/info/exclude, no .gitignore edits)")
+
+    # Remove retired generated helpers only when the caller explicitly opts in
+    # to refreshing managed workflow files.
+    for dest_rel in RETIRED_WORKFLOW_FILES:
+        dest = os.path.join(repo_path, dest_rel)
+        if not os.path.lexists(dest):
+            continue
+        if update_workflow_files:
+            os.unlink(dest)
+            results["removed"].append(dest_rel)
+            detail(f"  removed: {dest_rel} (retired workflow helper)")
+        else:
+            results["outdated"].append(f"{dest_rel} (retired; use --update-workflow-files)")
+            detail(f"  outdated: {dest_rel} (retired; use --update-workflow-files)")
+
+    # --- Install AGENTS.md (managed) ---
+    src = os.path.join(assets_dir, "AGENTS.md")
+    dest = os.path.join(repo_path, "AGENTS.md")
+    status = install_or_update_agents(read_file(src), dest)
+    results[status].append("AGENTS.md")
+    detail(f"  {status}: AGENTS.md")
+
+    # --- Install compact managed CLAUDE.md ---
+    src = os.path.join(assets_dir, "CLAUDE.md")
+    dest = os.path.join(repo_path, "CLAUDE.md")
+    status = install_or_update_claude(read_file(src), dest)
+    results[status].append("CLAUDE.md")
+    detail(f"  {status}: CLAUDE.md")
+
+    # --- Install direct-copy assets ---
+    for src_name, dest_rel in DIRECT_COPY:
+        src = os.path.join(assets_dir, src_name)
+        dest = os.path.join(repo_path, dest_rel)
+        status = install_or_update_plain(read_file(src), dest, update_workflow_files)
+        results[status].append(dest_rel)
+        detail(f"  {status}: {dest_rel}")
+
+    # --- Install scripts ---
+    for src_name, dest_rel in SCRIPTS:
+        src = os.path.join(scripts_dir, src_name)
+        dest = os.path.join(repo_path, dest_rel)
+        status = install_or_update_plain(read_file(src), dest, update_workflow_files)
+        results[status].append(dest_rel)
+        detail(f"  {status}: {dest_rel}")
+
+        make_executable(dest)
+
+        if not summary_only or status != "skipped":
+            validation = validate_shell_script(dest)
+            if validation == "PASS":
+                results["validated"].append(dest_rel)
+                detail(f"  validated: {dest_rel}")
+            elif validation == "WARN_SKIPPED":
+                results["warned"].append(dest_rel)
+            else:
+                results["failed"].append(dest_rel)
+
+    # --- Install PowerShell helpers ---
+    for src_name, dest_rel in POWERSHELL_SCRIPTS:
+        src = os.path.join(scripts_dir, src_name)
+        dest = os.path.join(repo_path, dest_rel)
+        status = install_or_update_plain(read_file(src), dest, update_workflow_files)
+        results[status].append(dest_rel)
+        detail(f"  {status}: {dest_rel}")
+
+    # --- Install Python helpers ---
+    for src_name, dest_rel in PYTHON_SCRIPTS:
+        src = os.path.join(scripts_dir, src_name)
+        dest = os.path.join(repo_path, dest_rel)
+        status = install_or_update_plain(read_file(src), dest, update_workflow_files)
+        results[status].append(dest_rel)
+        detail(f"  {status}: {dest_rel}")
+
+    # --- Install structured assets (schemas, profiles, examples) ---
+    repo_root = os.path.dirname(assets_dir)
+    for src_rel, dest_rel in SCHEMA_ASSETS + PROFILE_ASSETS + EXAMPLE_ASSETS:
+        src = os.path.join(repo_root, src_rel)
+        dest = os.path.join(repo_path, dest_rel)
+        status = install_or_update_plain(read_file(src), dest, update_workflow_files)
+        results[status].append(dest_rel)
+        detail(f"  {status}: {dest_rel}")
+
+    # --- Create .worktrees/.gitkeep ---
+    worktrees_gitkeep = os.path.join(repo_path, ".worktrees", ".gitkeep")
+    if not os.path.exists(worktrees_gitkeep):
+        os.makedirs(os.path.dirname(worktrees_gitkeep), exist_ok=True)
+        write_file(worktrees_gitkeep, "")
+        results["created"].append(".worktrees/.gitkeep")
+        detail("  created: .worktrees/.gitkeep")
+    else:
+        results["skipped"].append(".worktrees/.gitkeep")
+        detail("  skipped: .worktrees/.gitkeep (already exists)")
+
+    # --- Ensure runtime/control-plane artifacts are ignored ---
+    if local_only:
+        status, label = ensure_local_only_exclude(repo_path)
+        results[status].append(label)
+        detail(f"  {status}: {label} (local-only control-plane ignore)")
+    else:
+        status = ensure_worktrees_gitignore(repo_path)
+        results[status].append(".gitignore")
+        detail(f"  {status}: .gitignore (.worktrees runtime ignore)")
+
+    postcondition_mismatches = []
+    if update_workflow_files:
+        postcondition_mismatches = verify_refresh_postcondition(
+            repo_path, assets_dir, scripts_dir
+        )
+
+    failed = bool(results["failed"] or postcondition_mismatches)
+    if summary_only:
+        print(
+            "workflow_refresh status={} created={} updated={} removed={} "
+            "unchanged={} outdated={} validated={} warned={} failed={} target={}".format(
+                "failed" if failed else "ok",
+                len(results["created"]),
+                len(results["updated"]),
+                len(results["removed"]),
+                len(results["skipped"]),
+                len(results["outdated"]),
+                len(results["validated"]),
+                len(results["warned"]),
+                len(results["failed"]) + len(postcondition_mismatches),
+                repo_path,
+            )
+        )
+        issues = (
+            results["outdated"] + results["failed"] + postcondition_mismatches
+        )
+        if issues:
+            visible = issues[:20]
+            suffix = ",...(+{})".format(len(issues) - 20) if len(issues) > 20 else ""
+            print("workflow_refresh issues={}{}".format(",".join(visible), suffix))
+    else:
+        print("\n=== Installation Summary ===")
+        for label, key in [("Created", "created"), ("Updated", "updated"), ("Removed", "removed"), ("Outdated", "outdated"), ("Skipped", "skipped")]:
+            print(f"  {label}:   {len(results[key])} files")
+            for item in results[key]:
+                print(f"    + {item}")
+        if results["outdated"]:
+            print("  Note: outdated workflow files were not overwritten.")
+            print("        Re-run with --update-workflow-files to refresh local ai/* workflow copies.")
+        print(f"  Validated: {len(results['validated'])} scripts")
+        for item in results["validated"]:
+            print(f"    OK {item}")
+        if results["warned"]:
+            print(f"  Warned:    {len(results['warned'])} item(s)")
+            for item in results["warned"]:
+                print(f"    ! {item}")
+        if results["failed"]:
+            print(f"  Failed:    {len(results['failed'])} scripts")
+            for item in results["failed"]:
+                print(f"    X {item}")
+        if update_workflow_files:
+            if postcondition_mismatches:
+                print("  Refresh verification failed:")
+                for item in postcondition_mismatches:
+                    print(f"    X {item}")
+            else:
+                print("  Refresh verification: PASS")
+        print("\nDone.")
+    if failed:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -136,6 +136,59 @@ test("complex gate tasks require negative counterexamples and fail-closed condit
   assert.equal(validateTaskCard(template).extensions.complex_gate_contract.enabled, true);
 });
 
+test("structured coordination interfaces bind every boundary to participants and validation", () => {
+  const task = createTaskCardTemplate();
+  task.validation = [{
+    id: "interface-test",
+    command: ["npm", "test", "--", "interface"],
+    description: "Exercise the parser-renderer boundary.",
+  }];
+  task.extensions.task_shape = {
+    responsibilities: ["Parse input", "Render output"],
+    participants: [
+      { id: "parser", owner: "worker", responsibilities: ["Produce normalized AST"] },
+      { id: "renderer", owner: "worker", responsibilities: ["Consume AST and render output"] },
+    ],
+    interfaces: [{
+      id: "ast-boundary",
+      producer: "parser",
+      consumer: "renderer",
+      owner: "renderer",
+      contract: "Normalized AST preserves source ranges.",
+      validation_id: "interface-test",
+    }],
+  };
+  const validated = validateTaskCard(task);
+  assert.equal(validated.extensions.task_shape.interfaces[0].owner, "renderer");
+  for (const view of ["audit", "execution"]) {
+    const markdown = renderTaskCardMarkdown(task, { view });
+    assert.match(markdown, /## Coordination Interfaces/);
+    assert.match(markdown, /ast-boundary/);
+    assert.match(markdown, /Normalized AST preserves source ranges/);
+  }
+
+  const unknownOwner = structuredClone(task);
+  unknownOwner.extensions.task_shape.interfaces[0].owner = "coordinator";
+  assert.throws(
+    () => validateTaskCard(unknownOwner),
+    (error) => error instanceof TaskCardError && error.code === "task.invalid_reference" &&
+      error.path.endsWith(".owner"),
+  );
+  const sameEndpoint = structuredClone(task);
+  sameEndpoint.extensions.task_shape.interfaces[0].consumer = "parser";
+  assert.throws(
+    () => validateTaskCard(sameEndpoint),
+    (error) => error instanceof TaskCardError && error.code === "task.invalid_interface",
+  );
+  const missingValidation = structuredClone(task);
+  missingValidation.extensions.task_shape.interfaces[0].validation_id = "missing";
+  assert.throws(
+    () => validateTaskCard(missingValidation),
+    (error) => error instanceof TaskCardError && error.code === "task.invalid_reference" &&
+      error.path.endsWith(".validation_id"),
+  );
+});
+
 test("next-cycle scaffold preserves the complete acceptance and authority floor", () => {
   const current = createTaskCardTemplate();
   current.id = "current-cycle";

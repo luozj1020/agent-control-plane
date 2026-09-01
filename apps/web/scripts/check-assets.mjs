@@ -17,6 +17,9 @@ const scripts = [
   new URL("../task-card-preflight.mjs", import.meta.url),
   new URL("../runtime-environment.mjs", import.meta.url),
   new URL("../runtime-connectivity.mjs", import.meta.url),
+  new URL("../integration-registry.mjs", import.meta.url),
+  new URL("../workflow-core-adapter.mjs", import.meta.url),
+  new URL("../workflow-runtime-protocol.mjs", import.meta.url),
   new URL("../public/app.js", import.meta.url),
   new URL("../public/mode-switch-coordinator.js", import.meta.url),
 ];
@@ -24,7 +27,8 @@ const required = [
   ...scripts,
   new URL("../public/index.html", import.meta.url),
   new URL("../public/styles.css", import.meta.url),
-  new URL("../task-card-v1.schema.json", import.meta.url),
+  new URL("../../../packages/workflow-core/contracts/workflow-contract-v1.json", import.meta.url),
+  new URL("../../../packages/workflow-core/schemas/task-card-v1.schema.json", import.meta.url),
 ];
 
 await Promise.all(required.map((file) => access(file)));

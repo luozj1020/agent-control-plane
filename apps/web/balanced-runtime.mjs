@@ -23,7 +23,17 @@ import {
   BUILTIN_MODE_CATALOG,
 } from "../../packages/contracts/dist/index.js";
 import { createBuiltInAdapterRegistry } from "./agent-adapters.mjs";
+import {
+  appendCoordinationEvent,
+  coordinationDetailForRun,
+  coordinationSummaryForRun,
+} from "./coordination-events.mjs";
+import {
+  classifyObservedRead,
+  normalizeAdapterContainment,
+} from "./adapter-containment.mjs";
 import { normalizeRuntimeEnvironment } from "./runtime-environment.mjs";
+import { resolveRuntimeProtocol } from "./workflow-runtime-protocol.mjs";
 import {
   TaskCardError,
   taskAllowsNoChanges,
@@ -548,8 +558,27 @@ export function createBalancedRuntime(options = {}) {
     join(homedir(), ".agent-control-plane", "balanced-runs");
   const clock = options.clock ?? (() => Date.now());
   const snapshot = options.snapshotWorktree ?? snapshotWorktree;
+  const protocolProvider = options.protocolProvider;
+
+  const recordCoordination = (runDirectory, metadata, kind, input = {}) =>
+    appendCoordinationEvent(
+      runDirectory,
+      {
+        runId: metadata.runId,
+        mode: "balanced",
+        kind,
+        actor: input.actor ?? { type: "control_plane", id: "balanced-runner" },
+        ...input,
+      },
+      { clock },
+    );
+
+  async function workflowProtocol() {
+    return resolveRuntimeProtocol("balanced", protocolProvider);
+  }
 
   async function createRun(input) {
+    const protocol = await workflowProtocol();
     if (!input || typeof input.worktree !== "string" || input.worktree.trim() === "") {
       throw new BalancedRuntimeError("runtime.invalid_input", "An absolute worktree path is required.");
     }
@@ -574,6 +603,10 @@ export function createBalancedRuntime(options = {}) {
     );
     const budget = resolveBudget(catalog, input.budget);
     const runtimeEnvironment = normalizeRuntimeEnvironment(input.runtimeEnvironment);
+    const containment = normalizeAdapterContainment({
+      filesystemIsolation: "post-run-only",
+      ...adapter,
+    }, { requireExtractor: false });
     const runId = `${new Date(clock()).toISOString().replace(/[:.]/g, "-").toLowerCase()}-${task.id.slice(0, 64)}-${randomUUID()}`;
     const runDirectory = join(runtimeRoot, runId);
     await mkdir(runDirectory, { mode: 0o700 });
@@ -583,12 +616,13 @@ export function createBalancedRuntime(options = {}) {
     const metadata = {
       schemaVersion: RUNTIME_SCHEMA_VERSION,
       runId,
-      state: "created",
+      state: protocol.initialState,
       taskId: task.id,
       taskSha256: sha256(contractText),
       worktree,
       adapterId: adapter.id,
       runtimeEnvironment,
+      containment,
       policyRef: policyReference(policy),
       policy,
       budget,
@@ -596,14 +630,33 @@ export function createBalancedRuntime(options = {}) {
       sessionId: null,
       latestReviewPath: null,
       latestReviewSha256: null,
+      workflowContract: {
+        source: protocol.source,
+        version: protocol.contractVersion,
+        sha256: protocol.contractSha256,
+      },
       createdAt: new Date(clock()).toISOString(),
       updatedAt: new Date(clock()).toISOString(),
     };
     await writeJsonAtomic(join(runDirectory, "run.json"), metadata);
-    return { runDirectory, metadata, task, adapter, policy, budget };
+    await recordCoordination(runDirectory, metadata, "run_created", {
+      target: { type: "artifact", id: "run.json" },
+      detail: { state: metadata.state, policyRef: metadata.policyRef },
+    });
+    await recordCoordination(runDirectory, metadata, "artifact_write", {
+      target: { type: "artifact", id: "task.json" },
+      bytes: Buffer.byteLength(contractText),
+      detail: { artifactKind: "frozen_task", sha256: metadata.taskSha256 },
+    });
+    await recordCoordination(runDirectory, metadata, "state_transition", {
+      target: { type: "state", id: metadata.state },
+      detail: { to: metadata.state, round: 0 },
+    });
+    return { runDirectory, metadata, task, adapter, policy, budget, protocol };
   }
 
   async function loadRun(runDirectoryInput) {
+    const protocol = await workflowProtocol();
     const runtimeRoot = await existingRuntimeRoot(runtimeRootConfigured);
     if (!runtimeRoot) {
       throw new BalancedRuntimeError("runtime.path_missing", "Balanced runtime root does not exist.", 404);
@@ -635,11 +688,12 @@ export function createBalancedRuntime(options = {}) {
       adapter,
       policy: validatePolicy(metadata.policy),
       budget: validateBudget(metadata.budget),
+      protocol,
     };
   }
 
   async function executeRoundLocked(context, task, revisionDecision = null) {
-    const { runDirectory, metadata, adapter, policy, budget } = context;
+    const { runDirectory, metadata, adapter, policy, budget, protocol } = context;
     const round = metadata.rounds + 1;
     const roundDirectory = join(runDirectory, "rounds", String(round).padStart(3, "0"));
     await mkdir(roundDirectory, { recursive: true, mode: 0o700 });
@@ -692,6 +746,7 @@ export function createBalancedRuntime(options = {}) {
     let adapterResult;
     let settled = false;
     const pendingEvents = [];
+    const coordinationWrites = [];
     const eventsPath = join(roundDirectory, "events.jsonl");
     const record = (event) => pendingEvents.push({
       schemaVersion: 1,
@@ -787,13 +842,22 @@ export function createBalancedRuntime(options = {}) {
       });
     };
 
-    metadata.state = "running";
+    metadata.state = protocol.activeState;
     metadata.rounds = round;
     metadata.updatedAt = new Date(clock()).toISOString();
     await writeJsonAtomic(join(runDirectory, "run.json"), metadata);
+    await recordCoordination(runDirectory, metadata, "state_transition", {
+      target: { type: "state", id: metadata.state },
+      detail: { to: metadata.state, round },
+    });
     record({ type: "round-started", policyRef: metadata.policyRef, baselineDigest: baseline.digest });
 
     try {
+      await recordCoordination(runDirectory, metadata, "agent_invoke_started", {
+        target: { type: "agent", id: metadata.adapterId },
+        correlationId: `round-${round}`,
+        detail: { round, resumed: Boolean(metadata.sessionId) },
+      });
       controller = await adapter.start({
         worktree: metadata.worktree,
         prompt: buildPrompt(task, { round }),
@@ -811,6 +875,21 @@ export function createBalancedRuntime(options = {}) {
           }
           if (event.type === "completion-ready" && completionReadyAt === 0) completionReadyAt = now;
           record(event);
+          if (event.type === "artifact-read") {
+            coordinationWrites.push(recordCoordination(runDirectory, metadata, "artifact_read", {
+              actor: { type: "agent", id: metadata.adapterId },
+              target: { type: "artifact", id: event.path },
+              measurementSource: "runtime",
+              confidence: "observed",
+              detail: {
+                round,
+                classification: classifyObservedRead(task, event.path),
+                source: event.source ?? metadata.containment.eventSource,
+                tool: event.tool ?? null,
+                coverage: metadata.containment.read,
+              },
+            }));
+          }
         },
       });
       await writeJsonAtomic(join(roundDirectory, "process.json"), {
@@ -1062,6 +1141,7 @@ export function createBalancedRuntime(options = {}) {
     });
     const executionFinishedAt = clock();
     await flushEvents();
+    await Promise.all(coordinationWrites);
     await writeJsonAtomic(join(roundDirectory, "process.json"), {
       schemaVersion: 1,
       state: "exited",
@@ -1073,6 +1153,19 @@ export function createBalancedRuntime(options = {}) {
       finishedAt: new Date(clock()).toISOString(),
     });
     const usage = adapterResult?.usage ?? controller?.usage?.() ?? { totalTokens: 0 };
+    await recordCoordination(runDirectory, metadata, "agent_invoke_completed", {
+      target: { type: "agent", id: metadata.adapterId },
+      correlationId: `round-${round}`,
+      measurementSource: adapterResult?.usage ? "provider_reported" : "runtime",
+      confidence: adapterResult?.usage ? "reported" : "observed",
+      tokens: Number.isSafeInteger(usage.totalTokens) ? usage.totalTokens : undefined,
+      elapsedMilliseconds: Math.max(0, executionFinishedAt - startedAt),
+      detail: {
+        round,
+        exitCode: adapterResult?.exitCode ?? null,
+        terminationReason,
+      },
+    });
     const budgetState =
       terminationReason === "budget_exhausted" ? "failed" : adapterResult?.exitCode === 0 ? "succeeded" : "failed";
     await settleBudget(runDirectory, reservation, budgetState, usage.totalTokens ?? 0);
@@ -1082,18 +1175,27 @@ export function createBalancedRuntime(options = {}) {
       metadata.worktree,
       Math.max(1000, Math.min(policy.hardCapSeconds * 1000, 10 * 60 * 1000)),
     );
+    await recordCoordination(runDirectory, metadata, "validation_completed", {
+      actor: { type: "validator", id: "task-validation" },
+      target: { type: "artifact", id: `rounds/${String(round).padStart(3, "0")}/balanced-review.json` },
+      detail: { round, status: validation.status },
+    });
     const finalSnapshot = await snapshot(metadata.worktree);
     const paths = changedPaths(baseline, finalSnapshot);
     const reviewProjection = buildReviewProjection(task, baseline, finalSnapshot, paths);
     const scope = scopeResult(reviewProjection);
     const hasRequiredChange = taskAllowsNoChanges(task) || paths.length > 0;
-    let roundStatus = "review_pending";
+    let roundStatus = protocol.outcomeStates.ready;
     if (terminationReason && terminationReason !== "completion_ready_converged") {
-      roundStatus = terminationReason === "budget_exhausted" ? "budget_exhausted" : "runtime_blocked";
-    } else if (scope.status !== "passed") roundStatus = "scope_violation";
-    else if (validation.status !== "passed" || !hasRequiredChange) roundStatus = "validation_failed";
+      roundStatus = terminationReason === "budget_exhausted"
+        ? protocol.outcomeStates.budget_failure
+        : protocol.outcomeStates.runtime_failure;
+    } else if (scope.status !== "passed") roundStatus = protocol.outcomeStates.scope_failure;
+    else if (validation.status !== "passed" || !hasRequiredChange) {
+      roundStatus = protocol.outcomeStates.validation_failure;
+    }
     else if (adapterResult?.exitCode !== 0 && terminationReason !== "completion_ready_converged") {
-      roundStatus = "runtime_blocked";
+      roundStatus = protocol.outcomeStates.runtime_failure;
     }
     const ledger = await readLedger(join(runDirectory, "budget-ledger.jsonl"));
     const evidenceBudget = budgetSnapshot(ledger, budget);
@@ -1101,9 +1203,9 @@ export function createBalancedRuntime(options = {}) {
       evidenceBudget.used.downstream < budget.downstreamCalls &&
       evidenceBudget.used.main < budget.mainReviewCalls - budget.reservedFinalReviewCalls;
     const allowedDecisions =
-      roundStatus === "budget_exhausted"
+      roundStatus === protocol.outcomeStates.budget_failure
         ? ["stop"]
-        : roundStatus === "review_pending"
+        : roundStatus === protocol.outcomeStates.ready
           ? ["accept", ...(revisionBudgetAvailable ? ["revise"] : []), "stop"]
           : [...(revisionBudgetAvailable ? ["revise"] : []), "stop"];
     const review = {
@@ -1174,12 +1276,19 @@ export function createBalancedRuntime(options = {}) {
       },
       allowedDecisions,
       nextRoundRequiresRevisionDelta: true,
+      workflowContract: metadata.workflowContract,
       generatedAt: new Date(clock()).toISOString(),
     };
     const reviewPath = join(roundDirectory, "balanced-review.json");
     await writeJsonAtomic(reviewPath, review);
-    const reviewSha256 = sha256(await readFile(reviewPath));
-    metadata.state = roundStatus;
+    const reviewText = await readFile(reviewPath);
+    const reviewSha256 = sha256(reviewText);
+    await recordCoordination(runDirectory, metadata, "artifact_write", {
+      target: { type: "artifact", id: `rounds/${String(round).padStart(3, "0")}/balanced-review.json` },
+      bytes: reviewText.byteLength,
+      detail: { artifactKind: "review_evidence", sha256: reviewSha256, roundStatus },
+    });
+    metadata.state = protocol.reviewState;
     metadata.sessionId = review.sessionId;
     metadata.latestReviewPath = reviewPath;
     metadata.latestReviewSha256 = reviewSha256;
@@ -1187,6 +1296,10 @@ export function createBalancedRuntime(options = {}) {
     metadata.latestRuntimeDiagnostics = adapterResult?.diagnostics ?? null;
     metadata.updatedAt = new Date(clock()).toISOString();
     await writeJsonAtomic(join(runDirectory, "run.json"), metadata);
+    await recordCoordination(runDirectory, metadata, "state_transition", {
+      target: { type: "state", id: metadata.state },
+      detail: { to: metadata.state, round },
+    });
     return { runDirectory, reviewPath, reviewSha256, review };
   }
 
@@ -1199,7 +1312,8 @@ export function createBalancedRuntime(options = {}) {
     const loaded = await loadRun(input.runDirectory);
     return withRunLock(loaded.runDirectory, async () => {
       const metadata = await readJson(join(loaded.runDirectory, "run.json"));
-      if (!["review_pending", "runtime_blocked", "budget_exhausted", "scope_violation", "validation_failed"].includes(metadata.state)) {
+      const legacyReviewState = !metadata.workflowContract && loaded.protocol.evidenceStatuses.has(metadata.state);
+      if (metadata.state !== loaded.protocol.reviewState && !legacyReviewState) {
         throw new BalancedRuntimeError("review.invalid_state", `Run state '${metadata.state}' cannot be reviewed.`, 409);
       }
       if (!metadata.latestReviewPath || !metadata.latestReviewSha256) {
@@ -1221,7 +1335,7 @@ export function createBalancedRuntime(options = {}) {
       if (current.digest !== latestReview.evidence.finalProductDigest) {
         throw new BalancedRuntimeError("review.stale", "Worktree changed after the Balanced review was generated.", 409);
       }
-      if (!["accept", "revise", "stop"].includes(input.decision)) {
+      if (!loaded.protocol.reviewDecisions.has(input.decision)) {
         throw new BalancedRuntimeError("review.invalid_decision", "Decision must be accept, revise, or stop.");
       }
       if (!latestReview.allowedDecisions.includes(input.decision)) {
@@ -1266,17 +1380,30 @@ export function createBalancedRuntime(options = {}) {
         "review-decision.json",
       );
       await writeJsonAtomic(decisionPath, decision);
+      await recordCoordination(loaded.runDirectory, metadata, "review_decision", {
+        actor: { type: "operator", id: "upstream-reviewer" },
+        target: { type: "artifact", id: `rounds/${String(metadata.rounds).padStart(3, "0")}/review-decision.json` },
+        detail: { round: metadata.rounds, decision: input.decision, reviewSha256: metadata.latestReviewSha256 },
+      });
       await settleBudget(loaded.runDirectory, reservation, "succeeded", 0);
       if (input.decision === "revise") {
-        metadata.state = "revision_pending";
+        metadata.state = loaded.protocol.decisionStates.revise;
         metadata.updatedAt = new Date(clock()).toISOString();
         await writeJsonAtomic(join(loaded.runDirectory, "run.json"), metadata);
+        await recordCoordination(loaded.runDirectory, metadata, "state_transition", {
+          target: { type: "state", id: metadata.state },
+          detail: { to: metadata.state, round: metadata.rounds },
+        });
         loaded.metadata = metadata;
         return executeRoundLocked(loaded, revision, decision);
       }
-      metadata.state = input.decision === "accept" ? "accepted" : "stopped";
+      metadata.state = loaded.protocol.decisionStates[input.decision];
       metadata.updatedAt = new Date(clock()).toISOString();
       await writeJsonAtomic(join(loaded.runDirectory, "run.json"), metadata);
+      await recordCoordination(loaded.runDirectory, metadata, "state_transition", {
+        target: { type: "state", id: metadata.state },
+        detail: { to: metadata.state, round: metadata.rounds },
+      });
       return { runDirectory: loaded.runDirectory, decisionPath, decision, state: metadata.state };
     });
   }
@@ -1301,7 +1428,11 @@ export function createBalancedRuntime(options = {}) {
         const metadata = await readJson(join(root, entry.name, "run.json"));
         if (metadata?.schemaVersion === RUNTIME_SCHEMA_VERSION) {
           const ledger = await readLedger(join(root, entry.name, "budget-ledger.jsonl"));
-          runs.push({ ...metadata, budgetState: budgetSnapshot(ledger, metadata.budget) });
+          const coordination = await coordinationSummaryForRun(join(root, entry.name), {
+            ...metadata,
+            mode: "balanced",
+          });
+          runs.push({ ...metadata, budgetState: budgetSnapshot(ledger, metadata.budget), coordination });
         }
       } catch {
         // Corrupt runs remain isolated and do not hide healthy history.
@@ -1310,5 +1441,22 @@ export function createBalancedRuntime(options = {}) {
     return runs.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
-  return Object.freeze({ listRuns, review, run, status });
+  async function coordinationDetail(runId, options = {}) {
+    if (!SAFE_ID.test(runId ?? "")) {
+      throw new BalancedRuntimeError("runtime.unsafe_path", "Run id is invalid.");
+    }
+    const root = await existingRuntimeRoot(runtimeRootConfigured);
+    if (!root) throw new BalancedRuntimeError("runtime.path_missing", "Balanced runtime root does not exist.", 404);
+    const runDirectory = await validateDirectory(resolve(root, runId), "Run directory");
+    const metadata = await readJson(join(runDirectory, "run.json"));
+    if (
+      metadata?.schemaVersion !== RUNTIME_SCHEMA_VERSION || metadata.runId !== runId ||
+      basename(runDirectory) !== runId || resolve(root, runId) !== runDirectory
+    ) {
+      throw new BalancedRuntimeError("runtime.corrupt_run", "Balanced run identity is invalid.", 409);
+    }
+    return coordinationDetailForRun(runDirectory, { ...metadata, mode: "balanced" }, options);
+  }
+
+  return Object.freeze({ coordinationDetail, listRuns, review, run, status });
 }

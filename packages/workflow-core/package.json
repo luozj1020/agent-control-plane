@@ -1,0 +1,12 @@
+{
+  "name": "@agent-control-plane/workflow-core",
+  "version": "1.6.0",
+  "private": true,
+  "description": "Embedded workflow semantics, contracts, runtime tools, and installation assets for Agent Control Plane.",
+  "scripts": {
+    "build": "python3 scripts/workflow-contract.py check",
+    "test": "python3 -m pytest -p no:cacheprovider tests/test_workflow_contract.py tests/test_toolchain_interfaces.py tests/test_bookend_task.py tests/test_run_workflow.py tests/test_install_workflow.py tests/test_install_for_codex.py -q",
+    "test:full": "python3 -m pytest -p no:cacheprovider tests -q",
+    "typecheck": "python3 scripts/workflow-contract.py check"
+  }
+}

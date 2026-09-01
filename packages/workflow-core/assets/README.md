@@ -1,0 +1,1390 @@
+# AI Coding Workflow  -  Local Usage Guide
+
+## Applicability
+
+Use this workflow for non-trivial work when Claude delegation or Codex-native
+subagents materially reduce cost or wall time. Bypass it for questions,
+read-only investigation, and tiny or urgent edits. Record `workflow bypassed:
+<reason>`; do not create a task card or call a model solely to justify routing.
+For bounded single-owner Codex work, including workflow maintenance, emit the
+compact no-delegation decision instead:
+
+```bash
+python ai/aiwf.py direct --kind workflow-maintenance \
+  --reason "refresh direct-mode policy" --path AGENTS.md --check "git diff --check"
+```
+
+This records scope and checks without creating a Task Card, calling Spark, or
+starting Claude.
+
+## Three Execution Modes
+
+| Mode | Owner | Codex intervention | Entry |
+|---|---|---|---|
+| Overnight | durable Claude owner | initial freeze plus final/delta reviews | `python ai/aiwf.py submit TASK.json` |
+| Balanced | Claude for one tuned round | review after each returned round | `python ai/aiwf.py balanced TASK.json` |
+| Interactive | main Codex + native subagents | continuous | select in Codex |
+
+### Overnight
+
+Codex freezes Task JSON, submits once, and ends its inference episode:
+
+```bash
+python ai/aiwf.py submit TASK.json
+```
+
+The command returns `bookend-state.json` immediately while a durable supervisor
+owns Claude exploration, implementation, tests, revisions, validation,
+timeouts, session replacement, and execution epochs. Do not wait or poll after
+submission.
+
+Inspect durable state without polling a model process:
+
+```bash
+python ai/aiwf.py bookend status BOOKEND_STATE_OR_DIR
+```
+
+Only `revision_pending` and strict `semantic_blocked` schedule a new Codex episode:
+
+```bash
+python ai/aiwf.py bookend review-input BOOKEND_STATE_OR_DIR
+```
+
+On accept, `review_ready` is terminal and does not schedule a duplicate review.
+
+### Balanced
+
+`aiwf balanced` runs one Claude round under the established dispatcher timing
+policy: context acquisition, active execution, progress-based extensions, and
+the hard deadline. It then builds deterministic evidence and
+`balanced-review.json` for the still-active Codex thread. Codex accepts, stops,
+or freezes a Revision Delta and starts another tuned round. Balanced is not a
+single fixed-duration checkpoint.
+
+For a revision round, prepare the existing one-use reviewed-continuation
+approval, then run `python ai/aiwf.py balanced NEXT_TASK.json
+--reviewed-continuation APPROVAL`. The approval binds the reviewed worktree
+state and prevents a silent fresh-worktree restart.
+
+### Interactive
+
+The main Codex thread owns planning, decomposition, synthesis, validation, and
+final review while coordinating native explorer/worker/tester/debugger/reviewer
+subagents. Read-only work may fan out; keep one writer unless paths or worktrees
+are provably disjoint. Interactive does not invoke Claude. Optional `aiwf_*`
+agent files specialize native roles but are not required.
+
+`aiwf run` is the full foreground compatibility lifecycle; `aiwf loop` is the
+legacy per-iteration workflow. `submit --mode balanced` is a compatibility-only
+fixed-checkpoint Bookend pilot, not top-level Balanced.
+
+## Installing This Skill for Codex
+
+To make this Skill discoverable by Codex, install it from a cloned copy of `ai-coding-workflow`:
+
+```bash
+python scripts/install_for_codex.py
+```
+
+This copies the Skill to:
+- Windows: `%USERPROFILE%\.codex\skills\ai-coding-workflow`
+- Unix/macOS: `$HOME/.codex/skills/ai-coding-workflow`
+
+Skill installation and project bootstrap are separate. If another repository does not have `ai/dispatch-to-claude.sh`, run the installed Skill bootstrap command in that repository:
+
+```bash
+python ~/.codex/skills/ai-coding-workflow/scripts/install_workflow.py .
+```
+
+If the target repository should use the workflow locally but should not commit
+`ai/`, `.codex/rules/ai-coding-workflow.rules`, `AGENTS.md`, `CLAUDE.md`,
+`.worktrees/`, or `.gitignore` changes, use local-only bootstrap:
+
+```bash
+python ~/.codex/skills/ai-coding-workflow/scripts/install_workflow.py . --local-only
+```
+
+`--local-only` writes the control-plane paths to `.git/info/exclude` and leaves `.gitignore` untouched. `doctor_workflow.py` treats that as a valid local-only ignore configuration.
+
+On Windows PowerShell:
+
+```powershell
+python $env:USERPROFILE\.codex\skills\ai-coding-workflow\scripts\install_workflow.py .
+```
+
+For routine updates, use the convenience wrapper from a cloned `ai-coding-workflow` checkout:
+
+```bash
+python scripts/update_skill.py
+```
+
+`update_skill.py` refreshes the user-level Skill and, when the current repository is already bootstrapped, its local workflow files too. Use `--skill-only` only when intentionally leaving project-local `ai/*` files unchanged. Running `install_workflow.py` without its update flag still reports outdated local files without overwriting them.
+
+Use `python scripts/update_skill.py --project-only` to refresh only the current
+project from the selected source without activating the user-level Skill. Add
+`--bootstrap-repo /path/to/repo` to select another target, `--local-only` to
+keep control-plane ignores in `.git/info/exclude`, and `--doctor` to verify the
+refreshed workflow. The updater also accepts
+`--code-search-services ask|skip|check` for explicit Skill-install service
+behavior and exposes environment setup as
+`python scripts/update_skill.py --auto-setup /path/to/repo [--apply]`.
+
+Bootstrap also manages `.codex/rules/ai-coding-workflow.rules`. Once the project
+is trusted and Codex is restarted, the rule allows the exact standard
+`bash ai/dispatch-to-claude.sh ...` and
+`bash ai/run-codex-spark.sh ...` entrypoints without another human
+confirmation. It deliberately does not allow arbitrary Bash, `scripts/*`
+source helpers, environment-wrapped commands, merge, deployment, or destructive
+actions. Spark remains advisory and Codex retains routing and semantic review.
+Use `--update-workflow-files` to add or refresh this rule in an older project.
+Sandbox/network handoff exits 75 and prints a stable host retry beginning with
+the same approved launcher prefix. Spark accepts
+`--routing-event implementation` as a `next-phase` alias. Doctor treats stale
+launchers as an error; refresh them instead of prepending environment variables.
+After host authority is granted, keep that stable launcher prefix:
+
+```bash
+bash ai/dispatch-to-claude.sh CARD --execution-env host \
+  --dirty-source-mode snapshot \
+  --tool-profile minimal-builder \
+  --retry-in-place-task-id TASK_ID
+```
+
+Include `--dirty-source-mode snapshot` only for a snapshot handoff. Use
+`--reviewed-continuation APPROVAL` for a reviewed continuation. Legacy
+environment selectors remain compatible, but use `--tool-profile` for a fixed
+capability set. Environment-prefixed commands do not match the narrow project
+rule and can trigger another approval. Handoff receipts mark CLI retry args
+authoritative and the environment map legacy.
+
+The dispatcher prints the canonical `Runtime ID`. Dispatcher and monitor share
+the same validator, so a safe custom preflight or DAG ID is monitorable without
+adding a `claude-` prefix.
+
+If running from the installed Skill while using a separate clone as the update source:
+
+```bash
+python ~/.codex/skills/ai-coding-workflow/scripts/update_skill.py \
+  --source /path/to/ai-coding-workflow \
+  --bootstrap-current
+```
+
+## Legacy Foreground Details
+
+The remainder of this guide documents lower-level and compatibility helpers.
+Its Direction Review and blocking-monitor descriptions do not override the
+production Bookend path above.
+
+This repository has been set up with a multi-agent AI coding workflow. The workflow splits software work between planning, execution, and review agents in an explicit loop:
+
+- **Codex / GPT**  -  core planner, frozen-plan owner, high-risk exception owner, and semantic reviewer
+- **Claude Code**  -  implementation/revision Builder and conditional Checker; Planner is explicit opt-in
+- **Codex Spark**  -  opt-in structured router/monitor; successful routing output stays short and direct
+- **Large-repo mode**  -  optional managed worktree reuse and reduced untracked-file scans for slow filesystems
+- **Claude-compatible auxiliary model**  -  optional cost-efficient execution or exhaustive review helper
+- **LSP / Locator / CodeGraph / MCP**  -  low-token code intelligence with bounded large-repo lookup before broad reads
+
+**Core principle:** for JSON-backed delegation, Codex freezes and reviews the
+Task JSON; `aiwf run` deterministically renders Claude's execution card. Direct
+local work uses `aiwf direct`, not a Task Card. Claude edits product files by
+default only after delegation. Deterministic tools generate route, review,
+freeze, receipt, control artifacts, and rendered cards; Spark remains advisory.
+
+For non-trivial changes, split Claude work into two roles:
+
+- **Builder Claude** implements the scoped change and reports the implementation direction. It does not write acceptance tests or run broad suites unless the task card explicitly allows a narrow sanity check.
+- **Checker/Test Claude** is conditional after Codex accepts the Builder direction. Use it for assigned tests, long validation, or large evidence processing; use local deterministic checks when they close acceptance.
+
+Task cards can require **Direction / Boundary Acknowledgement** before editing. Claude restates the goal, scope, out-of-scope boundaries, likely files, acceptance criteria, testing responsibility, confusions, and risks. This is a gate, not a discussion loop: at most one blocking acknowledgement is allowed per task or phase unless Codex materially changes the goal, scope, boundaries, or risk. Codex answers with exactly one decision: proceed, narrow-once/re-dispatch, split, or stop.
+
+`aiwf run task.json` validates, routes, and deterministically renders the short execution card from JSON, then
+dispatches it by default without a second human confirmation. Use
+`aiwf run task.json --preview` for a zero-model inspection. This removes only
+the ordinary Task Card dispatch pause: unresolved product/API/data-model
+decisions and destructive/high-impact actions still require explicit human
+authority.
+
+Use `ai/init-spec.py` for ambiguous feature, UX, API, or data-model work, then fill `Spec Gate` in the task card. `ai/init-plan.py` creates `task_plan.md` with `### Task N: ...` sections; use `ai/plan-to-task-cards.py` to turn reviewed task sections into scoped task cards. Use `Root Cause Gate` before bugfixes/regressions, `Test-First / TDD Contract` when red-green evidence matters, and `Finish Branch Gate` before claiming work is ready for human merge.
+
+Spark supplies structured routing or monitoring only when that replaces Codex
+work. Invalid output falls back to the deterministic Claude-first route. Spark
+remains advisory, free in economics reports, and unable to approve or merge.
+
+Phase ownership is explicit:
+
+| Phase | Codex owns | Claude owns |
+|-------|------------|-------------|
+| Observe / Plan | Goal/risk boundary in the Task Card and one adversarial contract review | Explicit-opt-in structured solution contract and bounded exploration |
+| Builder Execute | Compact direction review only | Default exploratory, batch, or frozen-solution implementation |
+| Direction Review | Wait, revise, split, dispatch checker-test, or threshold-based takeover decision | Report blockers and avoid repeated confirmation loops |
+| Checker/Test | Validation task dispatch and evidence review | Assigned tests, assigned validation, failure evidence |
+| Final Review | Accept / revise / split / reject; human merge stays separate | N/A unless re-dispatched |
+
+Claude-first source-writing is the default regardless of predicted lines. Broad
+work starts with a short Codex plan and deterministic card generation; frozen,
+mechanical, test, and validation work remains Claude-owned. Confirmed high-risk core semantics may
+bias toward Codex. Portfolio concurrency is managed by separate user terminals,
+not by the Skill.
+
+`solution-planner` is never automatic. Only an explicit `solution_planner_opt_in=true` selects it; Claude then writes `solution-contract.draft.json`, Codex performs one adversarial review, and the deterministic helper freezes the accepted contract.
+
+Runtime role propagation is explicit after routing: `solution-planner` selects
+`solution-planning`, `exploratory-builder` selects `exploratory`, `batch-builder`
+selects `batch`, and `execution-builder` selects `execution-only`. These are
+Builder modes; JSON-backed cards carry their task/builder modes in deterministic
+metadata, while legacy tables remain accepted. Known role aliases are normalized
+before tool probing, and conflicts fail before Claude starts.
+
+After Codex accepts a Builder's main direction, prefer one reviewed same-worktree
+Claude continuation. Legacy `Mode = revision` is normalized as Builder and can
+transition directly to a reviewed `checker-test` continuation. A deterministic correction may route to Codex only when it
+already holds the exact context and no new decision is needed.
+
+For sequential slices under one frozen contract, create a one-use Context Lease
+with `python ai/context-lease.py create ...`, then dispatch with
+`--context-lease LEASE --continuation-kind next-slice`. The lease reuses the
+recorded session/worktree but rebinds the sandbox and exact write scope. Create
+a new hash-bound lease after every accepted slice. After the default three warm
+calls, the dispatcher automatically derives a bounded, receipt-bound checkpoint
+and gives a fresh session only a delta execution capsule. The checkpoint retains
+accepted state references rather than source, diffs, or transcript text; a
+caller-supplied `--rehydrate-from` remains available as a legacy-unbound
+compatibility path. Dispatcher calls
+use `claude --bare`; `CLAUDE.md` is not model context for this path, and
+`TASK_CARD_FULL.md` remains audit-only.
+
+Before rendering the execution card, supported dispatchers run the local,
+model-free `ai/compile-skill-context.py`. It selects a small set of
+provenance-bound procedural, retrieval, and validation cues from the chosen
+task-card components and writes `*.skill-context.md` plus a JSON receipt under
+`.worktrees/`. It cannot add authority or replace the frozen write scope,
+acceptance, validation, or stop conditions. The packet is bound to the exact
+full-card digest before it can be embedded in `CLAUDE_TASK_CARD.md`.
+
+The default `coverage` strategy combines top-down preset/gate candidates with
+bottom-up task-fact candidates, then includes rescue cues only for uncovered
+procedural labels. Its receipt records candidate routes, source-heading spans,
+marginal coverage, and zero-marginal exclusions. Use
+`--context-compile-strategy anchors-only` only as a paired benchmark ablation;
+it intentionally disables rescue and is not the normal dispatch default.
+
+When Claude appears stuck, first classify the cause before blaming execution: task-card ambiguity, mixed-role assignment, dirty source/stale HEAD, permission or approval blocker, long-running validation, missing progress artifact, external environment, or true no-progress.
+
+Permission or approval blockers include sandbox write denial, forbidden files, missing CLI authentication, network-restricted commands, commands that need human approval, and configured "do not read or modify" paths. These should be recorded in progress/report artifacts and handled as environment or orchestration blockers unless Claude ignored an available allowed path.
+
+Dirty source or stale HEAD is handled the same way: it blocks reliable delegation, but it is not by itself permission for Codex to take over implementation. Prefer a clean accepted base. When the uncommitted tracked/untracked state is intentionally the baseline, `bash ai/dispatch-to-claude.sh CARD --dirty-source-mode snapshot` creates a hash-bound ephemeral commit through a temporary index, leaves source HEAD/index untouched, and records a receipt before starting a fresh isolated worktree. The environment selector remains compatibility-only because a prefixed assignment cannot match the narrow trusted-project launcher rule.
+
+## Directory Structure
+
+```
+ai/
+  task-card-components/     # Small catalog plus composable card bodies
+  compose_task_card.py      # Zero-model task-card selector/composer
+  workflow_economics.py     # Delegation-overhead and route calibration
+  parse-spark-output.py     # Stable Spark stdout envelope parser
+  task-card-template.md     # Legacy monolithic compatibility template
+  evidence-packet-template.md # Template for documenting execution results
+  spec-template.md           # Template for lightweight specs
+  plan-task-template.md       # Persistent task plan template
+  plan-findings-template.md   # Persistent findings template
+  plan-progress-template.md   # Persistent progress template
+  dispatch-to-claude.sh       # Dispatches task cards to Claude Code
+  check-worktree.sh           # Runs checker-only validation and writes a report
+  validate-worktree-diff.py   # Checks tracked, staged, and untracked file boundaries
+  build-scoped-handoff.py     # Emits a human-reviewable product-only patch
+  locate-code.py              # Low-token locator; healthy CodeGraph is queried by default
+  review-with-codex.sh        # Sends evidence to Codex/GPT for review
+  run-codex-spark.sh          # Optional gpt-5.3-codex-spark auxiliary runner
+  run-parallel-loop.sh        # Experimental parallel dispatch helper
+  run-loop.sh                 # Optional loop runner (dispatch + review)
+  status-claude.sh            # Inspect Claude dispatch progress/artifacts
+  watch-claude.sh             # Stream Claude progress in a terminal
+  monitor-claude.sh           # Block on dispatcher events or request one decision
+  kill-claude.sh              # Identity-confirm and stop a Claude process tree
+  cleanup-worktree.sh         # Remove stopped Claude worktrees safely
+  pwsh-utf8.ps1                # Configure PowerShell UTF-8 session defaults
+  doctor_workflow.py          # Read-only readiness check for dispatch/review loop
+  code-search-service.py      # Optional Zoekt/Sourcegraph setup and diagnostics
+  clean_runtime.py            # Preview/remove ignored runtime artifacts
+  install_context_tools.py    # Check/install context tools (LSP, linting)
+  summarize-loop-run.py       # Summarize workflow quality, speed, cost, and stability
+  benchmark-loop-runs.py      # Aggregate loop summaries into a lightweight benchmark
+  init-spec.py                # Create ai/specs/YYYY-MM-DD--slug.md
+  plan-to-task-cards.py       # Generate task cards from reviewed plan sections
+  init-plan.py                # Create ai/plans/<task-id>/ planning files
+  session-catchup.py          # Generate resume-context.md from plan and artifacts
+  validate-parallel-plan.py   # Validate parallel DAG plan JSON against schema v1
+  task_schema.py              # Shared stdlib loader, validator, and profile composer
+  compose-profiles.py         # Compose profiles with a task instance
+  lint-task-card.py           # Validate a task card JSON against schema and profiles
+  render-task-card.py         # Render a task card JSON as Markdown
+  README.md                   # This file
+  schemas/
+    task-card-v1.schema.json  # Normative JSON Schema for task cards v1
+  profiles/
+    base.json                 # Base profile with sensible defaults
+    bugfix.json               # Bugfix profile narrowing scope and risk defaults
+  examples/
+    fix-typo-in-readme.json   # Example task card
+.worktrees/                   # Isolated git worktrees for execution
+ai/plans/                     # Persistent planning files for long-running tasks
+AGENTS.md                     # Shared agent rules
+CLAUDE.md                     # Claude Code configuration
+```
+
+## Quick Start
+
+### JSON Task Cards (primary delegated path)
+
+For delegated `aiwf run` work, Task JSON is the single task contract. Codex
+freezes/reviews that JSON; the workflow composes profiles and deterministically
+renders `delegation-task-card.md` for Claude. Do not hand-edit the rendered
+Markdown card: it is a disposable execution projection, not a second source of
+truth.
+
+```bash
+python ai/aiwf.py run tasks/PROJ-123.json --preview
+
+# Inspect the same deterministic projection without dispatching.
+python ai/render-task-card.py tasks/PROJ-123.json --view execution
+```
+
+The execution projection contains the task ID, goal, scope, acceptance,
+validation, top-level stop conditions, and only context facts that are actually
+available (such as symbols or an interface signature). It intentionally omits
+the audit-only identity table, full handoff, static Builder protocol, progress
+checklist, and duplicated target/forbidden-path context. Spark remains advisory
+and cannot write or redefine the Task JSON.
+
+```bash
+# Lint a task card JSON
+python ai/lint-task-card.py ai/task-cards/PROJ-123.json
+
+# Compose profiles and merge with task instance
+python ai/compose-profiles.py ai/task-cards/PROJ-123.json --output composed.json
+
+# Render as Markdown (audit for humans, execution for Claude)
+python ai/render-task-card.py ai/task-cards/PROJ-123.json --view audit
+python ai/render-task-card.py ai/task-cards/PROJ-123.json --view execution
+```
+
+Key behaviors:
+- **JSON is source of truth** whenever it exists for a delegated task. Legacy hand-authored Markdown cards remain supported only for explicit compatibility flows.
+- **Audit view** includes risk, extensions, full handoff. **Execution view** is a minimal JSON projection with conditional execution context.
+
+### Workflow State IR (opt-in)
+
+Phase 1 can materialize a model-independent state and a replayable semantic
+event log without changing the existing Markdown dispatch boundary:
+
+```bash
+python ai/worktree_state_hash.py --worktree .
+python ai/init-workflow-state.py \
+  --task task.json \
+  --run-dir .ai-workflow/runs/T-17 \
+  --repository-state-hash sha256:<hash-from-previous-command>
+python ai/validate-workflow-state.py \
+  --state .ai-workflow/runs/T-17/WORKFLOW_STATE.json \
+  --events .ai-workflow/runs/T-17/WORKFLOW_EVENTS.jsonl
+python ai/render-task-card-from-state.py \
+  --state .ai-workflow/runs/T-17/WORKFLOW_STATE.json \
+  --output .ai-workflow/runs/T-17/task-card.md
+```
+
+Apply changes with `ai/apply-workflow-delta.py`. Its input is a small JSON
+envelope containing `schema_version`, the exact `base_state_id`, and one or
+more `{event_type, payload}` entries. A stale base, illegal phase transition,
+or silent overwrite of a frozen decision fails closed. The validator recomputes
+the state hash and replays the full event log before accepting the artifact.
+`repository_state_hash` and every evidence reference must be a canonical
+`sha256:<64 lowercase hex>` identifier. Evidence attached to a decision,
+rejected hypothesis, or acceptance item must already be registered in the
+top-level `state.evidence_refs` collection.
+
+State updates persist the event log before the derived state file. If a process
+stops between those writes, preview and recover the state only from the validated
+event chain:
+
+```bash
+python ai/recover-workflow-state.py \
+  --state .ai-workflow/runs/T-17/WORKFLOW_STATE.json \
+  --events .ai-workflow/runs/T-17/WORKFLOW_EVENTS.jsonl \
+  --preview
+python ai/recover-workflow-state.py \
+  --state .ai-workflow/runs/T-17/WORKFLOW_STATE.json \
+  --events .ai-workflow/runs/T-17/WORKFLOW_EVENTS.jsonl \
+  --apply
+```
+
+Only a missing state or a state behind a valid event tail is recoverable.
+State-ahead and diverged histories fail closed. Apply mode atomically replaces
+the derived state and writes `WORKFLOW_RECOVERY_RECEIPT.json`.
+
+Build and validate a Phase 2 cross-model handoff after the target state changes:
+
+```bash
+python ai/build-handoff-delta.py \
+  --base .ai-workflow/runs/T-17/BASE_STATE.json \
+  --target .ai-workflow/runs/T-17/WORKFLOW_STATE.json \
+  --events .ai-workflow/runs/T-17/WORKFLOW_EVENTS.jsonl \
+  --output .ai-workflow/runs/T-17/HANDOFF_DELTA.json
+python ai/validate-handoff-ack.py \
+  --base-state .ai-workflow/runs/T-17/BASE_STATE.json \
+  --state .ai-workflow/runs/T-17/WORKFLOW_STATE.json \
+  --delta .ai-workflow/runs/T-17/HANDOFF_DELTA.json \
+  --events .ai-workflow/runs/T-17/WORKFLOW_EVENTS.jsonl \
+  --ack .ai-workflow/runs/T-17/HANDOFF_ACK.json \
+  --receiver-state-id sha256:<receiver-base-state-id>
+```
+
+ACKs are limited to 8192 UTF-8 bytes and one repair attempt. Missing frozen
+constraints or decisions, unresolved questions, contradictions, requested
+context, and writes outside `next_action.allowed_paths` keep execution closed
+and emit `HANDOFF_ACK_REPAIR.json`. The receiver must author one corrected ACK;
+`ai/merge-handoff-ack.py` combines its explicit acknowledgements with the first
+ACK. The event log must prove a continuous base-to-target ancestry. State,
+ancestry, or Delta mismatches are rejected without automatic repair.
+
+### Rejected Hypothesis Ledger (opt-in)
+
+Phase 3 stores negative investigation knowledge in
+`.ai-workflow/runs/<run-id>/REJECTED_HYPOTHESES.json`. Rejecting or reopening a
+hypothesis synchronizes the ledger with State IR and its semantic event log:
+
+```bash
+python ai/update-hypothesis-ledger.py \
+  --operation reject \
+  --input rejected-hypothesis-input.json \
+  --ledger .ai-workflow/runs/T-17/REJECTED_HYPOTHESES.json \
+  --state .ai-workflow/runs/T-17/WORKFLOW_STATE.json \
+  --state-events .ai-workflow/runs/T-17/WORKFLOW_EVENTS.jsonl \
+  --actor claude-builder
+python ai/check-revisited-hypothesis.py \
+  --ledger .ai-workflow/runs/T-17/REJECTED_HYPOTHESES.json \
+  --proposal proposed-hypothesis.json \
+  --review-output .ai-workflow/runs/T-17/relevant-rejected-hypotheses.json
+```
+
+Every rejection requires Evidence already referenced by State IR. Exact or
+explicitly linked repeats without new Evidence are recorded and rejected.
+Similar wording produces `possible-repeat` for bounded review rather than an
+automatic semantic identity claim. Reopening requires new Evidence, a reason,
+and explicit confirmation that the reopen condition is met. Review output is
+scope-filtered and capped; revisions do not receive the full historical ledger.
+Phase 2 handoffs carry successful reopen transitions in the explicit
+`reopened_hypotheses` Delta field.
+
+### Evidence Object Store (opt-in)
+
+Phase 4 stores immutable Evidence Objects under
+`.ai-workflow/objects/<digest-prefix>/<digest-rest>.json`. Object identity binds
+content, provenance, selector, and invalidation dependencies:
+
+```bash
+python ai/evidence-store.py put \
+  --metadata evidence-metadata.json \
+  --content optimizer-slice.txt \
+  --encoding utf-8
+python ai/evidence-store.py packet \
+  --object-id sha256:<object-id> \
+  --output .ai-workflow/runs/T-17/evidence-refs.json
+python ai/evidence-store.py read \
+  --object-id sha256:<object-id> \
+  --receiver claude-session-28 \
+  --receipt-output .ai-workflow/runs/T-17/evidence-read-receipt.json
+```
+
+Reference packets contain metadata references only and set
+`inline_content=false`; every reference is resolved before the packet is
+written. Missing, corrupted, stale, or unknown references fail explicitly.
+Receiver metrics distinguish the first successful read (`miss`) from subsequent
+reads (`hit`) and expose a known-read cache-hit rate.
+
+Evaluate file, symbol, commit, build configuration, validation command, and
+worktree dependencies with:
+
+```bash
+python ai/evidence-invalidate.py \
+  --current current-evidence-context.json \
+  --object-id sha256:<object-id> \
+  --apply
+```
+
+Validity is stored in a sidecar, leaving the content-addressed object immutable.
+Rechecking matching repository facts restores `valid` status without rewriting
+the object. Changes to unrelated paths do not invalidate path-bound evidence.
+
+### Pull Context Broker (opt-in)
+
+Phase 5 lets a receiving model request bounded repository context after the
+initial handoff. The request must bind the exact current Workflow State ID:
+
+```bash
+python ai/context-broker.py request \
+  --state WORKFLOW_STATE.json \
+  --query context-query.json \
+  --output context-response.json
+```
+
+The broker first reuses valid Phase 4 Evidence Objects, then generates only
+missing symbol definitions, callers, callees, related tests, or build-rule
+slices with deterministic local repository scans. Responses contain references,
+not inline content. `max_bytes` budgets referenced evidence content by whole
+object; objects are omitted rather than text-truncated. Every unresolved slot is
+classified as `not-found`, `stale`, `permission-denied`, or `budget-exceeded`.
+The optional query `role` and Workflow State phase determine result priority.
+Definition, test, and build matches are labeled `exact-text-candidate`; caller
+and callee results are labeled `bounded-lexical-candidate`. Neither label is a
+semantic proof, so correctness-critical consumers should confirm candidates
+with LSP, CodeGraph, compilation, or tests.
+When `state.next_action.allowed_paths` is non-empty it is a hard Broker read
+scope. An empty list means no additional State-level read restriction; operating
+system permissions and the explicitly selected repository remain authoritative.
+
+### Acceptance, ownership continuity, and communication routing (opt-in)
+
+Build the state-bound Acceptance Graph and changed-only review packet, then
+validate the Review Receipt against both exact hashes:
+
+```bash
+python ai/build-acceptance-graph.py --state WORKFLOW_STATE.json \
+  --store .ai-workflow/objects -o ACCEPTANCE_GRAPH.json
+python ai/build-delta-review-packet.py --graph ACCEPTANCE_GRAPH.json \
+  --previous-graph ACCEPTANCE_GRAPH.previous.json \
+  --receipt REVIEW_RECEIPT.previous.json -o DELTA_REVIEW_PACKET.json
+python ai/validate-review-receipt.py --receipt REVIEW_RECEIPT.json \
+  --graph ACCEPTANCE_GRAPH.json --packet DELTA_REVIEW_PACKET.json
+```
+
+Pass these artifacts to `build-acceptance-bundle.py` (or export the matching
+`AI_WORKFLOW_*_FILE` paths for dispatch) to produce the compact Codex entry
+point. `aiwf review-tier` expands only changed, failing, contradictory,
+reopened, uncovered, or semantic-risk acceptance IDs. Fully supported unchanged
+items record deterministic Checker/deep-review skips while full evidence stays
+file-backed.
+
+For a revision or test fix, create a strict ownership request and select the
+continuation before opening another model session:
+
+```bash
+python ai/select-continuation-owner.py --request OWNER_REQUEST.json \
+  --previous-lease OWNER_LEASE.previous.json -o OWNER_LEASE.json
+```
+
+`resume-required` means the recorded session must be resumed first. If Claude
+returns conversation/session not found, the dispatcher records that failed
+resume as a non-model failure and automatically makes exactly one fresh-session
+attempt with the same owner, task, worktree, and write scope. Other resume
+failures remain terminal. Advisor is skipped without semantic blockers and
+Reviewer is skipped without new immutable evidence.
+
+Reviewed continuation may additionally bind `--delta-review-packet`, bounded
+`--unresolved-finding`, and immutable `--new-validation-ref sha256:...` values.
+The one-use approval records baseline/delta hashes and does not repeat the full
+prior task card. Repository context cache entries created with `--repo`,
+`--file`, `--symbol`, and `--tool-version` fail reuse after HEAD, content,
+symbol-set, or tool-version drift.
+
+Exact-path write enforcement stages writable copies outside the worktree and
+binds only those copies over the declared destinations inside the read-only
+sandbox. Before model interaction, the dispatcher performs a real write probe
+through that final mount layout. A read-only allowed path therefore terminates
+as an environment blocker instead of consuming a Claude round; only
+receipt-listed staged paths are synchronized back. The task also receives a
+writable `~/.claude/session-env` mount. When built-in Edit needs a neighboring
+temporary file or Write is unavailable, the generated prompt directs Claude to
+create complete replacement content under `$TMPDIR` and invoke the
+receipt-validated `write-approved-file.py`. It also supports old/new fragment
+files, but writes only when the old bytes match exactly once. Zero matches,
+multiple matches, and undeclared files fail without writing.
+
+Estimate Handoff Tax from observed run events, then calibrate it with an
+explicit reviewed cost policy:
+
+```bash
+python ai/estimate-handoff-tax.py run-events.jsonl --task-type builder \
+  -o HANDOFF_TAX.json
+python ai/calibrate-handoff-routing.py --estimate HANDOFF_TAX.json \
+  --policy handoff-cost-policy.json -o HANDOFF_ROUTING_CALIBRATION.json
+```
+
+The Router applies only `observed-calibration` with enough complete samples.
+Unknown data remains `unknown`/`canary`. Spark may advise task shape when
+explicitly requested, but cannot supply authoritative tax or override explicit
+human ownership.
+
+- **Conflict hard-fail.** Profile composition raises on conflicting scalars; use `lint-task-card.py` to catch before dispatch.
+- Schemas live at `ai/schemas/`, profiles at `ai/profiles/`, examples at `ai/examples/`.
+
+### 1. Legacy Markdown Cards (explicit compatibility only)
+
+The JSON-backed `aiwf run` path does not use this step: it renders the
+execution card directly from reviewed Task JSON. For an explicit legacy
+Markdown compatibility flow, Codex can select a compact preset and material
+gates, then use the deterministic composer:
+
+```bash
+python ai/compose_task_card.py --select-from ai/plans/PROJ-123/task-facts.json \
+  --output ai/task-cards/PROJ-123.md
+# Codex fast-path facts return skip_card=true and create no delegation card.
+python ai/compose_task_card.py --preset builder --output ai/task-cards/PROJ-123.md
+# Add --gate root-cause, for example, only when applicable.
+```
+
+Fill the generated legacy card only in that compatibility flow. The legacy full
+template remains compatibility-only.
+
+For bounded loops, fill `Goal Loop Contract` in the task card. Prefer deterministic fields such as success signal, max attempts, repeated-failure threshold, no-improvement threshold, regression stop rule, required evidence, and benchmark tags. Use `Spec Gate` before broad ambiguous work, `Root Cause Gate` before bugfixes/regression fixes, `Test-First / TDD Contract` when red-green evidence matters, and `Finish Branch Gate` before claiming work ready for merge. Use `Advisor Gate` when a stronger model, Codex reviewer, or human expert should advise before risky work; record timing, call caps, output budget, result visibility, conflict reconciliation, and fallback behavior. Leave `Codex Spark Gate` at `auto` when Spark should perform low-cost task-size classification, task-card audit, plan splitting, validation planning, failure triage, or review/evidence checking, with auto-disable on Spark unavailability. Use micro-builder only after explicit tiny-scope authorization. Use `Unknowns` to record blindspot scan requests, questions that would change architecture, reference examples, and where Claude should record deviations from plan.
+
+For longer tasks, create persistent planning files:
+
+```bash
+python ai/init-plan.py PROJ-123
+```
+
+To recover after context loss or `/clear`:
+
+```bash
+python ai/session-catchup.py --plan PROJ-123
+```
+
+### 2. Dispatch Builder Claude
+
+```bash
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+For delegated implementation, use `builder`. State whether deterministic local checks are sufficient or the conditional Checker value gate requires a separate `checker-test` task.
+
+This creates an isolated worktree under `.worktrees/`, runs Claude Code, and saves these artifacts:
+
+If Claude Code is not installed, the rest of the workflow files remain useful for planning, review, and readiness checks. Dispatch execution requires the `claude` command; the dispatcher checks for it before creating a worktree.
+
+**Proxy behavior:** `dispatch-to-claude.sh` runs Claude Code with common proxy environment variables cleared by default (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and lowercase variants). This lets Codex keep using your shell proxy while Claude Code goes direct. If Claude Code must inherit the proxy, run:
+
+```bash
+CLAUDE_CODE_PROXY_MODE=inherit bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+**Network diagnostics:** by default the dispatcher does not inspect network state. To record metadata-only socket snapshots for the Claude process and its child processes, run:
+
+```bash
+CLAUDE_CODE_NETWORK_MONITOR=1 bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+This creates `*.network.log` with proxy mode, redacted proxy settings, tool availability, and per-heartbeat socket summaries such as `established`, `syn_sent`, and `close_wait`. It does not capture packet contents, prompts, request bodies, or tokens. To add an explicit connectivity probe, set `CLAUDE_CODE_NETWORK_HEALTHCHECK_URL`; the dispatcher will run a bounded `curl -I` healthcheck and store only its status/output in the network log.
+
+| Artifact | Description |
+|----------|-------------|
+| `*.result.json` | Raw Claude JSON output |
+| `*.status.txt` | Claude stderr / execution log |
+| `*.network.log` | Optional metadata-only network diagnostics when `CLAUDE_CODE_NETWORK_MONITOR=1` |
+| `*.diffstat.txt` | `git diff --stat` for tracked files |
+| `*.diff` | Full diff, including untracked implementation files |
+| `*.checker-report.md` | Checker-only validation report from `ai/check-worktree.sh` |
+| `*.validation-receipt.json` | Ordered aggregate receipt for bounded read-only validation fan-out |
+| `*.checker-logs/` | Full logs for checker commands |
+| `*.scoped.patch` | Patch from the execution baseline containing only approved product paths |
+| `*.scoped-handoff.json` | Baseline hashes, file list, dirty-snapshot warning, and human apply commands |
+| `*.source-status.txt` | Source repo state before dispatch |
+| `*.worktree-status.txt` | Worktree state after execution |
+| `*.untracked.txt` | Listing and patch evidence for untracked files |
+| `*.usage.txt` | Claude token/cost usage summary |
+| `*.report.md` | Claude modification report for human/Codex review |
+| `*.claude-progress.md` | Claude self-reported milestone progress for status display and review evidence |
+| `*.pid` | Transient PID hint while active; removed after confirmed cleanup |
+| `*.process-termination.json` | Identity-bound process-tree termination evidence |
+| `*.dispatcher-abnormal-exit.json` | Catchable abnormal-exit terminal evidence |
+| `*.progress.log` | Dispatch heartbeat, timeout, and completion log |
+| `*.review.txt` | Persisted Codex review output |
+| `*.codex-events.jsonl` | Raw Codex JSON events when available |
+| `*.codex-usage.txt` | Codex review token/cost usage summary when available |
+| `*.acceptance-bundle.json` | Compact acceptance index, review expansion reasons, deterministic skip recommendation, and file-backed evidence pointers |
+
+It does **not** merge automatically.
+
+### Default-On Optional Codex Spark Auxiliary
+
+When the task card leaves `Codex Spark Gate` at `auto`, run Spark as a low-cost auxiliary for eligible tasks. Spark is optional support: if the CLI, model access, auth, network, Spark quota, or local helper initialization is unavailable, the helper writes an auto-disabled report and exits 0 so the main Claude/Codex workflow can continue.
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode review-only
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode task-card-audit
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode task-card-audit \
+  --context-worktree .worktrees/claude-<builder-id>
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode validation-planner
+```
+
+Default `--mode auto` is short and value-triggered. Before execution it selects `execution-cost-estimator` only for an explicit, plausible Claude candidate whose economics remain uncertain; deterministic Codex ownership skips Spark. Postflight and failure analysis remain available only when they can change a decision.
+
+Budget mode (`AI_SPARK_BUDGET_MODE` / `--budget-mode`): `balanced` (default), `aggressive` (enables additional revision drafting on failure), `conservative` (legacy single-role routing).
+
+A normal Claude-first task should need at most one routing estimate and one terminal evidence check.
+
+New explicit read-only modes: `observe-synthesizer`, `task-card-drafter`, `context-packet-builder`, `preflight-bundle`, `direction-precheck`, `acceptance-matrix`, `postflight-bundle`, `revision-drafter`, `lesson-extractor`, `execution-cost-estimator`.
+
+Bundle output uses seven compressed headings: Decision Summary, Risk Flags, Scope and Boundaries, Acceptance Matrix, Evidence Conflicts, Required Codex Decisions, Recommended Next Action.
+
+Use `task-size-classifier` to spend cheaper Spark quota before stronger-model context when task size is unclear. It should classify the task as `tiny`, `small`, `medium`, `large`, or `unknown` and recommend `codex-fast-path`, `spark-review-only`, `spark-micro-builder`, `claude-builder`, `checker-test`, `spec-first`, or `human-clarification`. It also includes execution-cost fields when available.
+
+The `execution-cost-estimator` predicts diff range/files and relative direct/delegated work units. Use it only when a fresh deterministic ROUTE has a concrete Claude candidate but cannot settle the economics. An earlier estimate never authorizes a revised card; invalid output keeps Codex ownership.
+
+Before Spark or card composition, the router records economics. Default
+`claude-first` treats elapsed time as advisory; optional `economy-first` requires
+15% cost saving, active time at most 2.0x direct, and 30% less Codex work.
+
+Auxiliary work without enough accepted history runs as a serial canary: no parallel release or automatic Checker. A counted model failure requires a fresh route before redispatch; transport/approval failures remain recoverable. Efficient preparation stops before Claude when the default 45-second, 24 KiB task-card, 64 KiB Context Packet, or 80 KiB combined control-plane budget is exceeded.
+
+Explicit diagnostic modes such as `task-size-classifier` and `preflight-bundle` run from the Spark artifact directory with a writable helper workspace while the source repository remains read-only. They are compatibility/debug tools rather than default routing stages.
+
+For evidence checks:
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode evidence-checker \
+  --artifact .worktrees/claude-<id>.report.md \
+  --artifact .worktrees/claude-<id>.checker-report.md
+```
+
+For stalled or failed runs:
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode failure-triage \
+  --artifact .worktrees/claude-<id>.status.txt \
+  --artifact .worktrees/claude-<id>.progress.log
+```
+
+For a reviewed DAG parallel plan:
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode parallel-planner
+```
+
+`parallel-planner` produces strict schema-v1 JSON and standard reconciliation fields only. Spark does not execute or dispatch; Codex/human must review and save the JSON plan before running `bash ai/run-parallel-loop.sh --plan ai/plans/.../parallel-plan.json`.
+
+For tiny scoped edits only, use micro-builder mode. The task card must authorize Spark source edits, limit scope to one or two small files, rule out public API/contract risk, and provide exact narrow validation. The helper creates an isolated worktree and refuses dirty source repositories unless explicitly overridden:
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode micro-builder --sandbox workspace-write
+```
+
+Spark artifacts include `codex-spark.report.md`, `codex-spark.prompt.md`, `codex-spark.result.txt`, `codex-spark.stderr.log`, `codex-spark.artifacts.txt`, `codex-spark.worktree-status.txt`, and optional `codex-spark.diff`. Spark does not silently fall back to GPT-5.5 or another stronger model. Use `--require-spark` only when Spark availability should become a hard failure.
+
+Spark output is advisory. Record `accepted_suggestions`, `ignored_suggestions`, `conflicts_with_claude`, `conflicts_with_local_evidence`, and `acceptance_satisfied_by_spark` in the Spark follow-up table, but do not let Spark replace Claude Builder ownership, Codex final review, or independent acceptance verification. Spark never authorizes merge; strong Codex review remains required; no implicit strong-model fallback; no model-tier routing in this change. For summary/benchmark aggregation across multiple reports, record: helper invocation count, total Spark calls, unique modes/stages/roles, budget modes, provisional status, strong-review required, merge authorization status, and auto-disable occurrences/reasons.
+
+**Spark result delivery modes** control how results are returned and persisted via `--result-mode`:
+
+- **`direct`** (default for advisory/read-only runs): sends bounded result data on stdout and creates no permanent directory on success. `CODEX_SPARK_STDOUT_MAX_BYTES` defaults to 32768; oversized estimator output is reduced to recognized machine fields. Optional failures emit `spark_status=unavailable` fields instead of returning silent stdout.
+- **`minimal`**: sends raw result on stdout and persists only a compact `codex-spark.report.md`. Use when persistent metrics or benchmark aggregation is required but full evidence is unnecessary.
+- **`full`**: preserves prompt, result, stderr, status, diff, task-card, and manifest evidence. Use when complete audit trails are required.
+
+When `--output` is passed without an explicit `--result-mode`, the helper selects `minimal`. Combining `--output` with `--result-mode direct` is invalid — `direct` creates no persistent artifacts. Source-writing modes (`controlled-builder`, `micro-builder`) force `full` artifacts.
+
+**Observability tradeoff:** `direct` mode intentionally has no file-backed metrics — no `codex-spark.report.md`, no artifact directory, no manifest. This is by design for lightweight advisory calls. When benchmark aggregation, quality tracking, or audit evidence is needed across multiple Spark invocations, choose `minimal` or `full` so `ai/benchmark-loop-runs.py` and `ai/summarize-loop-run.py` can aggregate results.
+
+**Spark diagnostics (`--diagnostics`):** when a direct-mode call produces an unusable result, `--diagnostics failure` (default) writes a compact redacted record under a unique `.worktrees/spark-diagnostic-<timestamp>-<suffix>/` directory. `--diagnostics off` disables persistence and `full` preserves reproduction evidence. Successful calls remain zero-persistence.
+
+Direct stdout uses the `aiwf-spark-stdout-v1` envelope. It emits a started state before the model call and a terminal state afterward; parse it with `python ai/parse-spark-output.py FILE --require-terminal`. The broker owns the default 75-second Spark process-group timeout.
+
+**Controlled-builder permission mode** provides narrow, auditable source-write permission for Spark:
+
+- The task card must specify 1–3 exact `--allow-write` paths with a matching `Controlled-builder allowed paths` row.
+- `--max-diff-lines` is required, range 1–200.
+- All public API, data model, security, migration, permission, concurrency, and cross-module contract risks are excluded by policy.
+- An existing pattern or source-of-truth must be identified.
+- Narrow validation is required — no broad test suites.
+- After the run, tracked and untracked paths, line counts, and binary evidence are checked.
+- Violations exit non-zero, remain isolated in the worktree, never modify the source, never merge, and never satisfy acceptance criteria.
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode controlled-builder \
+  --allow-write src/module.py --allow-write tests/test_module.py \
+  --max-diff-lines 150 --sandbox workspace-write
+```
+
+The task card for `controlled-builder` must include:
+
+| Field | Value |
+|-------|-------|
+| Result mode | `full` (forced) |
+| Controlled-builder authorized? | yes |
+| Controlled-builder allowed paths | exact 1–3 paths |
+| Max files | 3 |
+| Max diff lines | <=200 |
+| Risk exclusions | one row per: public API, data model, security, migration, permission, concurrency, cross-module |
+| Existing pattern / source-of-truth | file or pattern reference |
+| Narrow validation | exact command |
+
+### Large Repositories / Slow Filesystems
+
+Fill `Worktree / Large Repo Strategy Gate` before dispatch when `git worktree add`, filesystem reads, or dispatcher status/diff collection are materially slow. Defaults keep complete evidence. Prefer the explicit fast profile when the gate accepts managed reuse and summary evidence:
+
+Tracked-file count is only a signal to review this gate. Use `fast-large-repo` or managed reuse only when risk is low, targets are exact, dispatch is serial, and reduced untracked/patch evidence is explicitly accepted; otherwise keep a fresh worktree with full evidence. Exact mechanical Builder tasks may use `CLAUDE_CODE_BUILDER_MODE=execution-only`. A completed no-diff run may be retried in the same clean fresh worktree with `CLAUDE_CODE_RETRY_IN_PLACE_TASK_ID=<prior-task-id>` after the dispatcher proves the recorded identity and safety conditions.
+
+Use `python ai/locate-code.py "symbol or behavior" --path src --max-files 12` before dispatch to build the `Claude Context Packet` cheaply. It ranks candidate files from path hints and lexical matches, prints short snippets, and suggests exact line reads. If Zoekt is installed and indexed, `--backend auto` uses it before lexical fallback. Sourcegraph can be used when `SOURCEGRAPH_URL` is configured. CodeGraph is bounded: `auto` makes one graph query whenever the current index is healthy, regardless of repository file count; `--codegraph off` disables it. If CodeGraph times out, record it once and continue with locator output plus targeted line reads instead of repeating broad graph queries.
+
+For optional indexed search setup:
+
+```bash
+python ai/code-search-service.py doctor
+python ai/code-search-service.py install-zoekt --yes
+python ai/code-search-service.py index-zoekt --repo . --yes
+```
+
+`install-zoekt --yes` streams the underlying `go install` output and prints periodic `still running...` heartbeats while Go downloads or compiles quietly. Pass `--progress-interval 5` before the subcommand for more frequent updates:
+
+```bash
+python ai/code-search-service.py --progress-interval 5 install-zoekt --yes
+```
+
+Fill `Claude Context Packet` before dispatch in large repositories. Keep it small and execution-facing: target files/modules, relevant symbols, source-of-truth examples, paths Claude must not read or modify, known constraints, and narrow validation commands. If the packet is incomplete, Claude should stop-and-report instead of rediscovering the repository with broad searches.
+
+```bash
+CLAUDE_CODE_EXECUTION_PROFILE=fast-large-repo \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+To reuse the managed Claude worktree without the full fast profile:
+
+```bash
+CLAUDE_CODE_WORKTREE_STRATEGY=reuse-managed \
+CLAUDE_CODE_REUSE_WORKTREE_RESET=1 \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+To reduce expensive untracked scans and untracked patch evidence:
+
+```bash
+CLAUDE_CODE_LARGE_REPO_MODE=1 \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+The managed reuse path is limited to `.worktrees/reuse/claude-managed`. Large-repo mode preserves tracked/staged diff evidence but intentionally reduces untracked-file evidence.
+Bootstrap also keeps workflow runtime artifacts ignored:
+
+```gitignore
+/.worktrees/*
+!/.worktrees/.gitkeep
+```
+
+To skip full patch text but keep the worktree for review:
+
+```bash
+CLAUDE_CODE_EVIDENCE_MODE=summary \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+### Experimental Parallel Dispatch
+
+Two compatible paths exist for parallel dispatch:
+
+**Path 1: Flat independent cards (positional arguments)**
+
+Parallel remains opt-in. First use the local zero-token classifier; ordinary serial tasks do not call Spark:
+
+```bash
+python ai/assess-parallel-opportunity.py --json \
+  --work-units 3 --write-scopes src/a,src/b,src/c \
+  --estimated-minutes 30 --validation-count 3
+```
+
+Only a `parallel-candidate` result should proceed to one bounded Spark `parallel-planner` call and reviewed task cards. When cards declare independent scopes, owned contracts, validation responsibility, and a common Base commit matching current `HEAD`, run:
+
+```bash
+bash ai/run-parallel-loop.sh --max-concurrency 2 \
+  ai/task-cards/PROJ-123-a.md \
+  ai/task-cards/PROJ-123-b.md
+```
+
+The helper first runs one canary and executes its declared narrow validation with the local checker helper. Only a passing canary releases the remaining tasks, up to the concurrency cap; every later unit is also validated. A missing worktree, missing command, or failed check is incomplete rather than success. The helper writes `.worktrees/parallel-*/parallel-summary.md` and never merges automatically. It refuses ungated task cards and overlapping `Allowed files/modules` by default. Use `--allow-overlap` only for explicit manual-reconcile experiments; `--no-ramp-up` and `--no-unit-validation` are diagnostic overrides.
+
+**Path 2: Reviewed DAG plan (`--plan`)**
+
+For dependency-ordered parallel execution, use Spark `parallel-planner` to propose a reviewed DAG plan:
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode parallel-planner
+```
+
+Spark produces strict schema-v1 JSON — it only proposes and never executes. Codex/human must review and save the plan before dispatch. Then run:
+
+```bash
+bash ai/run-parallel-loop.sh --plan ai/plans/PROJ-123/parallel-plan.json
+```
+
+Schema fields: `schema_version` (must be `1`), `group_id`, `max_concurrency`, `failure_policy` (currently `skip-dependents`), and `tasks` containing `id`, `task_card`, `depends_on` per task. Task-card paths resolve relative to the plan file. An explicit CLI `--max-concurrency` overrides the plan's cap.
+
+Scheduling semantics: the scheduler validates one dependency-ready canary before expansion, then starts only dependency-ready tasks up to the concurrency cap and validates every unit. With `skip-dependents`, a failed prerequisite prevents all transitive dependents from dispatching while unrelated branches continue. All cards still require scope-gate and overlap checks. Review and merge remain serial.
+
+While Claude is running, the dispatcher is the sole sampling owner. Use one
+blocking `ai/monitor-claude.sh wait <task-id> --until terminal`; `watch` and
+`status` are exceptional manual diagnostics, not polling instructions. Window
+refresh/extension events expose the new deadline. The metadata-only
+`*.activity-observation.json` records session/control/product ages without
+reading session JSONL and never refreshes a product window.
+
+If Direction / Boundary Acknowledgement is required, Claude should write the acknowledgement before editing. When blocking approval is required, Codex gives one final decision before Claude proceeds. After `proceed`, Claude must continue the assigned task instead of repeatedly asking for the same confirmation.
+
+### 3. Review Direction with Codex
+
+If only bounded Claude evidence is retained, the optional Review Decision
+`evidence_disposition` binds adopted/rejected/needs-revision units to exact
+paths, symbols, and evidence. It is review evidence, not a partial-success
+dispatcher state.
+
+```bash
+bash ai/review-with-codex.sh ai/task-cards/PROJ-123.md .worktrees/claude-<timestamp>.result.json .worktrees/claude-<timestamp>.diff
+```
+
+To include checker, token/cost, and repository status evidence in the review:
+
+```bash
+bash ai/review-with-codex.sh ai/task-cards/PROJ-123.md \
+  .worktrees/claude-<timestamp>.result.json \
+  .worktrees/claude-<timestamp>.diff \
+  .worktrees/claude-<timestamp>.checker-report.md \
+  .worktrees/claude-<timestamp>.usage.txt \
+  .worktrees/claude-<timestamp>.source-status.txt \
+  .worktrees/claude-<timestamp>.worktree-status.txt \
+  .worktrees/claude-<timestamp>.untracked.txt \
+  .worktrees/claude-<timestamp>.claude-progress.md
+```
+
+Codex reviews the work and returns a structured decision: accept, revise, split, or reject, with explicit next-loop instructions.
+
+Review is tool-backed by default. The helper stores the full packet, sends Codex
+only a bounded capsule prompt, verifies task-card/diff/HEAD hashes, and expands
+only selected paths or symbols. When the capsule predicts at least 8 KiB of
+avoidable Codex input and the evidence is structurally complex, it runs one
+advisory Spark `postflight-bundle` pass and reduces the full Spark response to a
+bounded summary capsule. Pass `--spark-compression off` to disable that optional
+pass or `--spark-compression required` to fail when it is unavailable. The
+equivalent environment variable remains a compatibility default; the stable CLI
+flag avoids changing an approved launcher prefix. Spark cannot accept,
+interrupt, merge, or replace Codex semantic review.
+
+If the Builder result matches the plan, run exact deterministic checks first. Dispatch `checker-test` only for assigned test writing, long validation, or evidence processing that materially reduces Codex work; otherwise record the deterministic-evidence skip reason.
+
+Dispatch defaults to the `balanced` execution profile: compact Claude task card, brief prompt, fresh worktree, and full diff evidence. This reduces prompt/task-card tokens while preserving review evidence. The full planning card remains available as `TASK_CARD_FULL.md`.
+
+Use `safe` for ambiguous or high-risk tasks that need the standard prompt and non-compact execution card:
+
+```bash
+CLAUDE_CODE_EXECUTION_PROFILE=safe \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+Use `fast-large-repo` only after the large-repo gate records the evidence tradeoff:
+
+```bash
+CLAUDE_CODE_EXECUTION_PROFILE=fast-large-repo \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+`fast-large-repo` uses the managed reuse worktree, skips unrelated untracked scans, and writes summary diff evidence instead of full patch text. It never resets the source repository. If `.worktrees/reuse/claude-managed` already exists, preserve or review its evidence first, then explicitly add `CLAUDE_CODE_REUSE_WORKTREE_RESET=1` to reset only that managed worktree.
+
+The dispatcher resolves one runtime root from Git's common dir. Starting it
+inside an accepted linked worktree creates a flat sibling under the main
+`.worktrees/`, never another nested `.worktrees/`. A reviewed task card may be
+passed by absolute path from the main worktree; it is copied into the execution
+worktree without dirtying the accepted source.
+
+### Checker-Only Validation
+
+Installed projects include `ai/check-worktree.sh`. Prefer exact task-card validation commands:
+
+```bash
+bash ai/check-worktree.sh --task-card ai/task-cards/PROJ-123.md --no-discover \
+  --jobs 4 --command 'tests=pytest tests/test_target.py'
+```
+
+The checker runs independent read-only commands concurrently (default four),
+keeps input-order results deterministic, and writes a JSON aggregate receipt.
+Its mandatory boundary pass checks tracked, staged, and untracked files through
+real or virtual patches and rejects syntax/module-boundary/cross-file
+concatenation failures. The dispatcher records these artifacts after Claude
+finishes, but broad discovery is disabled by default to avoid unrelated
+validation noise. Pass
+`CLAUDE_CODE_CHECKER_COMMANDS=$'tests=pytest tests/test_target.py'` for exact
+dispatcher-run checks, or `CLAUDE_CODE_CHECKER_DISCOVER=1` when the task card
+explicitly allows broad project discovery.
+
+**Checker Reuse Risk Gate:** Before dispatching a `checker-test` task, fill the Checker Reuse Risk Gate in the task card with exact rows: Public API risk, Data model risk, Security risk, Migration risk, Permission risk, Concurrency risk, Cross-module risk, Production impact. Each row must be explicit `no` for task-derived checker worktree reuse to default to `reuse-managed`. Missing, `unknown`, `n/a`, `duplicate`, `high` risk, DAG, or parallel tasks stay `fresh`. The environment variable `CLAUDE_CODE_WORKTREE_STRATEGY=fresh|reuse-managed` overrides this default. Existing reset safety via `CLAUDE_CODE_REUSE_WORKTREE_RESET=1` remains unchanged.
+
+**Authoritative validation timeline:** The dispatcher preserves the Claude blocked state. Checker ALL GREEN is the authoritative signal that makes the final status `passed`. Checker failures set the final status accordingly.
+
+The checker also reads task-card validation fences when `--task-card` is passed:
+
+```bash validation
+bazel test //path/to:target
+```
+
+If the task card says `Local validation allowed? | no`, checker reports artifact collection as `OK` and validation as `SKIPPED by policy`; it does not run commands and does not mean tests passed. Use that when the user or repository policy forbids local test execution.
+
+### Project Test Tiers
+
+Use the smallest verification tier that matches the edit:
+
+```bash
+# Smoke: shell syntax and whitespace
+bash -n scripts/*.sh
+git diff --check
+
+# Fast default while editing
+python -m pytest -m "not slow"
+
+# Related tests for touched areas
+python -m pytest tests/test_run_codex_spark.py tests/test_check_worktree.py
+
+# Full release or pre-commit confidence
+python -m pytest tests
+```
+
+Tests marked `slow` create repeated temporary repositories, worktrees, or installer runs. Run them before release or when touching dispatcher/worktree/install behavior, not after every small documentation or helper edit.
+
+### 4. Merge
+
+After human approval, merge the changes from the worktree.
+
+## Loop Workflow
+
+The workflow is an explicit loop, not a linear handoff. Each iteration follows:
+
+```
+OBSERVE  ->  PLAN  ->  DISPATCH  ->  EXECUTE  ->  VERIFY  ->  REVIEW
+                                                              |
+                                                     accept   ->  DONE
+                                                     revise   ->  PLAN (next iteration)
+                                                     split    ->  PLAN (child cards)
+                                                     reject   ->  OBSERVE (re-plan)
+```
+
+### Using the Loop Runner
+
+The optional loop runner composes dispatch and review automatically:
+
+```bash
+bash ai/run-loop.sh ai/task-cards/PROJ-123.md [max-iterations]
+```
+
+The loop runner:
+- Dispatches the task card to Claude Code.
+- Sends evidence to Codex/GPT for review.
+- If the decision is `revise`, creates a revised task card and loops.
+- Stops on `accept`, `split`, `reject`, max iterations, or unknown decision.
+- Persists all output in `.worktrees/loop-<timestamp>/`.
+- Writes `loop-usage-summary.md` with available Claude and Codex usage summaries.
+- Writes `loop-quality-summary.md` and `loop-quality-summary.json` with quality, speed, cost, and stability metrics.
+- Adds fixed `Spark Status` and `Claude Evidence Classification` sections to loop quality summaries, so Spark availability/fallback and Claude report/diff gaps are visible without reading raw artifacts.
+- Writes `loop-events.jsonl` as an append-only event stream for run start, iteration start, dispatch/review completion, decisions, revisions, and stop reasons.
+- Does NOT merge automatically. Human must review and merge.
+
+To summarize an existing loop run manually:
+
+```bash
+python ai/summarize-loop-run.py .worktrees/loop-<timestamp> \
+  --output .worktrees/loop-<timestamp>/loop-quality-summary.md \
+  --json-output .worktrees/loop-<timestamp>/loop-quality-summary.json
+```
+
+To compare multiple loop runs as a lightweight living benchmark:
+
+```bash
+python ai/benchmark-loop-runs.py .worktrees/loop-* \
+  --output .worktrees/workflow-benchmark.md \
+  --json-output .worktrees/workflow-benchmark.json
+```
+
+The benchmark aggregates advisor usage, diagnostic probe usage/cost, same-worktree continuation success, avoided full redispatches, conservative re-exploration evidence, Spark invocation/auto-disable/fallback status, parallel-dispatch usage, spec adherence, root-cause evidence, and TDD fields. Estimated token/time savings remain unavailable unless an audit contains explicit numeric evidence.
+
+The benchmark also aggregates execution owner, task-card/review-packet bytes, Context Lease/checkpoint/capsule metrics, control-plane time, Checker model dispatches, and approximate Claude-diff reuse. Primary runs, efficient final-candidate reviews, and accepted legacy loops write records automatically. History append is idempotent; reuse remains unavailable until Claude and final diffs are both bound.
+
+Controlled economics experiments record Spark calls/tokens but exclude role
+`spark` from charged cost, paired cost ratios, and recommendations; raw usage
+remains visible as quota telemetry. Freeze weighted `improvement_units` in each
+real-project task spec and record `improvement_units_satisfied` per arm. The
+summary compares delivered weight, cost per weight, and active seconds per
+weight. Diff lines, changed files, and test counts are descriptive only.
+
+**Efficiency evidence enforcement:** `python scripts/compare-efficiency.py BASELINE CANDIDATE --enforce` evaluates real aggregate evidence (codex call reduction, latency, first-pass rate, quality gates, continuation success, redispatch avoidance, and re-exploration metrics). With `--enforce`, it returns non-zero for failed or insufficient Advisor efficiency evidence; it must not fabricate Token/time savings.
+
+Claude also maintains `CLAUDE_PROGRESS.md` as a compact progress memory with stable fields: Goal, Current Phase, Next Check, Blocker, and Last Update.
+
+For the full state model, see the installed `ai-coding-workflow` Skill documentation.
+
+### Manual Loop
+
+You can also run the loop manually:
+
+1. Create a task card.
+2. Dispatch: `bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md`
+3. Review: `bash ai/review-with-codex.sh ai/task-cards/PROJ-123.md .worktrees/claude-<timestamp>.result.json .worktrees/claude-<timestamp>.diff`
+4. If revise: update the task card with revision instructions and go to step 2.
+5. If accept: human merges.
+
+## Updating the Workflow
+
+To update workflow files without losing project-specific rules, run the installed Skill bootstrap command again from the target repository:
+
+```bash
+python ~/.codex/skills/ai-coding-workflow/scripts/install_workflow.py .
+```
+
+On Windows PowerShell:
+
+```powershell
+python $env:USERPROFILE\.codex\skills\ai-coding-workflow\scripts\install_workflow.py .
+```
+
+The installer preserves content outside managed markers and only replaces managed blocks.
+
+## Troubleshooting
+
+Check the effective Claude/CC Switch configuration without printing credentials:
+
+```bash
+python ai/claude-healthcheck.py
+python ai/claude-healthcheck.py --probe
+python ai/claude-healthcheck.py --interaction-route auto --timeout 60
+python ai/claude-healthcheck.py --interaction-route compare --timeout 60
+```
+
+The endpoint probe is advisory by default because DNS, proxy, and TLS failures may be transient. Use `--require-probe` only when strict automation explicitly wants a network failure to stop before dispatch. A successful Claude interaction remains the authoritative availability signal.
+
+The interaction probe sends a real minimal prompt and therefore consumes model quota, but it is a read-only runtime diagnostic and needs no human review. `auto` tries the route implied by the current proxy environment and stops on success; it tries the alternate only after failure. `compare` always consumes two calls. Apply the recommendation explicitly with `CLAUDE_CODE_PROXY_MODE=inherit|direct`; the diagnostic is not implementation or acceptance evidence.
+
+Classify a completed or failed round before counting it toward takeover:
+
+```bash
+python ai/classify-claude-attempt.py --exit-code 1 --outcome api_error --error-text-file .worktrees/<task>.status.txt
+```
+
+Transport failure before interaction may retry the same worktree once and does not count as Claude no-progress. Runtime lineage records the retry ordinal, so a repeated transport failure returns fallback/reroute instead of offering an infinite retry. An execution timeout after successful startup preflight is model no-progress. Two directly linked counted rounds may issue a hash-bound `*.takeover-receipt.json`; it limits Codex to the declared Write paths and never authorizes merge. Approval, workspace trust, or sandbox blockers remain external blockers.
+
+### Missing `ai/` After Installing the Skill
+
+Installing the Codex Skill does not automatically modify every repository. If dispatch fails because `ai/dispatch-to-claude.sh` is missing, run the installed Skill bootstrap command in that repository, then verify with:
+
+```bash
+python ai/doctor_workflow.py
+```
+
+On mounted filesystems, use bounded target-only hash diagnostics when file bytes appear different but Git status is empty:
+
+```bash
+python ai/doctor_workflow.py . --hash-path path/to/file --hash-path path/to/other-file
+```
+
+This compares filesystem, index, and scoped status evidence for at most 20 explicit files. It does not prove global worktree cleanliness and never runs `git add`, `git add --renormalize`, `update-index`, reset, clean, checkout, or deletion. Any renormalization remains a human-reviewed action.
+
+Do not run `bash ai/dispatch-to-claude.sh ...` until the doctor reports that project workflow files are installed.
+
+### Windows: PowerShell UTF-8 setup
+
+Windows PowerShell can corrupt non-ASCII text when console code pages, `$OutputEncoding`, and child process encodings disagree. Before editing or generating Chinese documentation from PowerShell, dot-source the installed helper:
+
+```powershell
+. .\ai\pwsh-utf8.ps1
+```
+
+For future shells, opt in to profile setup:
+
+```powershell
+. .\ai\pwsh-utf8.ps1 -Persist
+```
+
+This sets console input/output encoding, `$OutputEncoding`, `PYTHONUTF8`, `PYTHONIOENCODING`, and code page `65001` for the current session. Prefer this helper over ad hoc `chcp` commands or PowerShell here-strings containing non-ASCII text.
+
+### Windows: `bash` resolves to broken WSL
+
+On Windows, running `bash` in a terminal may resolve to Windows Subsystem for Linux (WSL) instead of Git Bash. If WSL has no default distro configured, commands like `bash -n ai/dispatch-to-claude.sh` will fail with an error such as:
+
+```
+Windows Subsystem for Linux has no installed distributions.
+```
+
+This does **not** mean the workflow scripts are invalid. The installer's built-in validation (`install_workflow.py`) searches for Git Bash explicitly and will report `PASS` if scripts are syntactically correct.
+
+**Recommended fixes (pick one):**
+
+1. Install [Git for Windows](https://git-scm.com/download/win) and ensure `C:\Program Files\Git\bin` appears before WSL in your `PATH`.
+2. Install a WSL distro (e.g., `wsl --install -d Ubuntu`) so that `bash` works natively.
+3. Run validation through the installer rather than directly: `python scripts/install_workflow.py /path/to/repo`.
+
+The installer treats a missing or broken `bash` as `WARN_SKIPPED`, not as a hard failure.
+
+## Dispatch Observability
+
+While Claude Code is running, `dispatch-to-claude.sh` writes transient PID hints, durable identities, and heartbeat evidence under `.worktrees/`:
+
+- `.worktrees/claude-<id>.pid` records a transient PID hint and is removed after identity-confirmed cleanup.
+- `.worktrees/claude-<id>.<role>.process.json` binds that PID to start time, command line, PID namespace, task, and role so retry checks do not confuse reused or container/host PIDs.
+- `.worktrees/claude-<id>.progress.log` records start, heartbeat, timeout, and completion events.
+- `.worktrees/claude-<id>.dispatch-preflight.json` proves task-relevant dirty paths are present and byte-identical in the execution worktree; stale or missing inputs stop dispatch.
+- `.worktrees/claude-<id>.control-archive.json` records hash-bound copies of recognized untracked root control files. Originals remain in place; arbitrary user files are not ignored.
+- `.worktrees/claude-<id>.dirty-snapshot.json` binds an explicitly requested dirty baseline to its source commit, ephemeral commit, tree, paths, and content hashes.
+- `.worktrees/claude-<id>.checker-contract.json` records Checker write-scope, non-empty-file, syntax, and per-file validation enforcement.
+- Machine-readable status fields after finalization: `overall_running=yes`, `running=no`, `claude=not-running`. Only the dispatcher sets these fields; Claude does not finalize its own status.
+- `CLAUDE_CODE_HEARTBEAT_SECONDS` controls heartbeat frequency; default is `30`.
+- `CLAUDE_CODE_CONTEXT_ACQUISITION_TIMEOUT_SECONDS` bounds orientation before execution evidence; it defaults to the active window (`600` seconds by default) for every execution profile.
+- `CLAUDE_CODE_TIMEOUT_SECONDS` is the active execution window, default `600` seconds; the first role-specific substantive signal starts it and every later canonical product-content change refreshes it, subject to the hard cap.
+- `CLAUDE_CODE_TIMEOUT_ADVISOR=auto` starts a bounded Spark `monitor-triage` evaluation shortly before the initial context boundary and every later active deadline while Claude continues running. The elapsed window enters `extension-pending`; missing or invalid advice never stops Claude. `CLAUDE_CODE_ACTIVE_PROGRESS_EXTENSION_SECONDS` grants the first hash-current Spark-confirmed extension for a quiet product digest, default `300` seconds, and `CLAUDE_CODE_GROWING_PROGRESS_EXTENSION_SECONDS` governs later confirmed windows. A first product write supersedes context evaluation; every later real product change refreshes a complete active window and cancels stale Spark work when evaluation is active. The hard timeout remains absolute.
+- `CLAUDE_CODE_HARD_TIMEOUT_SECONDS` is the absolute cap, default `1500` seconds.
+- `CLAUDE_CODE_NO_OUTPUT_TIMEOUT_SECONDS` optionally stops Claude when result/status/report/progress artifacts do not change. Default is `0` disabled; set a positive value only when you want fast-fail behavior.
+- `CLAUDE_CODE_WORKTREE_PROGRESS` controls worktree progress verbosity. Default `quiet` shows compact timing and path; `verbose` shows detailed worktree state.
+- `CLAUDE_CODE_APPROVAL_BLOCKED_CONVERGENCE` enables conservative approval-blocked early convergence. Default `1` (enabled); set to `0` to disable. When enabled, if a valid complete report exists, changes are test-only scoped, an exact validation approval blocker is present, and two stable heartbeats have been observed, the dispatcher triggers the checker helper. This is not validation success or acceptance — it is an early evidence-gathering path.
+
+Claude is instructed to keep `CLAUDE_PROGRESS.md` updated at natural milestones. Extension and material-change decisions use a semantic digest that ignores clock-only timestamp fields, so repeatedly rewriting the same milestone cannot manufacture progress. The dispatcher copies the file to `.worktrees/claude-<id>.claude-progress.md`; Codex only spends tokens on it when review/status output is explicitly read.
+
+Execution-only, batch, and test-writing Checker tasks default to a 120-second durable-output deadline with stop action. Checker Context Packets should bind exact interface signatures, a runnable construction/call example, and the async/sync rule. Each written test file is syntax/import checked and run narrowly before the next file. Claude receives a task-scoped `$TMPDIR` outside the repository; repository-root scratch helpers remain scope violations.
+
+After child exit, the dispatcher performs one bounded terminal drain and a second sample only when the worktree changes, preventing exit-adjacent files from being omitted from final evidence.
+
+`dispatch-to-claude.sh` prints one copy-paste `Agent Wait (once)` command in its completion summary. Agent controllers should use that blocking terminal wait instead of repeated watch/status/process/log checks.
+
+`watch-claude.sh` is a manual terminal diagnostic, not an agent wait API. It
+prints a low-cost status panel and expands full progress/status/network tails
+only with `--details`. On terminal state it records a task-bound observation
+receipt and refuses another watch of the same terminal event. Agent controllers
+must use one `monitor-claude.sh wait ... --until terminal` call.
+
+`watch-claude.sh` and `status-claude.sh` also print machine-readable monitor fields (`monitor_level`, `action`, `evidence_state`, quiet/elapsed seconds, suspect count when available). Compact snapshots include `collected_at` plus per-source `observed_at` timestamps and separate process, report, result, and product-diff evidence, so cached fields are not presented as one fresh observation. A finalized diff without a valid report is terminal and exposes `operator_state=implementation-stable-awaiting-review`; it is not shown as still running and does not bypass Codex review. Watch events additionally expose `execution_phase`, `implementation_complete`, `completion_ready`, and `finish_recommended`. Codex should prefer these low-token fields before reading full status, progress, or network tails.
+
+For agent-driven runs, the dispatcher is the only sampling owner and appends material/final terminal boundaries to `*.monitor-events.log`. Use one blocking `monitor-claude.sh wait <task-id> --until terminal` call; repeated `watch`, `ps`, `tail`, status, process-tree, or clock-only calls are forbidden. The wait streams product-window and `extension-evaluation-*` notices without ending, so Codex sees Spark pending/result state without polling. There is no detached supervisor. On the terminal boundary, `wait` adds a compact local decision and may invoke Spark `monitor-triage` to compress ambiguous evidence. Near the initial context boundary or a later active deadline, the same advisory mode receives a privacy-limited capsule containing the frozen contract, redacted assistant output, and normalized tool events; it never receives thinking content, user input, tool-result payloads, full logs, or source diffs. Spark returns fixed decision fields but controls no process. If an installed project copy rejects `wait --until`, run `python ai/doctor_workflow.py`; monitor helper drift is now included in the version check and the doctor prints the workflow refresh command.
+
+`Execution Phase: implementation` is only edit readiness and must include `Context Acquisition Complete: yes` plus a non-empty `Planned First Write`. It does not refresh the full active window. A product diff or valid owned report is durable progress. After the first product change, an unchanged product digest defaults to an idle candidate at 600 seconds. With the timeout advisor enabled, two confirmations corroborate a high-confidence Spark stop suggestion but do not stop Claude by themselves; active validation, declared tail work, and explicit blockers are exempt. Configure these bounds with `CLAUDE_CODE_EDIT_READY_GRACE_SECONDS`, `CLAUDE_CODE_PRODUCT_IDLE_TIMEOUT_SECONDS`, and `CLAUDE_CODE_PRODUCT_IDLE_CONFIRMATIONS`.
+
+Builder cards use conservative Post-Implementation defaults: changed-file self-review is enabled, while narrow validation, documentation, and long validation remain disabled until assigned precisely. After that bounded tail, Claude sets `Completion Ready: yes`, writes its final report/result, and exits normally. Planner/Checker calls with a valid owned report, no blocker, and their role-specific durable evidence receive a final flush window (`CLAUDE_CODE_COMPLETION_READY_TIMEOUT_SECONDS`, default 20) before the dispatcher identity-stops a lingering child; this records dispatch convergence, not semantic acceptance. Direct children are frozen as a process tree before termination so a parent shell cannot resume for a last write; brokered calls terminate the model process group and record `cancelled`. The dispatcher writes `<task-id>.phase-metrics.json`, including Context Lease route, checkpoint mode, and bounded capsule byte metrics; when `AI_WORKFLOW_CLAUDE_PHASE_METRICS_FILE` is exported by an experiment run, it also copies the same diagnostic metrics into that run directory automatically.
+
+CodeGraph is guarded per execution worktree. The default `CLAUDE_CODE_CODEGRAPH_POLICY=fallback` rejects graph results whose `projectPath`/`worktreeMismatch` or pending state does not match the isolated worktree, writes `<task-id>.codegraph-worktree.json`, and directs Claude to LSP/locator/targeted reads. Use `repair` to sync or reindex that execution worktree explicitly, or `off` to disable graph use without probing.
+
+Monitoring priority is intentionally conservative to avoid false kills:
+
+1. L0: one blocking `monitor-claude.sh wait ... --until terminal`.
+2. L1: review the finalized diff, report, outcome, and validation evidence.
+3. L2: use one `monitor-claude.sh decision` only when terminal evidence needs bounded triage.
+4. L3: use `status-claude.sh --details` or manual watch only for exceptional visibility/diagnostic failures.
+5. L4: use `kill-claude.sh` only after multiple evidence sources agree useful progress is unlikely.
+
+On timeout or non-zero Claude exit, the dispatcher still collects diffstat, diff, untracked files, usage fallback, worktree status, and a fallback report when possible.
+
+For complex or repeatedly revised work, add an `## Execution Phases` table to the task card. Claude must use it as the outer execution contract, update progress at phase boundaries, and write `CLAUDE_REPORT.md` before long-running validation or before crossing a stop gate.
+
+Dirty-source guard: dispatch blocks when the source worktree has tracked changes, staged changes, or unrelated untracked files because Claude would run from stale `HEAD`. The current task card may be untracked. Use `CLAUDE_CODE_ALLOW_DIRTY_SOURCE=1` only for intentional advanced dispatch.
+
+```bash
+CLAUDE_CODE_CONTEXT_ACQUISITION_TIMEOUT_SECONDS=420 \
+CLAUDE_CODE_TIMEOUT_SECONDS=600 CLAUDE_CODE_ACTIVE_PROGRESS_EXTENSION_SECONDS=300 \
+CLAUDE_CODE_HARD_TIMEOUT_SECONDS=1500 CLAUDE_CODE_HEARTBEAT_SECONDS=15 \
+  bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+---
+
+## Claude External Integrations
+
+Claude's built-in tool profiles (Bash, Edit, file operations) are automatic. External MCP servers and plugins are default-off and must be explicitly declared per task card.
+
+Fill `Claude External Integration Gate` in the task card when the task needs repository-local MCP config files or plugin directories:
+
+| Gate rule | Behavior |
+|-----------|----------|
+| Missing gate or `External integrations allowed?` = `no` | Dispatcher uses `--bare`; no `--mcp-config` or `--plugin-dir` arguments are passed |
+| `External integrations allowed?` = `yes` | Only declared repository-relative existing paths are accepted |
+| `Strict MCP isolation?` | Must be `yes` whenever integrations are allowed |
+
+When integrations are allowed:
+
+- **Paths are validated after the worktree exists.** The dispatcher rejects absolute paths, empty entries, `..` traversal, control characters, and paths resolving outside the worktree.
+- **MCP entries** must be existing repository-relative `.json` files. **Plugin entries** must be existing repository-relative directories or `.zip` files.
+- **Paths are passed as arrays, preserving case and spaces.** The dispatcher does not perform global config scan, `mcp list`, `plugin list`, install, enable, or download.
+- **Evidence recording** stores only the selected relative paths and any rejection category; MCP/plugin file contents and secrets are never recorded.
+- **External integrations do not widen built-in Bash/Edit permissions.** The tool profile and allowed tool set remain unchanged.
+
+---
+
+## Control-Plane Exception
+
+The normal role split is: Codex performs core planning and review; Claude
+implements and revises. Workflow control-plane repair follows the same route.
+
+## Claude Dispatch Operations
+
+Use these helper scripts when a Claude run is slow, stuck, or ready to clean up:
+
+```bash
+# Show latest Claude run status, or pass a specific claude-<timestamp> id
+bash ai/status-claude.sh
+bash ai/status-claude.sh claude-20260701-093934
+
+# Optional manual terminal view; do not use as an agent wait loop
+bash ai/watch-claude.sh claude-20260701-093934
+
+# Agent path: block once until the terminal event
+bash ai/monitor-claude.sh wait claude-20260701-093934 --until terminal
+
+# Optional one-shot local/Spark triage at a review boundary
+bash ai/monitor-claude.sh decision claude-20260701-093934
+
+# Expand full progress tails only when needed
+bash ai/watch-claude.sh claude-20260701-093934 --details
+
+# Treat unchanged artifacts as suspicious after 180 seconds
+bash ai/watch-claude.sh claude-20260701-093934 --stale-after 180
+
+# Require five repeated suspect snapshots before auto-expanding details
+bash ai/watch-claude.sh claude-20260701-093934 --escalation-confirmations 5
+
+# Stop only the Claude process recorded for that dispatch
+bash ai/kill-claude.sh claude-20260701-093934
+
+# Remove the stopped worktree while preserving .worktrees/claude-<id>.* evidence artifacts
+bash ai/cleanup-worktree.sh claude-20260701-093934
+
+# Preview only one stopped dispatch and its adjacent runtime artifacts
+python ai/clean_runtime.py --task-id claude-20260701-093934
+
+# Remove only one stopped dispatch's runtime artifacts
+python ai/clean_runtime.py --task-id claude-20260701-093934 --apply
+
+# Mark only terminal, merged, product-clean worktrees after human merge
+python ai/clean_runtime.py --mark-cleanup-eligible
+```
+
+`cleanup-worktree.sh` refuses to run while the recorded Claude PID is still alive. Use `--force` only when `git worktree remove` needs it for a broken or dirty worktree.
+`clean_runtime.py --task-id ...` is useful for large repositories because it avoids broad root artifact cleanup and preserves unrelated dispatches. Cleanup-eligible receipts do not authorize merge or force-remove dirty worktrees.
+
+`doctor_workflow.py` runs in preview-only mode: it shows count, size, and age of runtime artifacts. It does not automatically delete anything.
+
+For Skill feedback, the user explicitly asks Codex for a read-only retrospective
+after relevant interactions. Codex uses the current conversation and only the
+minimum necessary runtime receipts; it does not persist telemetry, invoke a
+model, create a task card, or modify code. See the installed
+`references/feedback-policy.md` for the normative boundary.
+
+---
+
+## Preserved Constraints
+
+The following constraints are preserved across all workflow changes:
+
+- **No model tiers:** there is no automatic model-tier routing or escalation between Spark, Claude, and stronger models.
+- **No implicit fallback:** Spark does not silently fall back to GPT-5.5 or another stronger model. If Spark is unavailable, report the gap and let Codex or the human decide.
+- **No automatic merge:** human review and merge remain separate. The workflow never merges automatically.
+
+---
+
+## Safety
+
+All of the following require **explicit human approval** before execution:
+
+- Destructive commands and file deletion
+- Database migrations
+- Auth / permission changes
+- Billing changes
+- Deployment changes
+- Public API changes
+- Secret or credential edits
+- Production data changes
+
+Agents must not perform any of the above autonomously. When in doubt, they stop and ask the human.

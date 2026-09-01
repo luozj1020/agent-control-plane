@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-coding-workflow/schemas/coordination-run-summary-v1.schema.json",
+  "title": "Coordination Run Summary v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "runId", "mode", "eventCount", "invalidLines", "actorCount", "targetCount",
+    "agentInvocations", "artifactReads", "artifactWrites", "readViolations", "readClassifications", "stateTransitions",
+    "reviewDecisions", "validationEvents", "wakeEvents", "observedTokens", "measurementSources",
+    "containment", "topology", "coverage"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId": { "type": ["string", "null"] },
+    "mode": { "type": ["string", "null"], "enum": ["overnight", "balanced", "interactive", null] },
+    "state": { "type": ["string", "null"] },
+    "adapterId": { "type": ["string", "null"] },
+    "createdAt": { "type": ["string", "null"] },
+    "updatedAt": { "type": ["string", "null"] },
+    "eventCount": { "type": "integer", "minimum": 0 },
+    "invalidLines": { "type": "integer", "minimum": 0 },
+    "actorCount": { "type": "integer", "minimum": 0 },
+    "targetCount": { "type": "integer", "minimum": 0 },
+    "agentInvocations": { "type": "integer", "minimum": 0 },
+    "artifactReads": { "type": "integer", "minimum": 0 },
+    "artifactWrites": { "type": "integer", "minimum": 0 },
+    "readViolations": { "type": "integer", "minimum": 0 },
+    "readClassifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed", "outOfScope", "forbidden", "unknown"],
+      "properties": {
+        "allowed": { "type": "integer", "minimum": 0 },
+        "outOfScope": { "type": "integer", "minimum": 0 },
+        "forbidden": { "type": "integer", "minimum": 0 },
+        "unknown": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "stateTransitions": { "type": "integer", "minimum": 0 },
+    "reviewDecisions": { "type": "integer", "minimum": 0 },
+    "validationEvents": { "type": "integer", "minimum": 0 },
+    "wakeEvents": { "type": "integer", "minimum": 0 },
+    "observedTokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Tokens attributed to observed events; not a claim that the tokens are coordination-only."
+    },
+    "measurementSources": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "containment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["read", "write", "eventSource"],
+      "properties": {
+        "read": { "enum": ["exact-paths", "partial-event-audit", "unsupported"] },
+        "write": { "enum": ["exact-paths", "post-run-audit", "unsupported"] },
+        "eventSource": { "type": ["string", "null"] }
+      }
+    },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeCount", "relationshipCount", "agentNodes", "artifactNodes",
+        "uniqueReadArtifacts", "repeatedArtifactReads", "artifactReaderLinks",
+        "maxArtifactReaderFanOut"
+      ],
+      "properties": {
+        "nodeCount": { "type": "integer", "minimum": 0 },
+        "relationshipCount": { "type": "integer", "minimum": 0 },
+        "agentNodes": { "type": "integer", "minimum": 0 },
+        "artifactNodes": { "type": "integer", "minimum": 0 },
+        "uniqueReadArtifacts": { "type": "integer", "minimum": 0 },
+        "repeatedArtifactReads": { "type": "integer", "minimum": 0 },
+        "artifactReaderLinks": { "type": "integer", "minimum": 0 },
+        "maxArtifactReaderFanOut": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invoke", "write", "read", "message"],
+      "properties": {
+        "invoke": { "enum": ["enforced", "observed", "not-observed", "unsupported", "mixed"] },
+        "write": { "enum": ["enforced", "observed", "not-observed", "unsupported", "mixed"] },
+        "read": { "enum": ["enforced", "observed", "not-observed", "unsupported", "mixed"] },
+        "message": { "enum": ["enforced", "observed", "not-observed", "unsupported", "mixed"] }
+      }
+    }
+  }
+}

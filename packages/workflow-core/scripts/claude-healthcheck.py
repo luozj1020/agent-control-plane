@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Read-only Claude/CC Switch configuration and endpoint health check."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+
+def load_settings(path: Path) -> Dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def configuration(settings_path: Path) -> Dict[str, Any]:
+    settings = load_settings(settings_path)
+    configured = settings.get("env", {})
+    env = configured if isinstance(configured, dict) else {}
+    base_url = os.environ.get("ANTHROPIC_BASE_URL") or str(env.get("ANTHROPIC_BASE_URL", ""))
+    model = os.environ.get("ANTHROPIC_MODEL") or str(env.get("ANTHROPIC_MODEL", ""))
+    parsed = urllib.parse.urlsplit(base_url)
+    return {
+        "claude_cli": shutil.which("claude"),
+        "settings_path": str(settings_path),
+        "settings_found": settings_path.is_file(),
+        "base_url_configured": bool(base_url),
+        "base_url_origin": (
+            f"{parsed.scheme}://{parsed.hostname}"
+            + (f":{parsed.port}" if parsed.port else "")
+            if parsed.scheme and parsed.hostname else None
+        ),
+        "model": model or None,
+        "auth_configured": bool(
+            os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or env.get("ANTHROPIC_AUTH_TOKEN")
+            or env.get("ANTHROPIC_API_KEY")
+        ),
+    }
+
+
+def probe(origin: str, timeout: float) -> Dict[str, Any]:
+    request = urllib.request.Request(origin + "/", method="HEAD")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return {"status": "reachable", "http_status": response.status, "error": None}
+    except urllib.error.HTTPError as exc:
+        return {"status": "reachable", "http_status": exc.code, "error": None}
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, socket.gaierror):
+            category = "dns"
+        elif isinstance(reason, (socket.timeout, TimeoutError)):
+            category = "timeout"
+        elif isinstance(reason, ssl.SSLError):
+            category = "tls"
+        else:
+            category = "connection"
+        return {"status": "unreachable", "http_status": None, "error": category}
+    except (socket.timeout, TimeoutError):
+        return {"status": "unreachable", "http_status": None, "error": "timeout"}
+
+
+def interaction_probe(
+    route: str, timeout: float, prompt: str, tools: Optional[str] = None,
+) -> Dict[str, Any]:
+    env = os.environ.copy()
+    if route == "direct":
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            env.pop(name, None)
+    started = time.monotonic()
+    try:
+        command = ["claude", "-p", prompt, "--bare", "--no-session-persistence"]
+        if tools:
+            command.extend(["--tools", tools])
+        command.extend(["--output-format", "stream-json", "--verbose"])
+        result = subprocess.run(
+            command,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, env=env,
+        )
+        elapsed = round(time.monotonic() - started, 3)
+        success = result.returncode == 0 and bool(result.stdout.strip())
+        diagnostic_text = (result.stderr + "\n" + result.stdout).lower()
+        if success:
+            failure_category = None
+        elif "workspace" in diagnostic_text and "trust" in diagnostic_text:
+            failure_category = "workspace-not-trusted"
+        elif any(token in diagnostic_text for token in (
+            "failedtoopensocket", "unable to connect", "connection reset",
+            "connection refused", "network", "socket", "timed out",
+        )):
+            failure_category = "transport"
+        else:
+            failure_category = "cli-error"
+        probe: Dict[str, Any] = {
+            "route": route, "success": success,
+            "exit_code": result.returncode, "elapsed_seconds": elapsed, "timed_out": False,
+            "failure_category": failure_category,
+        }
+        # Stream initialization is the runtime's authoritative inventory, not
+        # the launcher's requested --tools value or a model-authored claim.
+        events = []
+        for line in result.stdout.splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                events.append(value)
+        init = next(
+            (value for value in events
+             if value.get("type") == "system" and value.get("subtype") == "init"),
+            None,
+        )
+        inventory = init.get("tools") if isinstance(init, dict) else None
+        if isinstance(inventory, list) and all(isinstance(item, str) for item in inventory):
+            probe["tool_inventory"] = sorted(set(inventory))
+            probe["tool_inventory_verified"] = True
+        else:
+            probe["tool_inventory_verified"] = False
+
+        # Extract usage/cost from the terminal result event when available.
+        # A non-empty legacy response may still establish interaction with
+        # usage explicitly unavailable.
+        if success and result.stdout.strip():
+            try:
+                data = next(
+                    (value for value in reversed(events) if value.get("type") == "result"),
+                    events[-1] if events else json.loads(result.stdout),
+                )
+                usage = data.get("usage", {})
+                model_usage = data.get("modelUsage", {})
+                cost = data.get("total_cost_usd")
+                model = data.get("model")
+                duration_ms = data.get("duration_ms")
+                if usage:
+                    tokens_in = usage.get("input_tokens")
+                    tokens_out = usage.get("output_tokens")
+                    if tokens_in is not None:
+                        probe["tokens_in"] = tokens_in
+                    if tokens_out is not None:
+                        probe["tokens_out"] = tokens_out
+                if model_usage:
+                    probe["model_usage"] = model_usage
+                if cost is not None:
+                    probe["cost_usd"] = cost
+                else:
+                    probe["cost_usd"] = "unavailable"
+                if model is not None:
+                    probe["model"] = model
+                if duration_ms is not None:
+                    probe["duration_ms"] = duration_ms
+                probe["usage_extracted"] = bool(usage or model_usage or cost is not None)
+            except (json.JSONDecodeError, TypeError, KeyError):
+                # Non-JSON or malformed output: interaction established
+                # but usage explicitly unavailable.
+                probe["usage_extracted"] = False
+                probe["cost_usd"] = "unavailable"
+        else:
+            probe["usage_extracted"] = False
+            probe["cost_usd"] = "unavailable"
+        return probe
+    except subprocess.TimeoutExpired:
+        return {"route": route, "success": False, "exit_code": None,
+                "elapsed_seconds": round(time.monotonic() - started, 3), "timed_out": True,
+                "usage_extracted": False, "cost_usd": "unavailable",
+                "failure_category": "timeout"}
+
+
+def restricted_network_environment(probe_environment: str = "auto") -> bool:
+    """Detect known agent sandboxes where a failed network probe is inconclusive.
+
+    probe_environment: "auto" checks the inherited env var, "host" forces
+    unrestricted (ignores CODEX_SANDBOX_NETWORK_DISABLED), "sandbox" forces
+    restricted regardless of env.
+    """
+    if probe_environment == "host":
+        return False
+    if probe_environment == "sandbox":
+        return True
+    return os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED", "").lower() in {"1", "true", "yes"}
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--settings",
+        type=Path,
+        default=None,
+    )
+    parser.add_argument("--probe", action="store_true", help="Probe configured API origin without credentials.")
+    parser.add_argument(
+        "--require-probe",
+        action="store_true",
+        help="Fail when the optional endpoint probe fails; default is advisory.",
+    )
+    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--interaction-route", choices=["auto", "inherit", "direct", "compare"],
+                        help="Run a real minimal interaction; auto tries the alternate only after failure.")
+    parser.add_argument("--prompt", default="你好")
+    parser.add_argument(
+        "--tools",
+        help="Restrict the probe to the requested runtime tools and verify the init inventory.",
+    )
+    parser.add_argument(
+        "--probe-environment",
+        choices=["auto", "host", "sandbox"],
+        default="auto",
+        help="Override execution environment detection: host ignores inherited sandbox marker, sandbox forces restricted.",
+    )
+    args = parser.parse_args(argv)
+    settings_path = args.settings.expanduser() if args.settings is not None else Path.home() / ".claude" / "settings.json"
+    result = configuration(settings_path)
+    _probe_env = args.probe_environment
+    _resolved_restricted = restricted_network_environment(_probe_env)
+    result["execution_environment"] = {
+        "network_restricted": _resolved_restricted,
+        "probe_environment_requested": _probe_env,
+        "probe_environment_resolved": "sandbox" if _resolved_restricted else "host",
+        "interaction_authority": "current-process",
+    }
+    result["needs_host_execution"] = False
+    result["host_handoff_required"] = False
+    if args.probe:
+        origin = result.get("base_url_origin")
+        result["probe"] = probe(origin, args.timeout) if origin else {
+            "status": "skipped", "http_status": None, "error": "base-url-missing"
+        }
+    result["healthy"] = bool(result["claude_cli"] and result["base_url_configured"])
+    result["probe_required"] = args.require_probe
+    if args.require_probe:
+        if not args.probe:
+            result["probe"] = probe(result["base_url_origin"], args.timeout) if result.get("base_url_origin") else {
+                "status": "skipped", "http_status": None, "error": "base-url-missing"
+            }
+        result["healthy"] = result["healthy"] and result["probe"]["status"] == "reachable"
+    if args.interaction_route:
+        if args.interaction_route == "compare":
+            routes = ["inherit", "direct"]
+        elif args.interaction_route == "auto":
+            has_proxy = any(os.environ.get(name) for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"))
+            routes = ["inherit", "direct"] if has_proxy else ["direct", "inherit"]
+        else:
+            routes = [args.interaction_route]
+        interactions = []
+        for route in routes:
+            if args.tools:
+                value = interaction_probe(route, args.timeout, args.prompt, args.tools)
+            else:
+                value = interaction_probe(route, args.timeout, args.prompt)
+            interactions.append(value)
+            if args.interaction_route == "auto" and value["success"]:
+                break
+        successful = [value for value in interactions if value["success"]]
+        result["interaction_probes"] = interactions
+        result["recommended_proxy_mode"] = (
+            min(successful, key=lambda value: value["elapsed_seconds"])["route"] if successful else None
+        )
+        if successful:
+            result["interaction_conclusion"] = "available"
+            result["healthy"] = True
+        elif result["execution_environment"]["network_restricted"]:
+            result["interaction_conclusion"] = "inconclusive-restricted-environment"
+            result["needs_host_execution"] = True
+            result["host_handoff_required"] = True
+            # Preserve configuration health: this process cannot disprove a
+            # successful interaction observed in the user's real terminal.
+        else:
+            result["interaction_conclusion"] = "unavailable-in-current-environment"
+            result["healthy"] = False
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    else:
+        print("Claude CLI: {}".format(result["claude_cli"] or "missing"))
+        print("API origin: {}".format(result["base_url_origin"] or "not configured"))
+        print("Model: {}".format(result["model"] or "not configured"))
+        print("Auth configured: {}".format("yes" if result["auth_configured"] else "no"))
+        if args.probe:
+            print("Endpoint probe ({}): {} ({})".format(
+                "required" if args.require_probe else "advisory",
+                result["probe"]["status"],
+                result["probe"]["error"] or result["probe"]["http_status"],
+            ))
+        if args.interaction_route:
+            for value in result["interaction_probes"]:
+                print("Interaction {}: {} ({}s)".format(
+                    value["route"], "success" if value["success"] else "failed", value["elapsed_seconds"]
+                ))
+            print("Recommended proxy mode: {}".format(result["recommended_proxy_mode"] or "no successful route"))
+            print("Interaction conclusion: {}".format(result["interaction_conclusion"]))
+            if result["interaction_conclusion"] == "inconclusive-restricted-environment":
+                print("Note: network sandbox detected; rerun in the same environment used for Claude dispatch. "
+                      "A successful user-terminal interaction is authoritative.")
+    return 0 if result["healthy"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

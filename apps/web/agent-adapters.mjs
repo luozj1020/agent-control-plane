@@ -7,6 +7,11 @@ import {
   classifyDownstreamFailure,
   resolveRuntimeEnvironment,
 } from "./runtime-environment.mjs";
+import {
+  extractClaudeFilesystemEvents,
+  normalizeAdapterContainment,
+  normalizeObservedArtifactPath,
+} from "./adapter-containment.mjs";
 
 function finiteToken(value) {
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
@@ -72,6 +77,7 @@ export function createProcessAdapter(definition) {
     throw new Error(`Adapter '${definition.id}' command is required.`);
   }
   const fixedArgs = Object.freeze([...(definition.args ?? [])]);
+  const containment = normalizeAdapterContainment(definition);
 
   return Object.freeze({
     id: definition.id,
@@ -80,6 +86,10 @@ export function createProcessAdapter(definition) {
     requiresNetwork: definition.requiresNetwork !== false,
     providerEnvironmentPrefixes: Object.freeze([...(definition.providerEnvironmentPrefixes ?? [])]),
     filesystemIsolation: definition.filesystemIsolation ?? "post-run-only",
+    containment,
+    readContainment: containment.read,
+    writeContainment: containment.write,
+    filesystemEventSource: containment.eventSource,
     async start(context) {
       const runtimeEnvironment = resolveRuntimeEnvironment(context.runtimeEnvironment, {
         environment: process.env,
@@ -219,6 +229,20 @@ export function createProcessAdapter(definition) {
             activity.taskDirectedEvents += 1;
             context.onEvent?.({ type: "task-directed" });
           }
+          if (typeof definition.extractFilesystemEvents === "function") {
+            for (const observation of definition.extractFilesystemEvents(record) ?? []) {
+              if (observation?.operation !== "read") continue;
+              const path = normalizeObservedArtifactPath(observation.path, context.worktree);
+              if (!path) continue;
+              context.onEvent?.({
+                type: "artifact-read",
+                path,
+                tool: observation.tool ?? null,
+                source: containment.eventSource,
+                coverage: containment.read,
+              });
+            }
+          }
           if (
             record.type === "implementation_complete" ||
             record.progress?.implementation_complete === true
@@ -330,6 +354,10 @@ export function createBuiltInAdapterRegistry(options = {}) {
     command: options.claudeCommand ?? process.env.AGENT_CONTROL_CLAUDE_COMMAND ?? "claude",
     requiresNetwork: true,
     providerEnvironmentPrefixes: ["ANTHROPIC_", "CLAUDE_", "CC_SWITCH_"],
+    readContainment: "partial-event-audit",
+    writeContainment: "post-run-audit",
+    filesystemEventSource: "claude-stream-json-explicit-read-tool-v1",
+    extractFilesystemEvents: extractClaudeFilesystemEvents,
     args: [
       "--print",
       "--verbose",
@@ -353,6 +381,10 @@ export function createBuiltInAdapterRegistry(options = {}) {
         requiresNetwork,
         providerEnvironmentPrefixes,
         filesystemIsolation,
+        containment,
+        readContainment,
+        writeContainment,
+        filesystemEventSource,
       }) => ({
         id,
         displayName,
@@ -360,6 +392,10 @@ export function createBuiltInAdapterRegistry(options = {}) {
         requiresNetwork,
         providerEnvironmentPrefixes,
         filesystemIsolation,
+        containment,
+        readContainment,
+        writeContainment,
+        filesystemEventSource,
       }));
     },
   });

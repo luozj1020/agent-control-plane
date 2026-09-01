@@ -1,15 +1,18 @@
-# Agent Workflow Switch
+# AI Coding Workflow Control Plane
 
-Agent Workflow Switch is a local-first workflow Skill manager for coding-agent
-collaboration. It follows the CC-Switch product model: choose a mode and agent
-bindings, activate the resolved Skill, then start your preferred coding agent
+AI Coding Workflow Control Plane is a local-first control plane for selecting,
+binding, activating, and observing coding-agent workflows. It follows the
+CC-Switch interaction model: choose a workflow mode and agent bindings,
+activate the resolved projection, then start your preferred coding agent
 normally.
 
 For example, a profile can select Codex as the main agent, Overnight as the
 workflow mode, and Claude Code as the downstream implementation agent.
-Activation renders the product-owned Overnight template into a managed Skill
-and agent configuration. When the user starts Codex, Codex loads that generated
-Skill bundle and performs planning, delegation, review, and continuation.
+The workflow semantics, Task Card protocol, runtime tools, schemas, and
+installation assets are embedded in `packages/workflow-core`. Activation
+projects the selected internal contract into a managed Skill and agent
+configuration. When the user starts Codex, Codex loads that generated bundle
+and performs planning, delegation, review, and continuation.
 
 ## What is switched
 
@@ -17,16 +20,15 @@ The user-facing controls are workflow mode, main agent, and downstream role
 bindings. The actual activated artifact is an effective Skill bundle:
 
 ```text
-product mode template + agent bindings + target adapter
+workflow contract + mode selection + agent bindings + target adapter
                          -> effective Skill bundle
                          -> activate for Codex or another main agent
 ```
 
-Each mode is a separate Skill family rather than one Skill containing all mode
-instructions. The product may reuse source fragments internally, but it
-materializes only the selected mode and selected agent bindings, exposes only
-that workflow Skill to the target agent, and records exactly which variant is
-active.
+Each mode is projected as a separate Skill family rather than one Skill
+containing every mode. The product materializes only the selected mode and
+agent bindings, exposes only that workflow projection to the target agent, and
+records exactly which variant is active.
 
 This keeps inactive modes and unused agent adapters out of Codex's loaded Skill
 context. Switching mode means atomically switching the active minimal Skill,
@@ -34,28 +36,33 @@ not asking a large Skill to route among three embedded modes.
 
 ## Product boundary
 
-The application manages external configuration and owns the versioned workflow
-templates that it projects into coding agents. Balanced additionally uses an
-on-demand local Runner invoked by the active main agent. It is not a daemon:
+The embedded `packages/workflow-core` package owns mode semantics, Task Card
+protocol, runtime states, review decisions, wake conditions, and evidence
+invariants. The ACP application layer owns selection, profiles, agent/Harness
+bindings, activation, rollback, usage monitoring, compatibility diagnosis, and
+UI/CLI projection. Balanced also has an on-demand local Runner invoked by the
+active main agent. It is not a daemon:
 the Runner exists only for one bounded downstream round and owns that child
 process, its timers, budget ledger, evidence, and termination.
 
-It owns:
+The control plane owns:
 
 - a workflow Skill catalog with separate mode Skill families;
 - reusable workflow profiles;
-- built-in Overnight, Balanced, and Interactive mode templates;
+- projections of the Overnight, Balanced, and Interactive workflow contract;
 - main-agent, mode, and downstream role selections;
 - rendering and synchronization of mode-specific Skills/instructions;
 - active-Skill preview, enable, switch, rollback, update, and removal;
 - managed AGENTS.md/CLAUDE.md/config projections;
 - compatibility checks, activation previews, atomic writes, and backups;
 - import, export, health status, and one-click switching.
-- a versioned Balanced timing policy with configurable wait/extension overrides and call budgets;
-- two versioned Overnight loop policies with independent minimal Skill output;
-- versioned external-monitor policies shared by Overnight and Balanced;
+- configurable Balanced timing overrides and call budgets constrained by the workflow contract;
+- selection of the two upstream Overnight strategies with independent minimal Skill output;
+- external-monitor adapters for the upstream wake/evidence contract;
 - an on-demand Balanced Runner with pluggable downstream adapters;
 - hash-bound round evidence, Revision Delta continuation, and budget receipts.
+- content-free coordination telemetry for Runner calls, artifacts, states,
+  validation, wake delivery, review decisions, and interrupts.
 
 The selected main agent, following the activated instructions, owns:
 
@@ -70,6 +77,11 @@ process-group termination, session continuation, scope enforcement, validation
 evidence, and call-budget enforcement. Token usage remains observable but never
 terminates a round. The main agent retains semantic
 acceptance and never gains merge authority from a successful child exit.
+Balanced and Overnight resolve lifecycle states, evidence outcomes, strategies,
+terminal states, and review decisions from the hash-bound Workflow Contract
+projection. Each run records the embedded Contract version and SHA-256. Runtime
+fallback constants are synchronization-checked safety defaults for isolated
+module tests; they are not an independent semantic authority.
 
 ## Example
 
@@ -126,6 +138,47 @@ The current contract exposes durable wake states to target adapters. It does
 not add an always-running daemon or claim a universal remote-wake API for every
 main-agent harness.
 
+## Coordination observability
+
+Workflow Contract 1.6 includes `Coordination Event v1`, `Coordination Run
+Summary v1`, and the bounded `Coordination Run Detail v1` projection. Every new
+Balanced and Overnight run appends comparable control-plane boundary events to
+`coordination-events.jsonl`; the mode-specific
+`events.jsonl` and `monitor-events.jsonl` remain available for deeper runtime
+diagnosis.
+
+The Coordination page and `GET /api/coordination` aggregate only recorded
+facts: downstream invocation boundaries and reported token totals, explicit
+artifact reads, artifact writes, lifecycle transitions, validation, wake
+delivery, review decisions, and interrupts. Event details are metadata-only
+and never contain prompt, response, or source-file contents. Unsupported
+dimensions are reported as `unsupported`, not zero. Older runs are not
+backfilled with inferred events.
+
+Filesystem containment is an Adapter capability, not a model claim. Read and
+write guarantees are independent: reads are `exact-paths`,
+`partial-event-audit`, or `unsupported`; writes are `exact-paths`,
+`post-run-audit`, or `unsupported`. The built-in Claude Code Adapter records
+only explicit `Read` tool-use entries in stream JSON. Bash, MCP, LSP, and other
+unobserved channels therefore keep the run at partial coverage. Observed reads
+are classified against Task Card `read_paths`, `write_paths`, and
+`forbidden_paths`; outside-worktree paths are redacted and retained as
+violations rather than silently discarded.
+
+Run summaries also derive read classifications, repeated-read counts, observed
+node/relationship counts, artifact-reader links, and maximum artifact reader
+fan-out. These values are computed only from recorded events. They do not infer
+hidden Bash/MCP/LSP reads, Agent messages, or a coordination-token ratio.
+
+Selecting a run returns at most 500 allowlisted metadata events and renders their
+append sequence as a temporal node/edge graph plus an event timeline. Invalid
+JSON, mismatched run identity, unsafe endpoint identifiers, and unapproved
+detail fields are rejected or stripped before the API response. The graph scope
+is explicitly `returned-events`; it is not presented as a complete interaction
+graph when instrumentation is partial.
+The backing JSONL must be a regular file and is capped at 16 MiB for local API
+reads; symlinks and oversized telemetry fail closed.
+
 The Overnight strategy selector is shown only while Overnight is selected. Its
 choice is included in the effective Skill identity, activation manifest,
 history, backup, and rollback data. Only the selected strategy is rendered into
@@ -133,9 +186,26 @@ history, backup, and rollback data. Only the selected strategy is rendered into
 
 ## Status
 
-Early product development. The first milestone defines the workflow Skill
-catalog, product-owned modes, effective Skill bundles, and deterministic
-target-file projections.
+Early product development. The current milestone embeds the complete workflow
+core in this repository and reports internal Contract compatibility, Schema
+bindings, and protocol drift alongside activation and runtime features.
+
+## Embedded Workflow Core
+
+The former standalone workflow implementation is part of this monorepo at
+`packages/workflow-core`. No sibling checkout or source-path environment
+variable is required. Useful maintenance commands are:
+
+```bash
+npm run workflow:contract
+npm run workflow:test
+npm run workflow:test:full
+npm run workflow -- contract export
+```
+
+The default root `npm test` includes the core Contract, extension interfaces,
+Bookend/Runner behavior, and both installer suites. `workflow:test:full` keeps
+the much slower exhaustive timing and recovery suite available on demand.
 
 ## Run the local preview
 
@@ -174,6 +244,34 @@ JSON is the canonical Task Card format because scope, forbidden boundaries,
 argv validation commands, revisions, and evidence hashes must be machine
 validated. Create a non-overwriting scaffold, edit it, and validate it before
 submission:
+
+Multi-participant work can declare durable ownership for decomposition seams
+under `extensions.task_shape`:
+
+```json
+{
+  "participants": [
+    {"id": "parser", "owner": "worker", "responsibilities": ["Produce normalized AST"]},
+    {"id": "renderer", "owner": "worker", "responsibilities": ["Consume AST"]}
+  ],
+  "interfaces": [
+    {
+      "id": "ast-boundary",
+      "producer": "parser",
+      "consumer": "renderer",
+      "owner": "renderer",
+      "contract": "Normalized AST preserves source ranges",
+      "validation_id": "interface-test"
+    }
+  ]
+}
+```
+
+Participant and interface IDs are stable task semantics; `owner` on a
+participant binds it to an Agent/role, while `owner` on an interface names the
+participant accountable for the boundary. Unknown references, self-edges, and
+unknown validation IDs fail closed. Preflight warns when multiple participants
+declare no interfaces or when an interface has no deterministic validation.
 
 ```bash
 agent-control-plane task init --output TASK.json
@@ -237,8 +335,36 @@ model response, prompt, Task Card, proxy values, or credentials. A successful
 probe establishes current connectivity only and is not task acceptance evidence;
 switching routes and probing again consumes another explicitly confirmed call.
 
-The checked-in normative schema is `apps/web/task-card-v1.schema.json` and the
-local server exposes it at `GET /api/task-card/schema` for editors and adapters.
+`GET /api/task-card/schema` serves the hash-bound schema from
+`packages/workflow-core`. There is no second Web-owned schema copy: an absent
+core, incompatible Contract, or hash mismatch fails closed.
+
+## Tools and integrations
+
+The **工具与集成** page begins with the embedded Workflow Core panel. It reads
+`packages/workflow-core`, accepts Contract 1.1+, verifies every Schema hash,
+compares mode, strategy, review, and Runner-state projections, and reports drift
+between the canonical embedded protocol and the runtime safety defaults.
+
+A versioned
+Integration Manifest keeps tool identity, capabilities, permissions, project
+markers, and Harness compatibility separate from workflow Skills. The initial
+catalog contains CodeGraph CLI, CodeGraph MCP, and a generic custom MCP Server
+registration entry.
+
+Discovery is read-only: it validates an absolute project directory, resolves
+commands directly from `PATH` without a shell, runs a five-second bounded version
+handshake with a minimal non-secret process environment, and treats a symlinked
+or non-directory `.codegraph` marker as unsafe.
+Diagnostics return only checks, version metadata, and health categories; command
+output, environment values, repository content, and credentials are not returned.
+
+Installation planning is also non-mutating in this milestone. The server returns
+argv arrays, expected write boundaries, network requirements, target Harness,
+and global/project scope with `executable=false`. CodeGraph project initialization
+and MCP configuration projection therefore remain previews. The later execution
+layer must add explicit confirmation, target-file backup, post-write verification,
+and rollback before these plans may run.
 
 ## Interactive subagent installation
 

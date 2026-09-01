@@ -49,17 +49,27 @@ test("serves the application and health endpoint", async () => {
     assert.equal(health.status, 200);
     assert.deepEqual(await health.json(), {
       status: "ok",
-      product: "agent-workflow-switch",
+      product: "ai-coding-workflow-control-plane",
     });
 
     const page = await fetch(baseUrl);
     assert.equal(page.status, 200);
     const html = await page.text();
-    assert.match(html, /Agent Workflow Switch/);
+    assert.match(html, /AI Coding Workflow Control Plane/);
     assert.match(html, /Token 运行时用量/);
     assert.match(html, /RUNTIME ANALYTICS/);
     assert.match(html, /id="nav-usage"/);
+    assert.match(html, /id="nav-coordination"/);
     assert.match(html, /id="nav-task-card"/);
+    assert.match(html, /id="nav-integrations"/);
+    assert.match(html, /class="integrations-view" id="integrations-view" hidden/);
+    assert.match(html, /id="integrations-project-root"/);
+    assert.match(html, /id="integration-list"/);
+    assert.match(html, /id="workflow-source-panel"/);
+    assert.match(html, /id="workflow-source-version"/);
+    assert.match(html, /id="workflow-source-diagnose"/);
+    assert.match(html, /内置 Workflow Core 契约/);
+    assert.match(html, /工具与集成/);
     assert.match(html, /class="task-card-view" id="task-card-view" hidden/);
     assert.match(html, /id="task-card-editor"/);
     assert.match(html, /id="task-card-form"/);
@@ -76,6 +86,14 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /id="task-card-markdown"/);
     assert.match(html, /JSON 是运行时唯一事实源/);
     assert.match(html, /class="usage-view" id="usage-view" hidden/);
+    assert.match(html, /class="coordination-view" id="coordination-view" hidden/);
+    assert.match(html, /id="coordination-run-list"/);
+    assert.match(html, /id="coordination-reads-allowed"/);
+    assert.match(html, /id="coordination-max-reader-fanout"/);
+    assert.match(html, /id="coordination-detail-panel"/);
+    assert.match(html, /id="coordination-graph-shell"/);
+    assert.match(html, /id="coordination-event-list"/);
+    assert.match(html, /“不支持”、部分审计与 0 严格区分/);
     assert.match(html, /模型调用数/);
     assert.match(html, /id="calls-chart"/);
     assert.match(html, /id="runtime-upstream-tokens"/);
@@ -155,6 +173,109 @@ test("active connectivity endpoint forwards only the explicit diagnostic request
       };
     },
   });
+});
+
+test("integration APIs expose discovery, diagnostics, and non-executable plans", async () => {
+  const calls = [];
+  const integrationRegistry = {
+    async list(input) {
+      calls.push(["list", input]);
+      return {
+        schemaVersion: 1,
+        projectRoot: input.projectRoot,
+        integrations: [],
+        safety: { installExecutionEnabled: false },
+      };
+    },
+    async diagnose(id, input) {
+      calls.push(["diagnose", id, input]);
+      return { schemaVersion: 1, integrationId: id, health: "ready", checks: [] };
+    },
+    async plan(id, input) {
+      calls.push(["plan", id, input]);
+      return { schemaVersion: 1, integrationId: id, executable: false, steps: [] };
+    },
+  };
+  await withServer(async (baseUrl) => {
+    const projectRoot = tmpdir();
+    const listed = await fetch(
+      `${baseUrl}/api/integrations?projectRoot=${encodeURIComponent(projectRoot)}`,
+    );
+    assert.equal(listed.status, 200);
+    assert.equal((await listed.json()).safety.installExecutionEnabled, false);
+
+    const diagnosed = await fetch(`${baseUrl}/api/integrations/codegraph-cli/diagnose`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({ projectRoot }),
+    });
+    assert.equal(diagnosed.status, 200);
+    assert.equal((await diagnosed.json()).health, "ready");
+
+    const planned = await fetch(`${baseUrl}/api/integrations/codegraph-mcp/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({ projectRoot, harnessId: "codex", scope: "global" }),
+    });
+    assert.equal(planned.status, 200);
+    assert.equal((await planned.json()).executable, false);
+
+    const rejected = await fetch(`${baseUrl}/api/integrations/codegraph-cli/diagnose`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://attacker.example" },
+      body: JSON.stringify({ projectRoot }),
+    });
+    assert.equal(rejected.status, 403);
+    assert.equal((await rejected.json()).error, "request.untrusted_origin");
+    assert.deepEqual(calls, [
+      ["list", { projectRoot }],
+      ["diagnose", "codegraph-cli", { projectRoot }],
+      ["plan", "codegraph-mcp", { projectRoot, harnessId: "codex", scope: "global" }],
+    ]);
+  }, { integrationRegistry });
+});
+
+test("workflow core APIs expose compatibility and protect explicit diagnosis", async () => {
+  const calls = [];
+  const workflowCoreAdapter = {
+    async status() {
+      calls.push("status");
+      return {
+        schemaVersion: 1,
+        sourceId: "agent-control-plane/workflow-core",
+        available: true,
+        compatible: true,
+        health: "compatible",
+        contractVersion: "1.1.0",
+        drift: [],
+      };
+    },
+    async diagnose() {
+      calls.push("diagnose");
+      return { schemaVersion: 1, health: "compatible", checks: [] };
+    },
+  };
+  await withServer(async (baseUrl) => {
+    const status = await fetch(`${baseUrl}/api/workflow-core`);
+    assert.equal(status.status, 200);
+    assert.equal((await status.json()).contractVersion, "1.1.0");
+
+    const diagnosed = await fetch(`${baseUrl}/api/workflow-core/diagnose`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: "{}",
+    });
+    assert.equal(diagnosed.status, 200);
+    assert.equal((await diagnosed.json()).health, "compatible");
+
+    const rejected = await fetch(`${baseUrl}/api/workflow-core/diagnose`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://attacker.example" },
+      body: "{}",
+    });
+    assert.equal(rejected.status, 403);
+    assert.deepEqual(calls, ["status", "diagnose"]);
+  }, { workflowCoreAdapter });
 });
 
 test("serves and validates the canonical Task Card used by both delegated modes", async () => {
@@ -394,6 +515,114 @@ test("serves persisted Overnight run and wake state", async () => {
     },
     { overnightRuntime },
   );
+});
+
+test("aggregates coordination telemetry without inventing unsupported reads or messages", async () => {
+  const summary = (overrides) => ({
+    schemaVersion: 1,
+    runId: "run-1",
+    mode: "balanced",
+    state: "review_pending",
+    adapterId: "claude-code",
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+    eventCount: 9,
+    invalidLines: 0,
+    actorCount: 2,
+    targetCount: 5,
+    agentInvocations: 1,
+    artifactReads: 2,
+    artifactWrites: 3,
+    readViolations: 1,
+    readClassifications: { allowed: 1, outOfScope: 1, forbidden: 0, unknown: 0 },
+    stateTransitions: 2,
+    reviewDecisions: 1,
+    validationEvents: 1,
+    wakeEvents: 0,
+    observedTokens: 42,
+    measurementSources: ["runtime"],
+    containment: { read: "partial-event-audit", write: "post-run-audit", eventSource: "claude-read" },
+    topology: {
+      nodeCount: 5,
+      relationshipCount: 4,
+      agentNodes: 1,
+      artifactNodes: 3,
+      uniqueReadArtifacts: 2,
+      repeatedArtifactReads: 0,
+      artifactReaderLinks: 2,
+      maxArtifactReaderFanOut: 1,
+    },
+    coverage: { invoke: "observed", write: "observed", read: "observed", message: "unsupported" },
+    ...overrides,
+  });
+  const balancedRuntime = { async listRuns() { return [{ coordination: summary({}) }]; } };
+  const overnightRuntime = {
+    async listRuns() {
+      return [{ coordination: summary({ runId: "run-2", mode: "overnight", wakeEvents: 2 }) }];
+    },
+  };
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/coordination`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.aggregate.runs, 2);
+    assert.equal(body.aggregate.agentInvocations, 2);
+    assert.equal(body.aggregate.artifactReads, 4);
+    assert.equal(body.aggregate.readViolations, 2);
+    assert.deepEqual(body.aggregate.readClassifications, {
+      allowed: 2,
+      outOfScope: 2,
+      forbidden: 0,
+      unknown: 0,
+    });
+    assert.equal(body.aggregate.topology.nodeCount, 10);
+    assert.equal(body.aggregate.topology.relationshipCount, 8);
+    assert.equal(body.aggregate.topology.uniqueReadArtifacts, 4);
+    assert.equal(body.aggregate.topology.artifactReaderLinks, 4);
+    assert.equal(body.aggregate.topology.repeatedArtifactReads, 0);
+    assert.equal(body.aggregate.topology.maxArtifactReaderFanOut, 1);
+    assert.equal(body.aggregate.wakeEvents, 2);
+    assert.equal(body.coverage.read, "observed");
+    assert.equal(body.coverage.message, "unsupported");
+  }, { balancedRuntime, overnightRuntime });
+});
+
+test("serves bounded metadata-only coordination detail for a safe run identity", async () => {
+  const calls = [];
+  const detail = {
+    schemaVersion: 1,
+    runId: "run-1",
+    mode: "balanced",
+    summary: { eventCount: 1 },
+    timeline: {
+      totalEvents: 1,
+      returnedEvents: 1,
+      offset: 0,
+      truncated: false,
+      invalidLines: 0,
+      rejectedEvents: 0,
+      events: [],
+    },
+    graph: { scope: "returned-events", nodes: [], edges: [] },
+  };
+  const balancedRuntime = {
+    async listRuns() { return []; },
+    async coordinationDetail(runId, options) {
+      calls.push({ runId, options });
+      return detail;
+    },
+  };
+  const overnightRuntime = { async listRuns() { return []; } };
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/coordination/balanced/run-1?limit=9999`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), detail);
+    assert.deepEqual(calls, [{ runId: "run-1", options: { maximumEvents: 500 } }]);
+
+    const unsafe = await fetch(`${baseUrl}/api/coordination/balanced/%2e%2e`);
+    assert.notEqual(unsafe.status, 200);
+    assert.equal(calls.length, 1);
+  }, { balancedRuntime, overnightRuntime });
 });
 
 test("activation API is disabled unless an absolute Skill directory is configured", async () => {

@@ -78,3 +78,52 @@ test("network adapters fail closed with a host handoff inside a restricted sandb
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("process adapters expose partial read coverage without inferring hidden reads", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-control-adapter-read-"));
+  try {
+    const script = [
+      "process.stdin.resume();",
+      "process.stdin.on('end',()=>{",
+      "console.log(JSON.stringify({type:'assistant',message:{content:[",
+      "{type:'tool_use',name:'Read',input:{file_path:'src/app.js'}},",
+      "{type:'tool_use',name:'Bash',input:{command:'cat hidden.txt'}}",
+      "]}}));",
+      "});",
+    ].join("");
+    const adapter = createProcessAdapter({
+      id: "read-aware-process",
+      command: process.execPath,
+      args: ["-e", script],
+      requiresNetwork: false,
+      readContainment: "partial-event-audit",
+      writeContainment: "post-run-audit",
+      filesystemEventSource: "test-explicit-read-v1",
+      extractFilesystemEvents(record) {
+        return (record.message?.content ?? []).flatMap((entry) =>
+          entry.type === "tool_use" && entry.name === "Read"
+            ? [{ operation: "read", path: entry.input.file_path, tool: entry.name }]
+            : []);
+      },
+    });
+    const events = [];
+    const controller = await adapter.start({
+      worktree: root,
+      prompt: "test prompt",
+      stdoutPath: join(root, "stdout.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      onEvent(event) { events.push(event); },
+    });
+    await controller.result;
+    assert.equal(adapter.containment.read, "partial-event-audit");
+    assert.deepEqual(events.filter((event) => event.type === "artifact-read"), [{
+      type: "artifact-read",
+      path: "src/app.js",
+      tool: "Read",
+      source: "test-explicit-read-v1",
+      coverage: "partial-event-audit",
+    }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-coding-workflow.local/schemas/model-catalog-v1.schema.json",
+  "title": "Provider Model Catalog v1",
+  "description": "A provenance-bearing model snapshot; presence does not guarantee account availability.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schemaVersion",
+    "id",
+    "providerId",
+    "source",
+    "models"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "id": {"$ref": "#/$defs/nonempty"},
+    "providerId": {"$ref": "#/$defs/id"},
+    "harnessId": {"$ref": "#/$defs/id"},
+    "source": {
+      "enum": ["runtime", "endpoint", "catalog", "fallback", "manual"]
+    },
+    "observedAt": {"type": "string", "format": "date-time"},
+    "models": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/model"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"source": {"not": {"const": "manual"}}}
+      },
+      "then": {"required": ["observedAt"]}
+    }
+  ],
+  "$defs": {
+    "nonempty": {"type": "string", "minLength": 1},
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["modelId"],
+      "properties": {
+        "modelId": {"$ref": "#/$defs/nonempty"},
+        "displayName": {"$ref": "#/$defs/nonempty"},
+        "lifecycle": {
+          "enum": ["active", "preview", "deprecated", "retired", "unknown"]
+        },
+        "reasoningEfforts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/nonempty"},
+          "uniqueItems": true
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "pricing": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "currency": {"$ref": "#/$defs/nonempty"},
+            "effectiveAt": {"type": "string", "format": "date-time"},
+            "source": {"$ref": "#/$defs/nonempty"}
+          }
+        }
+      }
+    }
+  }
+}

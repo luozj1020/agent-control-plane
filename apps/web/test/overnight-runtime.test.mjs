@@ -11,6 +11,20 @@ import {
   validateImprovementContinuation,
 } from "../overnight-runtime.mjs";
 import { createTaskCardTemplate, validateTaskCard } from "../task-card.mjs";
+import { EMBEDDED_RUNTIME_PROTOCOLS } from "../workflow-runtime-protocol.mjs";
+
+const TEST_CONTRACT_SHA256 = `sha256:${"a".repeat(64)}`;
+
+function protocolProvider(mode) {
+  return Promise.resolve({
+    sourceId: "agent-control-plane/workflow-core",
+    contractVersion: "1.1.0",
+    contractSha256: TEST_CONTRACT_SHA256,
+    mode,
+    strategies: ["convergent", "continuous-improvement"],
+    protocol: EMBEDDED_RUNTIME_PROTOCOLS[mode],
+  });
+}
 
 function task(overrides = {}) {
   const result = createTaskCardTemplate();
@@ -42,9 +56,21 @@ function editingAdapter(options = {}) {
   let calls = 0;
   return {
     id: "fake-builder",
+    readContainment: options.readContainment ?? "unsupported",
+    writeContainment: "post-run-audit",
+    filesystemEventSource: options.readContainment ? "fake-read-events" : null,
     async start(context) {
       calls += 1;
       context.onEvent?.({ type: "task-directed" });
+      for (const path of options.observedReads ?? []) {
+        context.onEvent?.({
+          type: "artifact-read",
+          path,
+          tool: "Read",
+          source: "fake-read-events",
+          coverage: options.readContainment ?? "partial-event-audit",
+        });
+      }
       if (options.path) {
         await writeFile(join(context.worktree, options.path), `cycle-${calls}\n`, "utf8");
       } else {
@@ -99,6 +125,7 @@ test("convergent strategy writes hash-bound wake evidence and accepts terminal r
       runtimeRoot,
       adapters: registry(adapter),
       pollMilliseconds: 1,
+      protocolProvider,
     });
     const created = await runtime.createRun({
       task: task(),
@@ -107,6 +134,11 @@ test("convergent strategy writes hash-bound wake evidence and accepts terminal r
       strategy: "convergent",
     });
     assert.equal(created.metadata.state, "submitted");
+    assert.deepEqual(created.metadata.workflowContract, {
+      source: "agent-control-plane/workflow-core",
+      version: "1.1.0",
+      sha256: TEST_CONTRACT_SHA256,
+    });
 
     const result = await runtime.executeCycle(created.runDirectory);
     assert.equal(result.state, "revision_pending");
@@ -135,6 +167,14 @@ test("convergent strategy writes hash-bound wake evidence and accepts terminal r
     assert.match(monitorEvents, /"type":"adapter-activity"/);
     assert.match(monitorEvents, /"type":"wake-requested"/);
     assert.match(monitorEvents, /"type":"wake-delivery-recorded"/);
+    const coordinationEvents = await readFile(join(created.runDirectory, "coordination-events.jsonl"), "utf8");
+    assert.match(coordinationEvents, /"kind":"agent_invoke_started"/);
+    assert.match(coordinationEvents, /"kind":"agent_invoke_completed"/);
+    assert.match(coordinationEvents, /"kind":"artifact_write"/);
+    assert.match(coordinationEvents, /"kind":"review_decision"/);
+    const runs = await runtime.listRuns();
+    assert.equal(runs[0].coordination.agentInvocations, 1);
+    assert.equal(runs[0].coordination.coverage.read, "unsupported");
   });
 });
 
@@ -158,6 +198,33 @@ test("convergent revisions fail closed when objective, acceptance, or scope expa
     () => validateConvergentRevision(previous, readExpansion),
     (error) => error instanceof OvernightRuntimeError && error.code === "revision.expanded",
   );
+});
+
+test("runtime records observed reads and classifies forbidden or out-of-scope paths", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const adapter = editingAdapter({
+      readContainment: "partial-event-audit",
+      observedReads: ["app.txt", "secret/key.txt", "@outside-worktree"],
+    });
+    const runtime = createOvernightRuntime({ runtimeRoot, adapters: registry(adapter), pollMilliseconds: 1 });
+    const created = await runtime.createRun({
+      task: task(),
+      worktree,
+      adapterId: adapter.id,
+      strategy: "convergent",
+    });
+    await runtime.executeCycle(created.runDirectory);
+    const [run] = await runtime.listRuns();
+    assert.equal(run.coordination.artifactReads, 3);
+    assert.equal(run.coordination.readViolations, 2);
+    assert.equal(run.coordination.coverage.read, "observed");
+    assert.equal(run.coordination.containment.read, "partial-event-audit");
+    const detail = await runtime.coordinationDetail(run.runId, { maximumEvents: 2 });
+    assert.equal(detail.runId, run.runId);
+    assert.equal(detail.mode, "overnight");
+    assert.equal(detail.timeline.returnedEvents, 2);
+    assert.equal(detail.timeline.truncated, true);
+  });
 });
 
 test("continuous improvement preserves metric floor and explicitly declares added paths", async () => {

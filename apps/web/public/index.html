@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Agent Workflow Switch — 为 Codex 切换最小工作流 Skill"
+      content="AI Coding Workflow Control Plane — 选择、绑定、激活与监测多 Agent 工作流"
     />
-    <title>Agent Workflow Switch</title>
+    <title>AI Coding Workflow Control Plane</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -16,8 +16,8 @@
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">A</div>
           <div>
-            <strong>Agent Workflow</strong>
-            <span>Skill Switch</span>
+            <strong>AI Workflow</strong>
+            <span>Control Plane</span>
           </div>
         </div>
 
@@ -30,9 +30,17 @@
             <span class="nav-icon">▥</span>
             用量监测
           </button>
+          <button class="nav-item" id="nav-coordination" type="button">
+            <span class="nav-icon">⌁</span>
+            协调观测
+          </button>
           <button class="nav-item" id="nav-task-card" type="button">
             <span class="nav-icon">◎</span>
             Task Card
+          </button>
+          <button class="nav-item" id="nav-integrations" type="button">
+            <span class="nav-icon">⌘</span>
+            工具与集成
           </button>
           <button class="nav-item" id="nav-history" type="button">
             <span class="nav-icon">↺</span>
@@ -363,6 +371,7 @@
                   <li>未知字段会被拒绝，不会静默忽略。</li>
                   <li>路径必须相对工作树，禁止绝对路径与 <code>..</code>。</li>
                   <li>验证命令必须是 argv 数组，不接受 Shell 字符串。</li>
+                  <li>声明多参与者接口时，producer、consumer 与 owner 必须引用稳定 participant ID。</li>
                   <li>旧七字段格式载入后会自动迁移为 <code>task-card-v1</code>。</li>
                   <li>Overnight 与 Balanced 共用这份 JSON 契约。</li>
                 </ul>
@@ -443,6 +452,94 @@
               </div>
             </section>
           </div>
+        </section>
+
+        <section class="integrations-view" id="integrations-view" hidden>
+          <header class="integrations-topbar">
+            <div>
+              <p class="eyebrow">TOOLS · MCP · HARNESS ADAPTERS</p>
+              <h1>工具与集成</h1>
+              <p class="subtitle">发现本地工具、检查项目配置，并生成需要明确确认的安装计划。</p>
+            </div>
+            <button class="button ghost" id="integrations-refresh" type="button">刷新状态</button>
+          </header>
+
+          <section class="workflow-source-panel health-unavailable" id="workflow-source-panel" aria-labelledby="workflow-source-title">
+            <div class="workflow-source-heading">
+              <div>
+                <p class="token-kicker">WORKFLOW SOURCE OF TRUTH</p>
+                <h2 id="workflow-source-title">内置 Workflow Core 契约</h2>
+                <p>模式语义、Task Card 与运行协议随产品内置；无需安装或绑定外部工作流仓库。</p>
+              </div>
+              <div class="workflow-source-actions">
+                <span class="integration-health" id="workflow-source-health">读取中</span>
+                <button class="button ghost" id="workflow-source-diagnose" type="button">检查协议漂移</button>
+              </div>
+            </div>
+            <div class="workflow-source-metrics">
+              <div><span>来源版本</span><strong id="workflow-source-version">—</strong></div>
+              <div><span>兼容范围</span><strong id="workflow-source-support">Contract 1.1+</strong></div>
+              <div><span>契约指纹</span><strong id="workflow-source-hash">—</strong></div>
+              <div><span>Runner 协议</span><strong id="workflow-source-runtime">内置投影</strong></div>
+            </div>
+            <p class="workflow-source-path" id="workflow-source-path">正在读取产品内置 workflow-core…</p>
+            <div class="workflow-source-diagnostic" id="workflow-source-diagnostic" aria-live="polite"></div>
+          </section>
+
+          <section class="integrations-control-panel" aria-labelledby="integrations-control-title">
+            <div class="integrations-control-heading">
+              <div>
+                <p class="token-kicker">TARGET CONTEXT</p>
+                <h2 id="integrations-control-title">诊断与计划范围</h2>
+              </div>
+              <span class="integration-safety-badge">计划预览 · 不直接安装</span>
+            </div>
+            <div class="integrations-controls">
+              <label class="integration-project-field">
+                <span>绝对项目路径</span>
+                <input id="integrations-project-root" type="text" placeholder="/mnt/e/project" autocomplete="off" spellcheck="false">
+              </label>
+              <label>
+                <span>目标 Harness</span>
+                <select id="integrations-harness">
+                  <option value="codex">Codex</option>
+                  <option value="claude-code">Claude Code</option>
+                  <option value="cursor">Cursor</option>
+                  <option value="opencode">OpenCode</option>
+                </select>
+              </label>
+              <label>
+                <span>配置范围</span>
+                <select id="integrations-scope">
+                  <option value="global">全局</option>
+                  <option value="project">项目级</option>
+                </select>
+              </label>
+            </div>
+            <div class="integrations-summary">
+              <div><span>Manifest</span><strong id="integrations-total">—</strong></div>
+              <div><span>已检测</span><strong id="integrations-installed">—</strong></div>
+              <div><span>项目已配置</span><strong id="integrations-configured">—</strong></div>
+              <p id="integrations-status">等待首次发现</p>
+            </div>
+          </section>
+
+          <div class="integration-list" id="integration-list" aria-live="polite">
+            <div class="integration-empty">正在读取 Integration Manifest…</div>
+          </div>
+
+          <section class="integration-plan-panel" id="integration-plan-panel" hidden>
+            <div class="integration-plan-heading">
+              <div>
+                <p class="token-kicker">TRANSACTION PREVIEW</p>
+                <h2 id="integration-plan-title">安装计划</h2>
+              </div>
+              <button class="button ghost" id="integration-plan-close" type="button">关闭</button>
+            </div>
+            <div class="integration-plan-meta" id="integration-plan-meta"></div>
+            <div class="integration-plan-steps" id="integration-plan-steps"></div>
+            <p class="integration-plan-note">当前阶段只生成 argv、写入边界和网络需求预览，不执行命令。后续执行层必须先备份目标配置并获得单独确认。</p>
+          </section>
         </section>
 
         <section class="usage-view" id="usage-view" hidden>
@@ -591,6 +688,87 @@
               <div class="runtime-empty" id="calls-empty" hidden></div>
             </div>
             <p class="calls-footnote">每个完成的 last_token_usage 事件计为一次上游调用；每条去重后的 Claude assistant usage 计为一次下游调用。当前数据属于 Agent 级归因，代表 Claude Code 总活动，尚不能证明调用属于某个具体 Workflow；不会根据模型名称、提示词或进程数量推测任务关系。</p>
+          </section>
+        </section>
+
+        <section class="coordination-view" id="coordination-view" hidden>
+          <header class="coordination-topbar">
+            <div>
+              <p class="eyebrow">COORDINATION OBSERVABILITY</p>
+              <h1>协调观测</h1>
+              <p class="subtitle">比较 Balanced 与 Overnight 的调用、制品、状态和审阅边界；只记录元数据。</p>
+            </div>
+            <button class="button ghost" id="coordination-refresh" type="button">刷新数据</button>
+          </header>
+
+          <section class="coordination-panel" aria-labelledby="coordination-title">
+            <div class="coordination-heading">
+              <div>
+                <p class="token-kicker">RUN SUMMARY</p>
+                <h2 id="coordination-title">运行时协调指标</h2>
+              </div>
+              <span id="coordination-updated">等待首次采集</span>
+            </div>
+            <div class="coordination-metrics">
+              <article><span>Runs</span><strong id="coordination-runs">—</strong><small>已纳入运行</small></article>
+              <article><span>Events</span><strong id="coordination-events">—</strong><small>控制面事件</small></article>
+              <article><span>Agent invokes</span><strong id="coordination-invocations">—</strong><small>下游调用</small></article>
+              <article><span>Artifact reads</span><strong id="coordination-reads">—</strong><small>显式读取事件</small></article>
+              <article><span>Artifact writes</span><strong id="coordination-writes">—</strong><small>持久制品</small></article>
+              <article><span>Read violations</span><strong id="coordination-read-violations">—</strong><small>越界或禁止读取</small></article>
+              <article><span>State changes</span><strong id="coordination-transitions">—</strong><small>状态转换</small></article>
+              <article><span>Review decisions</span><strong id="coordination-reviews">—</strong><small>上游决策</small></article>
+            </div>
+            <div class="coordination-coverage" aria-label="遥测覆盖率">
+              <span id="coordination-coverage-invoke"><i></i>调用：等待采集</span>
+              <span id="coordination-coverage-write"><i></i>写入：等待采集</span>
+              <span id="coordination-coverage-read"><i></i>读取：等待采集</span>
+              <span id="coordination-coverage-message"><i></i>消息：等待采集</span>
+            </div>
+            <p class="coordination-policy">“不支持”、部分审计与 0 严格区分。内置 Claude 适配器只采集 stream-json 中显式 Read 工具事件；Bash、MCP、LSP 等不可见读取不会被推测。</p>
+            <div class="coordination-section-heading">
+              <strong>确定性派生指标</strong>
+              <span>按运行求和；最大扇出取运行内观测最大值</span>
+            </div>
+            <div class="coordination-metrics coordination-derived-metrics">
+              <article><span>Allowed reads</span><strong id="coordination-reads-allowed">—</strong><small>Task Card 范围内</small></article>
+              <article><span>Out-of-scope</span><strong id="coordination-reads-out-of-scope">—</strong><small>未声明读取</small></article>
+              <article><span>Forbidden reads</span><strong id="coordination-reads-forbidden">—</strong><small>命中禁止路径</small></article>
+              <article><span>Unknown reads</span><strong id="coordination-reads-unknown">—</strong><small>缺少分类元数据</small></article>
+              <article><span>Repeated reads</span><strong id="coordination-reads-repeated">—</strong><small>同运行重复制品读取</small></article>
+              <article><span>Read artifacts</span><strong id="coordination-read-artifacts">—</strong><small>运行内唯一制品求和</small></article>
+              <article><span>Observed nodes</span><strong id="coordination-topology-nodes">—</strong><small>运行内节点求和</small></article>
+              <article><span>Relationships</span><strong id="coordination-topology-relationships">—</strong><small>唯一类型边求和</small></article>
+              <article><span>Reader links</span><strong id="coordination-reader-links">—</strong><small>制品—读取者关系</small></article>
+              <article><span>Max reader fan-out</span><strong id="coordination-max-reader-fanout">—</strong><small>单制品不同读取者</small></article>
+            </div>
+          </section>
+
+          <section class="coordination-panel coordination-runs-panel" aria-labelledby="coordination-runs-title">
+            <div class="coordination-heading">
+              <div>
+                <p class="token-kicker">RUNS</p>
+                <h2 id="coordination-runs-title">最近运行</h2>
+              </div>
+            </div>
+            <div class="coordination-run-list" id="coordination-run-list"></div>
+          </section>
+
+          <section class="coordination-panel coordination-detail-panel" id="coordination-detail-panel" aria-labelledby="coordination-detail-title" hidden>
+            <div class="coordination-heading">
+              <div>
+                <p class="token-kicker">TEMPORAL INTERACTION GRAPH</p>
+                <h2 id="coordination-detail-title">运行详情</h2>
+              </div>
+              <button class="button ghost" id="coordination-detail-close" type="button">关闭</button>
+            </div>
+            <p class="coordination-detail-status" id="coordination-detail-status">选择运行后加载元数据事件。</p>
+            <div class="coordination-graph-shell" id="coordination-graph-shell" role="img" aria-label="按事件顺序排列的协调节点和关系图"></div>
+            <div class="coordination-section-heading">
+              <strong>事件时间线</strong>
+              <span>仅展示经过 allowlist 投影的元数据</span>
+            </div>
+            <div class="coordination-event-list" id="coordination-event-list"></div>
           </section>
         </section>
 

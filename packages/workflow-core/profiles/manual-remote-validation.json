@@ -1,0 +1,13 @@
+{
+  "name": "manual-remote-validation",
+  "profile_version": 1,
+  "description": "Human-controlled publish and remote validation",
+  "extensions": {
+    "remote_validation": {
+      "automation": "preview",
+      "automatic_push": false,
+      "automatic_ssh": false,
+      "automatic_merge": false
+    }
+  }
+}

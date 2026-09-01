@@ -1,0 +1,329 @@
+{
+  "contract_id": "ai-coding-workflow",
+  "contract_version": "1.6.0",
+  "invariants": [
+    "explicit-mode-selection",
+    "single-writer",
+    "hash-bound-evidence",
+    "tools-establish-facts-models-make-claims",
+    "models-never-merge",
+    "human-retains-sensitive-authority"
+  ],
+  "modes": [
+    {
+      "entrypoint": [
+        "python",
+        "ai/aiwf.py",
+        "submit",
+        "TASK.json"
+      ],
+      "id": "overnight",
+      "ownership": "downstream-convergence",
+      "upstream_lifecycle": "bookends"
+    },
+    {
+      "entrypoint": [
+        "python",
+        "ai/aiwf.py",
+        "balanced",
+        "TASK.json"
+      ],
+      "id": "balanced",
+      "ownership": "round-based",
+      "upstream_lifecycle": "active-between-rounds"
+    },
+    {
+      "entrypoint": null,
+      "id": "interactive",
+      "ownership": "upstream-continuous",
+      "upstream_lifecycle": "continuous"
+    }
+  ],
+  "overnight_strategies": [
+    {
+      "id": "convergent",
+      "scope_rule": "non-expanding",
+      "stop_rule": "acceptance-approved"
+    },
+    {
+      "id": "continuous-improvement",
+      "scope_rule": "acceptance-floor-preserving",
+      "stop_rule": "operator-interrupt"
+    }
+  ],
+  "producer": {
+    "cli": "aiwf",
+    "repository": "ai-coding-workflow"
+  },
+  "projections": {
+    "control_plane_runtime": {
+      "balanced": {
+        "active_state": "running",
+        "decision_states": {
+          "accept": "accepted",
+          "revise": "revision_pending",
+          "stop": "stopped"
+        },
+        "evidence_statuses": [
+          "review_pending",
+          "runtime_blocked",
+          "budget_exhausted",
+          "scope_violation",
+          "validation_failed"
+        ],
+        "initial_state": "created",
+        "outcome_states": {
+          "budget_failure": "budget_exhausted",
+          "ready": "review_pending",
+          "runtime_failure": "runtime_blocked",
+          "scope_failure": "scope_violation",
+          "validation_failure": "validation_failed"
+        },
+        "review_decisions": [
+          "accept",
+          "revise",
+          "stop"
+        ],
+        "review_state": "review_pending",
+        "states": [
+          "created",
+          "running",
+          "review_pending",
+          "revision_pending",
+          "accepted",
+          "stopped"
+        ],
+        "terminal_states": [
+          "accepted",
+          "stopped"
+        ]
+      },
+      "overnight": {
+        "active_state": "running",
+        "decision_states": {
+          "accept": "accepted",
+          "continue": "submitted",
+          "interrupt": "interrupted",
+          "interrupt_requested": "interrupt_requested",
+          "revise": "submitted",
+          "stop": "stopped"
+        },
+        "initial_state": "submitted",
+        "outcome_states": {
+          "convergent_ready": "revision_pending",
+          "improvement_ready": "improvement_cycle_ready",
+          "interrupted": "interrupted",
+          "no_change": "revision_pending",
+          "runtime_failure": "runtime_blocked",
+          "scope_failure": "scope_violation",
+          "validation_failure": "validation_failed"
+        },
+        "review_decisions": {
+          "improvement_cycle_ready": [
+            "continue",
+            "revise",
+            "stop"
+          ],
+          "revision_pending": [
+            "accept",
+            "revise",
+            "stop"
+          ],
+          "runtime_blocked": [
+            "stop"
+          ],
+          "scope_violation": [
+            "stop"
+          ],
+          "validation_failed": [
+            "stop"
+          ]
+        },
+        "states": [
+          "submitted",
+          "running",
+          "revision_pending",
+          "improvement_cycle_ready",
+          "runtime_blocked",
+          "scope_violation",
+          "validation_failed",
+          "accepted",
+          "stopped",
+          "interrupted",
+          "interrupt_requested"
+        ],
+        "terminal_states": [
+          "accepted",
+          "stopped",
+          "interrupted"
+        ],
+        "wake_states": [
+          "revision_pending",
+          "improvement_cycle_ready",
+          "runtime_blocked",
+          "scope_violation",
+          "validation_failed"
+        ]
+      }
+    },
+    "coordination_observability": {
+      "content_policy": "metadata-only",
+      "coverage_policy": "unsupported-is-not-zero",
+      "derived_metric_policy": "recorded-events-only",
+      "detail_projection_policy": "allowlist-metadata-only",
+      "detail_schema_binding": "coordination-run-detail-v1",
+      "event_kinds": [
+        "run_created",
+        "agent_invoke_started",
+        "agent_invoke_completed",
+        "artifact_read",
+        "artifact_write",
+        "state_transition",
+        "review_decision",
+        "validation_completed",
+        "wake_requested",
+        "wake_delivered",
+        "interrupt_requested"
+      ],
+      "event_schema_binding": "coordination-event-v1",
+      "measurement_sources": [
+        "runtime",
+        "filesystem_snapshot",
+        "provider_reported",
+        "derived",
+        "agent_claimed"
+      ],
+      "read_audit_policy": "explicit-events-only",
+      "read_containment_modes": [
+        "exact-paths",
+        "partial-event-audit",
+        "unsupported"
+      ],
+      "summary_schema_binding": "coordination-run-summary-v1",
+      "temporal_order_policy": "append-sequence",
+      "topology_metrics": [
+        "node-count",
+        "relationship-count",
+        "unique-read-artifacts",
+        "repeated-artifact-reads",
+        "artifact-reader-links",
+        "max-artifact-reader-fan-out"
+      ],
+      "write_containment_modes": [
+        "exact-paths",
+        "post-run-audit",
+        "unsupported"
+      ]
+    },
+    "task_card": {
+      "interface_ownership": {
+        "interface_path": "extensions.task_shape.interfaces",
+        "participant_path": "extensions.task_shape.participants",
+        "reference_policy": "declared-participants-only",
+        "validation_policy": "reference-or-preflight-warning"
+      },
+      "schema_binding": "task-card-v1",
+      "schema_version": 1
+    }
+  },
+  "review": {
+    "balanced_decisions": [
+      "accept",
+      "revise",
+      "stop"
+    ],
+    "overnight_decisions": [
+      "accept",
+      "revise"
+    ],
+    "revision_delta": "bounded-non-expanding"
+  },
+  "runtime": {
+    "balanced": {
+      "states": [
+        "review_pending"
+      ],
+      "success_states": [],
+      "terminal_states": [],
+      "wake_states": [
+        "review_pending"
+      ]
+    },
+    "bookend": {
+      "states": [
+        "submitted",
+        "converging",
+        "classifying",
+        "recovering",
+        "projecting",
+        "checkpoint_ready",
+        "revision_pending",
+        "review_ready",
+        "semantic_blocked",
+        "runtime_blocked",
+        "authority_blocked",
+        "budget_exhausted",
+        "cancelled"
+      ],
+      "success_states": [
+        "review_ready"
+      ],
+      "terminal_states": [
+        "review_ready",
+        "semantic_blocked",
+        "runtime_blocked",
+        "authority_blocked",
+        "budget_exhausted",
+        "cancelled"
+      ],
+      "wake_states": [
+        "checkpoint_ready",
+        "revision_pending",
+        "semantic_blocked"
+      ]
+    }
+  },
+  "schema_bindings": [
+    {
+      "id": "task-card-v1",
+      "path": "schemas/task-card-v1.schema.json",
+      "sha256": "sha256:0760b89029ea0dadcca3096824062c2e706fe0c43ee92780afe7d721e277f1df"
+    },
+    {
+      "id": "workflow-state-v1",
+      "path": "schemas/workflow-state.schema.json",
+      "sha256": "sha256:1ac94a1c9533965403a16866524e4d8415f18457e02cc45a00d940935372ea99"
+    },
+    {
+      "id": "workflow-event-v1",
+      "path": "schemas/workflow-event.schema.json",
+      "sha256": "sha256:f06a3f93abd6129eb1cf527d57613d6212bde2c63e973d30714437277bd02a5e"
+    },
+    {
+      "id": "review-receipt-v1",
+      "path": "schemas/review-receipt.schema.json",
+      "sha256": "sha256:9657b429177f8144057e55f2fe224bf53affad4498acbb119c126096ab77c481"
+    },
+    {
+      "id": "review-decision-v1",
+      "path": "schemas/review-decision-v1.schema.json",
+      "sha256": "sha256:91bfc542c8d8bc83a1b828f716451a3c3856444d192ff50535ee1e254124267c"
+    },
+    {
+      "id": "coordination-event-v1",
+      "path": "schemas/coordination-event-v1.schema.json",
+      "sha256": "sha256:d7bf3618a1268de4223c36db223d1ce5c8f6f8272c410097dbad71d16f49fd2c"
+    },
+    {
+      "id": "coordination-run-summary-v1",
+      "path": "schemas/coordination-run-summary-v1.schema.json",
+      "sha256": "sha256:6629ba08614c9d6e7daf7781f8a3131dc487577359b6135e1be48500f86ac71e"
+    },
+    {
+      "id": "coordination-run-detail-v1",
+      "path": "schemas/coordination-run-detail-v1.schema.json",
+      "sha256": "sha256:fdf1008883f3569717a2a4efa34372670dbd5686e0540a86c14f4ae03500861f"
+    }
+  ],
+  "schema_version": 1
+}

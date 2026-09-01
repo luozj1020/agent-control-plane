@@ -1,0 +1,1740 @@
+# AI Coding Workflow Core
+
+> 当前实现作为 Agent Control Plane 的内置 `packages/workflow-core` 组件维护和
+> 发布，运行时不依赖同级外部仓库。下文保留的独立命令用于项目安装与兼容。
+
+一个可复用的 Codex / Claude Code 工作流技能，用于将多智能体编码工作流安装到软件仓库中。
+
+[English](README.md) | 中文
+
+## 机器契约与控制平面
+
+本包是工作流语义的唯一事实源：执行模式、Task Card 协议、运行时/审阅状态、
+唤醒条件和证据不变量都在这里定义。Agent Control Plane 应用层负责选择、绑定、
+激活和监测这些语义，而不再定义一套平行工作流。
+
+使用以下命令导出或校验稳定的机器边界：
+
+```bash
+python scripts/aiwf.py contract export
+python scripts/aiwf.py contract check
+```
+
+版本化产物是 `contracts/workflow-contract-v1.json`，其中通过 SHA-256 绑定所有
+权威 JSON Schema。Contract 1.x 只允许兼容性扩展；删除或改变已有状态、决策、
+不变量或 Schema 绑定必须提升主版本。
+
+Contract 1.1 还导出与目标工具无关的控制面投影：Task Card 投影声明权威 Schema
+绑定；Balanced 与 Overnight 投影声明生命周期、证据结果、唤醒/终态、策略和
+允许的审阅决策。控制面必须消费这些字段，而不能自行维护平行状态机。
+
+## 是否应该使用这个 Skill？
+
+这是一个三模式编排工作流，不是所有代码任务的通用执行方式。它让同一任务
+按需权衡 Codex 介入程度、额度与时延：可以让 Claude 自主收敛、按调优窗口
+分轮执行，也可以完全由 Codex 协同其原生 subagents 完成。
+
+| 适合使用 | 更适合直接使用 Codex/本地工具 |
+|---|---|
+| Claude 委派或原生 subagents 能实质缩短 Codex 工作时间 | 修改极小、明确或紧急 |
+| 功能、迁移、批量修改、测试或长验证能够形成有界交付物 | 只是代码问答、审查或只读调查 |
+| 非平凡任务需要明确选择额度/时延平衡 | 编排成本高于修改本身 |
+| 委派模式具备可靠隔离和确定性证据 | 执行或证据权限不可用 |
+
+安装 Skill 不代表所有任务都必须使用它。不适合时记录 `workflow bypassed:
+<reason>`，直接执行，不生成任务卡，也不为证明绕过而调用 Spark。对于有界的
+Codex 直接修改（包括维护本 Skill），使用下面的命令记录决定，而不进入委派流程：
+
+```bash
+python scripts/aiwf.py direct --kind workflow-maintenance \
+  --reason "更新直接修改策略" --path SKILL.md --check "git diff --check"
+```
+
+它会记录精确路径和检查项，但不会启动 Spark 或 Claude。
+
+## 三种执行模式
+
+三种模式位于同一条 Codex 介入程度轴上：
+
+| 模式 | 执行 owner | Codex 介入 | 适用场景 |
+|---|---|---|---|
+| **Overnight** | 持久 Claude owner | 初始冻结及最终/Delta 审阅 | 无人值守、最省 Codex |
+| **Balanced** | 每轮由 Claude 执行 | 每个调优 round 返回后审阅 | 日常委派、周期纠偏 |
+| **Interactive** | Codex 主线程及原生 subagents | 全程持续 | 最低墙钟时延 |
+
+```bash
+# Overnight（默认）：Claude 自主收敛，Codex 只在头尾出现
+python scripts/aiwf.py submit task.json
+
+# Balanced：按既有调优时间策略执行一轮 Claude
+python scripts/aiwf.py balanced task.json
+
+# Interactive：在 Codex 中选择该模式，无 CLI、无 Claude 进程
+# 主 Codex 协同原生 explorer/worker/tester/reviewer subagents。
+```
+
+**Overnight** 使用 Bookend 架构。Codex 冻结 Task JSON 后退出；Claude 跨 epoch
+拥有探索、实现、验证、失败恢复和修订。`revision_pending` 调度 Codex 的有界
+accept/revise 决策；接受后的 `review_ready` 是终态，不再重复唤醒 Codex。
+
+**Balanced** 保持 Codex 活跃。每次命令执行一个 Claude round，并使用已经调优
+好的 dispatcher 策略管理上下文获取、活跃执行、基于进展的延长和硬截止。返回
+时生成确定性证据和 `balanced-review.json`；Codex 接受、停止，或冻结 Revision
+Delta 后启动下一轮。轮数由任务决定，不是单个固定时长 checkpoint。
+修订轮使用现有的确定性 `aiwf reviewed-continuation prepare ...` 协议，再执行
+`aiwf balanced NEXT_TASK.json --reviewed-continuation APPROVAL`。这样会复用已经
+审阅并绑定状态哈希的 worktree，而不会无声地从头开始。
+
+**Interactive** 由 Codex 主线程持续拥有任务。它规划、拆分并协同原生
+explorer/worker/tester/debugger/reviewer subagents，整合输出、验证共享 diff 并完成
+最终审阅。只读工作可并行；写入默认单写者，除非路径或 worktree 已证明隔离。
+该模式不调用 Claude。
+
+```text
+Overnight:  Codex FREEZE -> Claude CONVERGE -> Codex REVIEW
+Balanced:   Codex FREEZE -> 调优 Claude round -> Codex REVIEW -> 下一轮/接受
+Interactive: Codex PLAN -> 原生 subagents -> Codex SYNTHESIZE/VERIFY
+```
+
+Overnight 提交命令是异步的：
+
+```bash
+python scripts/aiwf.py submit task.json
+python scripts/aiwf.py bookend status /path/to/bookend-state.json
+# 只有状态为 revision_pending / semantic_blocked 时才读取：
+python scripts/aiwf.py bookend review-input /path/to/bookend-state.json
+```
+
+`submit` 返回持久状态路径后，Codex 不应阻塞等待、轮询 Claude、做 Direction
+Review，或因编译失败、测试失败、timeout、transport recovery、context exhaustion
+而醒来。这些都是 Claude owner / runtime 的内部状态。硬时间窗口只终止一个
+execution epoch，不终止逻辑任务或 Owner Lease；安全续跑必须重新证明单写者和
+稳定状态。风险事实只增加确定性 guard 与证据义务，不自动增加 Codex 调用。
+
+工具生成 diff/hash/scope/validation 和逐字节 Review Projection；Claude 只陈述
+语义假设、验收含义和未决风险。每个 changed byte 必须恰好有一个覆盖分类，覆盖
+空洞、重叠或过期绑定都会使 projection 失效并扩大最终审查面。
+
+`quota-ledger.py` 管理调用预算并拦截重复 evidence；`evaluate-acceptance.py` 执行 L0 确定性验收；`select-review-tier.py` 选择 L0 本地/L1 Spark/L2 Codex；`context-cache.py` 复用有界定位证据；`check-retry-evidence.py` 阻止无新证据重试。`quota-efficient-balanced` Profile 将 Standard Review Packet 限制为 32 KB。
+
+对于 Bazel 仓库，`build-bazel-context.py` 会把有界的目标文件列表转换为候选 BUILD rule、依赖、测试 target 和窄范围验证命令，且不会执行 Bazel。远程 Bazel 仍由人工控制：`generate-handoff.py` 只生成预览式发布、更新和合并 target 验证指令，`validation-ingest.py` 在本地分类返回日志；这些工具不会自动 push、SSH、merge 或批准验收。
+
+旧的同步前台生命周期仅作为兼容/诊断入口保留：
+
+```bash
+python scripts/aiwf.py run task.json
+# 如需零模型预览，显式添加 --preview。
+python scripts/aiwf.py run task.json --preview
+```
+
+`aiwf run` 会在一个前台进程内完成旧生命周期，不是新的 Codex 生产路径；
+`aiwf loop` 是更旧的逐轮 Codex review 兼容入口。`solution-planner` 仍只允许显式
+opt-in。破坏性或高影响操作仍需人工授权，模型永不拥有 merge 权限。
+
+底层控制面命令继续保留：
+
+```bash
+python scripts/aiwf.py efficient prepare --hints task-hints.json --task-card task.md --output-dir .ai-workflow/runs/T-1
+python scripts/aiwf.py dispatch-efficient --plan .ai-workflow/runs/T-1/execution-plan.json --task-card task.md --output-dir .ai-workflow/runs/T-1/dispatch
+# 审查 dispatch-preview.json 后，才显式添加 --execute。
+python scripts/aiwf.py efficient review --plan .ai-workflow/runs/T-1/execution-plan.json --evidence evidence.json --milestone final-candidate --output .ai-workflow/runs/T-1/review.json
+```
+
+`prepare` 为 Claude-first 工作生成任务卡和 Context Packet；显式 Codex
+fast-path 不需要 `--task-card`。`preflight-bundle` 仅作诊断，结构化 Spark
+路由/监测只在能够减少 Codex 读取时使用。
+
+## 功能说明
+
+> 下文保留大量旧前台/多阶段 helper 的操作参考。它们仍可用于兼容和诊断，
+> 但不定义生产模型调用图；生产语义以前述 Bookend 托管规则为准。
+
+安装后的工作流使用渐进式加载：`SKILL.md` 只保留核心循环和 reference
+路由，托管的 `AGENTS.md` 只保留仓库级安全内核；安装、Spark、Claude
+运行时、worktree、审查和任务卡细节放在一级 `references/` 中，仅在对应
+操作时加载。预算测试将 `SKILL.md` 限制在 4.5 KB 以下、`AGENTS.md`
+限制在 8 KB 以下，并将两者的固定上下文合计限制在 12 KB 以下。
+
+ai-coding-workflow 可以为仓库自动配置：
+- `AGENTS.md` - 所有智能体的共享规则
+- `CLAUDE.md` - Claude Code 执行规则
+- 任务卡和证据包模板
+- Codex + Claude Code 工作流的安全调度/审查/循环脚本
+- Spark 改为按需的短结构化路由/监控；长 preflight 仅保留为显式诊断兼容模式
+- Spark/Claude 使用稳定 launcher 形态执行已授权 host 重试、dirty snapshot 和审批前缀复用
+- Claude 两阶段进度语义：编辑就绪只是建议信号，只有持久产品写入才驱动活动/停滞判断
+- 实时精确路径写入门禁：只读根、工作树外 staging、任务级 session 状态和收据校验的字节保持写入器
+- worktree-aware CodeGraph receipt：拒绝过期或来自其他 worktree 的图证据
+- Execution profiles：默认省 token 的 balanced、完整上下文的 safe，以及显式大仓加速的 fast-large-repo
+- 大型仓库调度选项：受管 worktree 复用，以及减少昂贵的未跟踪文件扫描
+- 本地验证 gate，以及从任务卡 validation fenced block 自动抽取命令
+- Claude owner 内部可使用 Builder / Checker-Test 职责，但不会因此唤醒 Codex
+- 严格 `SEMANTIC_BLOCKED` 收据；普通方向、失败和恢复不形成 Codex 同步点
+- convergence-continue：非语义失败在 epoch 间恢复同一 dirty worktree
+- Bookend convergence continuation receipt + worktree state hash 验证
+- 仅兼容保留的 Windowed Bookend checkpoint pilot
+- 幂等更新的托管块（managed blocks）
+
+## Codex 低 Token 审查路径
+
+终态 acceptance bundle 是 Codex 的默认紧凑入口。存在 Acceptance Graph、
+revision delta packet、invariant matrix 或 symbol summary 时，可分别通过
+`AI_WORKFLOW_ACCEPTANCE_GRAPH_FILE`、`AI_WORKFLOW_DELTA_REVIEW_PACKET_FILE`、
+`AI_WORKFLOW_INVARIANT_MATRIX_FILE`、`AI_WORKFLOW_SYMBOL_SUMMARY_FILE` 传入。
+dispatcher 将完整产物留在文件中，只在 acceptance index 中展开变化、未支持、
+矛盾、重开、未覆盖或有语义风险的验收项。
+
+`aiwf review-tier` 直接消费该索引。确定性证据闭合时会记录 Checker 跳过并
+避免 Codex 深度 diff 审查；存在语义风险的 delta 才进入紧凑 L2 Codex 审查，
+并按需展开证据。reviewed continuation 可绑定 `--delta-review-packet`、有界的
+`--unresolved-finding` 和不可变 `--new-validation-ref`，无需重复上一轮完整上下文。
+
+仓库理解缓存可使用 `aiwf cache put|get --repo ... --file ... --symbol ...
+--tool-version ...`，将身份绑定到 HEAD、文件哈希、符号和工具版本；dirty 或
+变化后的证据只会得到 cache miss。经济性记录可加入
+`--accepted-acceptance-count`，分别统计仓库发现、意图冻结、方案审查、监控、
+diff 审查、修订编写和最终审查的 Codex 用量。这些字段只用于度量和路由，
+不会建立 Codex Token/输入硬预算。
+
+## 工作流架构概览
+
+下面的大图描述兼容的前台多阶段 helper。生产调用图是本页开头的 Bookend
+路径（overnight/balanced），而不是这张图中的逐阶段 Codex 审查。
+
+```mermaid
+flowchart TD
+    U[Human · 用户目标 / Task JSON] --> L[本地工具 · Lint / Compose / Validate]
+    L --> F[Codex · 收集仓库事实]
+    F <--> CC[哈希绑定上下文缓存 · HEAD / 文件 / 符号 / 工具版本]
+    F --> R{Codex · 确定性所有者路由}
+    R -- 显式 / 已确认高风险核心 --> CD[Codex · 有界直接实现]
+    CD --> E
+    R -- 默认源码修改 --> C[本地组合器 · 按需组件短任务卡]
+    C --> SA{Spark 任务卡审计门}
+    SA -- Express / 显式关闭 --> DI[Dispatcher · 稳定 CLI 与 host 重试]
+    SA -- 建议性终态收据 / 自动禁用 --> DI
+    SA -. 需要 host 执行 .-> SH[稳定 Spark host launcher · 缓存执行偏好]
+    SH --> SA
+    DI -. 模型前 host 阻断 .-> CH[稳定 Claude host 重试 · 保持任务 / worktree / lineage]
+    CH --> DI
+    DI --> IW[隔离 worktree · 干净 HEAD 或哈希绑定 dirty snapshot]
+    IW --> WG[实时写入门禁 · 只读根 / 外部 staging / 任务级 session-env]
+    WG --> ROLE{Claude 角色}
+    ROLE -- 显式 solution_planner_opt_in --> CPL[Claude Solution Planner · 一次结构化契约]
+    CPL --> CAR[Codex · 一次对抗性规划审查]
+    CAR --> CF[本地工具 · 冻结契约 / 非阻塞项进入 Backlog]
+    CF --> C
+    ROLE -- 冻结或有界切片 --> D[Claude Exploratory/Batch/Execution Builder · 隔离执行]
+    R -. 显式且不确定的候选 .-> S0[Spark · 短结构化估算]
+    S0 --> R
+    D -. 实质变化 / 终态事件 .-> MON[Dispatcher 事件日志 · 唯一采样者]
+    MON -. 审查边界事件尾部 .-> CR
+    D --> Q{已有有效进展且遇到语义阻塞?}
+    Q -- 否 --> SP[Spark · 机械后检]
+    Q -- 是 --> AP[本地工具 · 有界 Advisor Packet]
+    AP --> AV[Advisor · 一次只读回答]
+    AV --> D
+    D -. 零可用输出 .-> HP[本地工具 · 固定 你好 API 探针]
+    SP --> CR[Codex · 方向审查]
+    CR --> CV{Checker 价值门}
+    CV -- 确定性证据已充分 --> E
+    CV -- 测试 / 长验证 / 大量证据 --> CT[Claude Checker/Test · 测试与窄范围验证]
+    CT --> E[本地工具 · 自动证据整理]
+    E --> AB[紧凑 acceptance index · 变化 / 失败 / 语义风险项]
+    AB --> A{本地工具 · 确定性验收与审查分层}
+    A -- 机械失败 --> LR[Claude · 限定范围修订]
+    A -- 语义缺口 --> S[Spark · L1 建议审查]
+    S --> X[Codex · 必要的 L2 最终审查]
+    A -- 全部标准满足 --> FD[Codex · 最终决策]
+    X --> FD
+    LR --> D
+    FD --> H{需要远程验证?}
+    H -- 是 --> RH[本地工具 + Human · Bazel 交接 / 远程验证]
+    H -- 否 --> M[Human · 人工审查和合并]
+    RH --> M
+    D -. 基线与 delta 哈希 / 未解决 finding .-> RS[控制面 · reviewed 同 worktree continuation]
+    E -. 可执行 Case .-> BM[确定性 Fake Adapter Benchmark Gate]
+    FD -. Codex 职责用量 .-> KM[经济性 · 每个已验收项的 Token 热点]
+```
+
+完整控制循环为 **OBSERVE → ROUTE → PLAN → DISPATCH → EXECUTE → VERIFY → REVIEW**。
+ROUTE 默认将源码修改交给 Claude。Codex直接修改只用于显式选择、已确认
+高风险核心语义或确定性的审查后修正。Checker/Test 按价值触发，人工合并。
+
+Claude 是默认实现者：`exploratory-builder` 负责边界明确但路径不清晰的
+新功能，`batch-builder` 负责机械批量，`execution-builder` 负责冻结方案。
+风险最多只让所有权倾向 Codex。Skill 不实现跨项目并行；用户在不同终端
+分别运行一个仓库即可。
+
+对于大型或多阶段功能，Claude 生成一次结构化终局方案，Codex只做一轮
+对抗性审查，再由 helper 冻结契约。冻结后的实现切片重新交给 Claude；
+只有阻塞约束或明确规格变更才重新规划。
+
+显式选定的角色会直接传到运行时：`solution-planner` 映射为
+`solution-planning`，`exploratory-builder` 映射为 `exploratory`，
+`batch-builder` 映射为 `batch`，`execution-builder` 映射为 `execution-only`。
+这些是 Builder mode；任务卡 `Mode` 仍为 `builder`。若该字段误填了已知角色
+别名，Harness 会在工具探针前归一化；冲突组合则在 Claude 启动前失败。
+
+## 常用动作
+
+| 动作 | 时机 | 命令 |
+|------|------|------|
+| **引导式配置（预览）** | 查看 Skill、项目、工具和 doctor 四阶段计划 | `python scripts/update_skill.py --setup-current` |
+| **引导式配置（执行）** | 一键更新 Skill、刷新项目、配置工具并检查 | `python scripts/update_skill.py --setup-current --apply` |
+| **指定仓库配置（预览）** | 预览其他仓库的配置计划 | `python scripts/update_skill.py --setup-repo /path/to/repo` |
+| **指定仓库配置（执行）** | 对其他仓库执行完整配置 | `python scripts/update_skill.py --setup-repo /path/to/repo --apply` |
+| **安装 Skill** | 每台电脑一次 | `python scripts/install_for_codex.py` |
+| **更新 Skill** | 拉取新版本后；当前目录已引导时自动刷新项目 `ai/` | `python scripts/update_skill.py` |
+| **仅更新 Skill** | 明确保留项目内现有 `ai/` 文件 | `python scripts/update_skill.py --skill-only` |
+| **引导项目** | 每个仓库一次 | `python scripts/install_workflow.py .` |
+| **本地控制面引导** | 不希望提交 workflow 控制面文件的仓库 | `python scripts/install_workflow.py . --local-only` |
+| **自动配置仓库（预览）** | 检测语言、规模以及 LSP/CodeGraph/Zoekt 计划 | `python scripts/install_for_codex.py --auto-setup /path/to/repo` |
+| **自动配置仓库（执行）** | 安装缺失工具并初始化适用索引 | `python scripts/install_for_codex.py --auto-setup /path/to/repo --apply` |
+| **刷新项目 workflow** | 已经引导过的仓库 | `python scripts/install_workflow.py . --update-workflow-files` |
+| **Claude 供应商检查** | 脱敏显示 CC Switch 实际端点和模型 | `python scripts/claude-healthcheck.py` |
+| **Claude 端点探测** | 仅提供网络诊断；瞬时失败不阻断派发 | `python scripts/claude-healthcheck.py --probe` |
+| **Claude 交互探测** | 在调度网络环境中发送固定 `你好`；受限沙箱失败只算不确定，以用户终端成功交互为准 | `python scripts/claude-healthcheck.py --interaction-route auto --timeout 60` |
+| **Advisor 延续包** | 一个语义阻塞得到回答后，在同一 worktree 继续已有有效实现 | `python scripts/aiwf.py advisor-continuation --help` |
+| **跨沙箱进程检查** | 调度 PID 不可见时标记为未知，绝不能据此启动重复 Builder | `CLAUDE_CODE_PROCESS_VISIBILITY=auto bash scripts/status-claude.sh <task-id>` |
+| **Claude 轮次分类** | 判断失败是否计入接管阈值 | `python scripts/classify-claude-attempt.py --exit-code N --outcome NAME` |
+| **校验 Claude 上下文** | 检查 execution-only 上下文密度 | `python scripts/validate-claude-context.py task.md --require-complete` |
+| **提交 Bookend 任务（overnight）** | 冻结一次，Codex 退出，Claude 自主收敛 | `python scripts/aiwf.py submit task.json` |
+| **执行一轮 Balanced** | 使用调优 dispatcher 时间策略，返回确定性 Codex 审阅包 | `python scripts/aiwf.py balanced task.json` |
+| **执行 Balanced 修订轮** | 用一次性哈希绑定 approval 复用已审阅 worktree | `python scripts/aiwf.py balanced next-task.json --reviewed-continuation APPROVAL` |
+| **使用 Interactive** | 主 Codex 协同原生 subagents，不启动 Claude | 在 Codex 中选择 `interactive` |
+| **Bookend 任务状态** | 读取持久状态，不轮询模型进程 | `python scripts/aiwf.py bookend status .worktrees/bookend-.../` |
+| **读取 Codex 唤醒请求** | 仅在计划时启动最终审查或有界语义 delta | `python scripts/aiwf.py bookend review-input .worktrees/bookend-.../` |
+| **旧版 checkpoint pilot** | 仅兼容保留的固定窗口 Bookend 实验 | `python scripts/aiwf.py submit task.json --mode balanced` |
+| **预览集成运行** | 零模型调用审查所有阶段 | `python scripts/aiwf.py run task.json --run-dir .ai-workflow/runs/T-1 --preview` |
+| **执行集成运行** | 校验、编卡并直接派发，不再二次确认 | `python scripts/aiwf.py run task.json --run-dir .ai-workflow/runs/T-1` |
+
+Advisor 调用必须绑定非空 request/evidence，并明确使用单次调用上限。Broker 会跨角色执行相同 `request_id` 的上限，并把中断记为 cancelled。固定 Claude 探针以 `diagnostic_call` 记账，不占 Builder、接管或成功预算；同 worktree 延续审计会进入 summary/benchmark，但不会虚构 token 或时间节省。
+
+启动 API 探针默认采用自适应模式。成功探针或产生有效证据的 Claude 调度会缓存
+24 小时，并且只在仓库、路由、探针环境和 Claude 可执行文件均一致时复用。
+出现零可用输出或传输异常迹象时会强制执行真实探针，失败结果同时使缓存失效。
+只有需要每次进行新诊断时才设置 `CLAUDE_CODE_API_PROBE_MODE=always`。
+
+安装 Skill 只会让 Codex 发现该 workflow，不会自动在目标仓库创建或刷新 `ai/` 目录。已经引导过的项目会保留本地的 `ai/dispatch-to-claude.sh`、`ai/task-card-template.md` 等 workflow 副本。更新 Skill 后，需要使用 `update_skill.py --bootstrap-current` 或 `install_workflow.py . --update-workflow-files` 刷新这些本地副本。
+
+刷新旧项目时还会安装 `.codex/rules/ai-coding-workflow.rules`。刷新完成后
+必须重启 Codex，新的项目规则才会生效。在可信项目中，该规则只让以下标准仓库
+入口免于再次请求人工确认：
+
+```bash
+bash ai/run-codex-spark.sh ...
+bash ai/dispatch-to-claude.sh ...
+```
+
+不要在命令前添加环境变量赋值，也不要把 `ai/` 换成 `scripts/`；这两种写法都会
+改变命令前缀，因而仍可能触发确认。如果需要在不读取真实文件的前提下禁用项目
+专用 API 配置，应保留标准前缀并使用受限 wrapper 参数：
+
+```bash
+bash ai/run-codex-spark.sh CARD ... --empty-api-config-env PROJECT_API_CONFIG_FILE
+bash ai/dispatch-to-claude.sh CARD --empty-api-config-env PROJECT_API_CONFIG_FILE
+```
+
+Spark 的宿主交接统一返回 `75`，并输出以
+`bash ai/run-codex-spark.sh` 开头的稳定重试命令；Claude 使用对应的
+`bash ai/dispatch-to-claude.sh` 形式。兼容事件
+`--routing-event implementation` 会规范化为 `next-phase`。doctor 若报告
+launcher 陈旧，应先刷新项目，不得退回前置环境变量命令。
+
+这条窄规则不会授权任意 Bash、合并、部署、破坏性操作或产品决策。Spark 仍然
+只是 advisory，路由和有界语义审查仍由 Codex 负责。
+
+如果目标仓库只想本地使用 `ai/`、`AGENTS.md`、`CLAUDE.md` 和 `.worktrees/`，不希望把这些控制面文件提交到业务仓库，使用 `--local-only`。它会把这些路径写入 `.git/info/exclude`，不会修改 `.gitignore`；`doctor_workflow.py` 会把这种配置识别为 local-only ignore mode。
+
+## 仓库结构
+
+```
+ai-coding-workflow/
+  README.md              ← 英文文档
+  README_CN.md           ← 中文文档（本文件）
+  LICENSE                ← MIT 许可证
+  .gitignore
+  SKILL.md              ← Codex 发现的技能入口
+  agents/
+    openai.yaml         ← OpenAI/Codex 技能元数据
+  assets/
+    AGENTS.md           ← 智能体规则模板
+    CLAUDE.md           ← Claude Code 规则模板
+    README.md           ← 本地使用指南模板
+    task-card-components/  ← 精简组件目录和组件正文
+    task-card-template.md  ← 旧版兼容模板
+    evidence-packet-template.md
+    plan-task-template.md
+    plan-findings-template.md
+    plan-progress-template.md
+  references/
+    loop-model.md       ← 循环状态机和停止条件
+    operating-model.md  ← 智能体角色和交接模型
+    review-policy.md    ← 代码审查分工
+    mcp-policy.md       ← 信息检索顺序
+    benchmark-policy.md ← 质量 / 速度 / 成本 / 稳定性评估
+    codex-wakeup-audit-protocol-v1.md ← Codex 唤醒审计协议
+  scripts/
+    install_workflow.py ← 引导仓库
+    compose_task_card.py ← 本地零模型任务卡组件选择/拼接器
+    workflow_economics.py ← 记录委派开销并校准 owner 路由
+    bookend-task.py     ← Overnight 控制器及旧版 checkpoint 兼容入口
+    install_for_codex.py← 安装技能供 Codex 发现
+    update_skill.py     ← 便捷更新 Skill，并可选更新当前项目 workflow
+    dispatch-to-claude.sh← 向 Claude Code 分发任务卡
+    check-worktree.sh   ← 运行只检查不修改的验证并写入 checker report
+    locate-code.py      ← 低 token 代码定位器，带有受限 CodeGraph 回退
+    review-with-codex.sh← 向 Codex/GPT 发送证据审查
+    run-codex-spark.sh  ← 可选 gpt-5.3-codex-spark 辅助运行器
+    run-parallel-loop.sh← 实验性并行派发辅助脚本
+    run-loop.sh         ← 可选循环运行器（调度 + 审查）
+    doctor_workflow.py  ← 调度/审查循环就绪检查（只读）
+    code-search-service.py ← 可选 Zoekt/Sourcegraph 设置和诊断
+    clean_runtime.py    ← 预览/清理已忽略的运行时产物
+    install_context_tools.py ← 检查/安装上下文工具（LSP、代码检查）
+    summarize-loop-run.py ← 汇总 workflow 质量、速度、成本和稳定性
+    init-plan.py        ← 创建 ai/plans/<task-id>/ 计划文件
+    session-catchup.py  ← 根据计划和 artifacts 生成 resume-context.md
+    validate-parallel-plan.py ← 校验并行 DAG 计划 JSON 是否符合 schema v1
+    task_schema.py       ← 共享标准库加载器、校验器和 profile 组合器
+    compose-profiles.py  ← 将 profile 与任务实例组合
+    lint-task-card.py    ← 校验任务卡 JSON 是否符合 schema 和 profile
+    render-task-card.py  ← 将任务卡 JSON 渲染为 Markdown
+  schemas/
+    task-card-v1.schema.json ← 任务卡 v1 的规范 JSON Schema
+  profiles/
+    base.json            ← 基础 profile，提供合理默认值
+    bugfix.json          ← Bugfix profile，缩小范围和风险默认值
+  examples/
+    fix-typo-in-readme.json ← 示例任务卡
+```
+
+---
+
+## JSON 任务卡（可选启用）
+
+任务卡可以用结构化 JSON 代替（或配合）Markdown 编写。JSON 任务卡提供 schema 校验、确定性 profile 组合和机器可读的验收标准。现有 Markdown 任务卡和调度器完全不受影响——JSON 是可选新增功能。
+
+### 源码检出命令
+
+在克隆的 `ai-coding-workflow` 仓库中：
+
+```bash
+# 校验任务卡 JSON 是否符合 schema 和 profile
+python scripts/lint-task-card.py task.json
+
+# 组合并与任务实例合并
+python scripts/compose-profiles.py task.json --output composed.json
+
+# 渲染为 Markdown（audit 视图供人工审查，execution 视图供 Claude）
+python scripts/render-task-card.py task.json --view audit
+python scripts/render-task-card.py task.json --view execution
+```
+
+### 已安装项目命令
+
+`install_workflow.py` 引导目标仓库后，工具在 `ai/` 下可用：
+
+```bash
+# 校验
+python ai/lint-task-card.py ai/task-cards/PROJ-123.json
+
+# 组合
+python ai/compose-profiles.py ai/task-cards/PROJ-123.json --output composed.json
+
+# 渲染
+python ai/render-task-card.py ai/task-cards/PROJ-123.json --view execution
+```
+
+### JSON 作为可选启用的权威来源
+
+当任务卡同时存在 `.json` 和 `.md` 版本时，JSON 文件是权威来源。Markdown 文件是人工可读的渲染结果。使用 `render-task-card.py` 从 JSON 重新生成 Markdown。
+
+### 审计与执行渲染
+
+- **审计视图**（`--view audit`）：包含所有部分——风险评估、扩展、完整交接合同。供人工审查。
+- **执行视图**（`--view execution`）：仅包含与执行相关的部分——目标、范围、验收、验证、停止条件。供 Claude 调度。
+
+### 冲突硬失败
+
+Profile 组合是确定性的、失败即关闭的。如果两个 profile 对同一字段定义了冲突的标量值，组合会抛出错误而非静默选择其一。使用 `lint-task-card.py` 在调度前捕获冲突。
+
+### 任务粒度与复杂门禁契约
+
+`aiwf run` 会在调度前写出 `task-granularity.json`。当任务包含至少六个
+写入路径、三个独立职责、三个新模块，或同时存在多文件和多职责时，结果为
+`split-required`，Spark 与 Claude 都不会启动。应拆分 JSON 任务；确实不可拆时，
+必须在 `extensions.task_shape` 中记录经过审查的例外和具体理由。聚合或验收门禁
+任务通过 `extensions.complex_gate_contract` 冻结至少两个反例和一个失败关闭条件；
+契约不完整会在 JSON 校验阶段失败。
+
+### 兼容传统 Markdown
+
+Markdown 任务卡继续正常工作。调度器、模板和审查脚本均支持 Markdown。JSON 仅面向需要 schema 校验和结构化组合的团队可选使用。
+
+### 已安装资产布局
+
+引导后，结构化资产位于 `ai/` 命名空间下：
+
+```
+ai/
+  task_schema.py              # 共享校验器和 profile 组合器
+  compose-profiles.py         # CLI：组合 profile 与任务
+  lint-task-card.py           # CLI：校验任务卡 JSON
+  render-task-card.py         # CLI：将任务卡渲染为 Markdown
+  schemas/
+    task-card-v1.schema.json  # 规范 JSON Schema
+  profiles/
+    base.json                 # 基础 profile
+    bugfix.json               # Bugfix profile
+  examples/
+    fix-typo-in-readme.json   # 示例任务卡
+```
+
+---
+
+## 场景 A：在新电脑安装 Skill
+
+将 Skill 安装到用户级 Codex skills 目录。每台电脑只需执行一次。
+
+### Windows PowerShell
+
+```powershell
+git clone https://github.com/luozj1020/ai-coding-workflow.git
+cd ai-coding-workflow
+python .\scripts\install_for_codex.py
+```
+
+或手动安装：
+
+```powershell
+git clone https://github.com/luozj1020/ai-coding-workflow.git
+
+$dst = "$env:USERPROFILE\.codex\skills\ai-coding-workflow"
+Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills" | Out-Null
+Copy-Item -Recurse -Force ".\ai-coding-workflow" $dst
+```
+
+### macOS / Linux
+
+```bash
+git clone https://github.com/luozj1020/ai-coding-workflow.git
+cd ai-coding-workflow
+python scripts/install_for_codex.py
+```
+
+或手动安装：
+
+```bash
+git clone https://github.com/luozj1020/ai-coding-workflow.git
+mkdir -p ~/.codex/skills
+rm -rf ~/.codex/skills/ai-coding-workflow
+cp -R ai-coding-workflow ~/.codex/skills/ai-coding-workflow
+```
+
+然后重启 Codex。
+
+安装器会在安装完成后打印精确的项目引导命令。也可以在这个 Skill 仓库的克隆目录中，用一条命令完成“安装 Skill + 引导目标项目”：
+
+```powershell
+python .\scripts\install_for_codex.py --bootstrap-repo E:\path\to\your-project
+```
+
+```bash
+python scripts/install_for_codex.py --bootstrap-repo /path/to/your-project
+```
+
+日常更新可以使用更短的 wrapper：
+
+```bash
+python scripts/update_skill.py
+python scripts/update_skill.py --bootstrap-current
+python scripts/update_skill.py --pull --bootstrap-repo /path/to/your-project
+```
+
+`python scripts/update_skill.py` 更新用户级 Codex Skill，并在所在 Git 仓库已经引导时自动刷新项目内 workflow 文件，即使命令从项目子目录执行也能找到仓库根。`--bootstrap-current` 可显式指定当前仓库，`--bootstrap-repo` 用于其他仓库，`--skill-only` 才会有意保留项目内旧文件。普通更新使用紧凑摘要、跳过可选服务提示；Skill 内容哈希未变化时不再创建 staging/backup 或替换安装目录。项目刷新仍会核验全部托管内容，并校验每个发生变化的 shell launcher。命令会明确报告项目是否刷新，并提醒重启 Codex。
+
+已安装的更新器会记录并复用真实源码 checkout，不会再静默地把已安装 Skill
+目录当成自己的更新源。来源记录缺失、过期、自引用或不再指向 Git checkout
+时，更新会在修改项目文件前失败，并要求显式传入
+`--source /path/to/checkout`。成功执行 `--update-workflow-files` 后，安装器还会
+校验每个托管目标是否与新安装的 Skill 一致。
+
+如果更新后看起来仍是旧版本，请依次核对三层：
+
+1. 源码 checkout 是否包含预期提交。
+2. 用户级 Skill 是否从该 checkout 安装。安装器会在
+   `.aiwf-install-provenance.json` 中记录来源路径、提交、dirty 状态和包哈希。
+3. 目标项目是否使用 `--update-workflow-files` 完成刷新，以及刷新后是否重启
+   Codex，使新的 `.codex/rules/ai-coding-workflow.rules` 生效。
+
+更新过程现在在两个边界上都采用故障安全策略。用户级 Skill 会先复制到
+同级 staging 目录并完成校验，再原子切换；激活失败时恢复旧版本。项目
+bootstrap 在修改任何文件前会校验完整安装清单，随后对每个托管文件执行
+同目录原子替换。引导式配置最后仍由 `doctor_workflow.py` 完成跨文件一致性检查。
+
+### 一键引导式配置
+
+新版更新器可以把 Skill 更新、项目 workflow 刷新、环境感知工具配置和最终 doctor 检查串成一个流程。默认只预览，不写入任何内容：
+
+```bash
+python scripts/update_skill.py --setup-current
+python scripts/update_skill.py --setup-repo /path/to/repo
+```
+
+确认四阶段计划后，显式添加 `--apply`：
+
+```bash
+python scripts/update_skill.py --setup-current --apply
+python scripts/update_skill.py --setup-repo /path/to/repo --apply
+```
+
+执行顺序固定为：更新用户级 Skill、引导或刷新目标项目、根据仓库规模和已有工具配置 LSP/CodeGraph/Zoekt、运行 doctor。任一阶段失败都会立即停止并显示失败命令。Sourcegraph仍然只提供配置指引，不会自动部署。
+
+如果从已安装的 Skill 入口运行，但希望用另一个克隆目录作为更新源：
+
+```bash
+python ~/.codex/skills/ai-coding-workflow/scripts/update_skill.py \
+  --source /path/to/ai-coding-workflow \
+  --bootstrap-current
+```
+
+安装 Skill 时，安装器会执行只读的上下文智能检查：
+- LSP 工具，例如 `pyright`、`typescript-language-server`、`gopls`、`rust-analyzer`。
+- CodeGraph CLI 是否可用。
+- 使用 `--bootstrap-current` 或 `--bootstrap-repo` 时，目标仓库是否已经有 `.codegraph/` 索引目录。
+- 可选 Zoekt / Sourcegraph 代码搜索服务是否可用。
+
+安装器只打印建议，不会自动安装 LSP 工具，也不会自动运行 `codegraph init`。如需查看 LSP 安装建议，可运行 `python ~/.codex/skills/ai-coding-workflow/scripts/install_context_tools.py`；如需为某个仓库启用 CodeGraph，请在目标仓库内显式运行 `codegraph init`。
+
+交互式安装 skill 时，安装器会询问是否配置可选代码搜索服务。非交互安装会跳过提示。也可以显式控制：
+
+```bash
+python scripts/install_for_codex.py --code-search-services ask
+python scripts/install_for_codex.py --code-search-services skip
+python scripts/install_for_codex.py --code-search-services check
+```
+
+大型仓库里应先使用有边界的代码定位器，而不是把宽问题直接交给 CodeGraph：
+
+```bash
+python ai/locate-code.py "需要修改的符号或行为" --path src --max-files 12
+```
+
+`locate-code.py` 使用 `git ls-files` 加 `rg`/`git grep` 生成候选文件、短 snippet 和精确读取命令。CodeGraph 仍适合具体符号和调用路径，但不再作为大型仓库的默认宽定位器。如果 Zoekt 已安装并完成索引，`--backend auto` 会先使用 Zoekt，再回退到 lexical search。已有 Sourcegraph 服务时，可通过 `SOURCEGRAPH_URL` 接入。CodeGraph 的 `auto` 模式会在 tracked file 数量超过阈值时跳过 CodeGraph；只有具体文件/符号查询才使用 `--codegraph try --codegraph-timeout 12`。
+
+可选索引搜索设置：
+
+```bash
+python ai/code-search-service.py doctor
+python ai/code-search-service.py install-zoekt --yes
+python ai/code-search-service.py index-zoekt --repo . --yes
+AI_CODE_LOCATOR_BACKEND=auto python ai/locate-code.py "需要修改的符号或行为"
+```
+
+`install-zoekt --yes` 会运行三个 `go install` 命令。helper 会流式打印命令输出；当 Go 下载或编译阶段长时间没有输出时，会定期打印 `still running...` heartbeat。可以把 `--progress-interval 5` 放在子命令前面来提高提示频率，或用 `--progress-interval 0` 关闭提示：
+
+```bash
+python ai/code-search-service.py --progress-interval 5 install-zoekt --yes
+```
+
+Sourcegraph 被视为外部/自托管服务，不是默认本地依赖。运行 `python ai/code-search-service.py sourcegraph-plan` 查看 Docker Compose 指南；服务可用后设置 `SOURCEGRAPH_URL`，需要鉴权时再设置 `SOURCEGRAPH_TOKEN`。
+
+**测试是否生效：**
+
+```
+Use ai-coding-workflow to explain how to install the workflow in this repo.
+```
+
+如果 Codex 能回答并引用此 Skill 的安装器，说明 Skill 已生效。
+
+---
+
+## 场景 B：引导新项目
+
+Skill 安装完成后，引导任意仓库。每个项目只需执行一次。这一步会在项目中创建 `ai/dispatch-to-claude.sh` 以及其他本地工作流文件。
+
+### Windows PowerShell
+
+```powershell
+cd E:\path\to\your-new-project
+python $env:USERPROFILE\.codex\skills\ai-coding-workflow\scripts\install_workflow.py .
+```
+
+### macOS / Linux
+
+```bash
+cd /path/to/your-new-project
+python ~/.codex/skills/ai-coding-workflow/scripts/install_workflow.py .
+```
+
+这会在项目中生成或更新以下文件：
+
+```
+AGENTS.md
+CLAUDE.md
+ai/task-card-components/catalog.md
+ai/compose_task_card.py
+ai/workflow_economics.py
+ai/task-card-template.md
+ai/evidence-packet-template.md
+ai/plan-task-template.md
+ai/plan-findings-template.md
+ai/plan-progress-template.md
+ai/README.md
+ai/dispatch-to-claude.sh
+ai/check-worktree.sh
+ai/code-search-service.py
+ai/locate-code.py
+ai/review-with-codex.sh
+ai/run-codex-spark.sh
+ai/run-parallel-loop.sh
+ai/run-loop.sh
+ai/doctor_workflow.py
+ai/clean_runtime.py
+ai/install_context_tools.py
+ai/summarize-loop-run.py
+ai/benchmark-loop-runs.py
+ai/init-spec.py
+ai/plan-to-task-cards.py
+ai/init-plan.py
+ai/session-catchup.py
+ai/validate-parallel-plan.py
+.worktrees/.gitkeep
+```
+
+---
+
+## 更新现有项目
+
+再次运行相同命令。安装程序使用托管块来保留项目特定规则：
+
+```powershell
+# Windows
+python $env:USERPROFILE\.codex\skills\ai-coding-workflow\scripts\install_workflow.py .
+```
+
+```bash
+# macOS / Linux
+python ~/.codex/skills/ai-coding-workflow/scripts/install_workflow.py .
+```
+
+默认情况下，`ai/` 下已经存在的 plain workflow 文件不会被覆盖。如果它们和已安装 Skill 不一致，安装器会报告 `outdated`。更新 Skill 后，要刷新已引导项目，请运行：
+
+```bash
+python ~/.codex/skills/ai-coding-workflow/scripts/install_workflow.py . --update-workflow-files
+```
+
+或者在 Skill 克隆目录中运行：
+
+```bash
+python scripts/update_skill.py --bootstrap-current
+```
+
+---
+
+## 日常工作流程
+
+生产工作流是：
+
+```text
+GROUND -> FREEZE -> SUBMIT -> Claude CONVERGE -> PROJECT -> REVIEW
+```
+
+Overnight 中，Codex 运行 `aiwf submit`，返回持久状态路径并结束 episode；下一
+个 episode 只从 `revision_pending` 或 `semantic_blocked` 启动，接受后的
+`review_ready` 是终态。Balanced 由同一 Codex 线程审阅每个调优 round。
+Interactive 则由主 Codex 全程协同原生 subagents 并负责最终验证。
+
+### Profile 选择建议
+
+| 场景 | 推荐 Profile |
+|------|-------------|
+| 睡觉前、吃饭前、长编译任务 | `overnight`（默认） |
+| 日常开发、大多数任务 | `balanced` |
+| 坐在电脑前、需要原生 subagents 快速协作 | `interactive` |
+
+### 旧版前台角色分工
+
+下面的 Builder/Checker 和逐轮过程描述的是保留的前台兼容工作流，
+不是默认 Bookend 路径。
+
+大型或多阶段功能默认由 Codex完成短核心规划，再交给 helper 生成执行卡并由 Claude Builder 实施。只有用户明确接受额外串行延迟并设置 `solution_planner_opt_in=true` 时，才让 Claude 先生成结构化终局方案；该方案仍只接受一轮 Codex 对抗性审查和确定性冻结。
+
+对于非平凡修改，优先把 Claude 工作拆成两个角色：
+
+- **Builder Claude** 负责按任务卡完成限定范围内的实现，并报告实现方向。除非任务卡明确允许窄范围 sanity check，否则不写 acceptance tests，也不运行大型测试套件。
+- **Checker/Test Claude** 仅在 Codex 接受 Builder 方向且价值门通过后运行。它负责编写测试、长时间验证或大量证据处理；普通确定性检查直接在本地执行。
+
+任务卡可以要求 Claude 在编辑前执行 **Direction / Boundary Acknowledgement**。Claude 需要复述目标、范围、明确不做的边界、可能触碰的文件、验收标准理解、测试职责、困惑和风险。这是一个门禁，不是反复讨论循环：除非 Codex 实质性改变目标、范围、边界或风险，每个任务或阶段最多允许一次阻塞确认。Codex 必须给出唯一最终决策：proceed、narrow-once/re-dispatch、split 或 stop。
+
+对于目标还不够明确的功能、UX、API 或数据模型改动，先写一个短 spec：
+
+```bash
+python ai/init-spec.py "功能或改动名称"
+```
+
+spec 用来记录期望行为、非目标、验收面、约束、备选方案和风险。任务卡中填写 `Spec Gate` 并链接该 spec。`ai/init-plan.py` 会创建带有 `### Task N: ...` 小节的 `task_plan.md`；评审这些小节后，可以生成小范围任务卡：
+
+```bash
+python ai/plan-to-task-cards.py ai/plans/PROJ-123/task_plan.md
+```
+
+bugfix 和 regression 修复前填写 `Root Cause Gate`。验收关键行为需要测试先行时，填写 `Test-First / TDD Contract`，明确生产代码修改前的 red evidence 和实现后的 green evidence。声明分支 ready 前，填写 `Finish Branch Gate`，记录新鲜验证和 artifact 分类。
+
+阶段权责必须显式写清楚：
+
+| 阶段 | Codex 负责 | Claude 负责 |
+|------|------------|-------------|
+| Observe / Plan | 证据、约束、一次对抗审查、冻结验收契约 | 对符合门禁的大型/多阶段功能生成结构化终局方案；不做纯文本探索 |
+| Builder Execute | 观察进度和审查实现方向 | 限定范围实现、更新进度、报告方向 |
+| Direction Review | 决定等待、修订、拆分、派发 checker-test，或在阈值满足时接管 | 报告 blocker，避免反复确认 |
+| Checker/Test | 派发验证任务并审查证据质量 | 被指派的测试、验证命令和失败证据 |
+| Final Review | accept / revise / split / reject；人工合并保持独立 | 除非再次派发，否则不参与 |
+
+Owner 路由现在会考虑仓库规模。确定性 helper 根据 tracked/source 文件数分类；如果保留的 dispatcher 历史显示 worktree 创建中位数至少为 120 秒，还会把路由 profile 提升一级：
+
+| 路由规模 | 普通 Codex 门禁 | 语义集中型核心任务门禁 | 超出门禁后的默认倾向 |
+|---|---:|---:|---|
+| Small | 校准后 100 行 / 2 文件 | 不扩展（等同普通门禁） | Claude Builder |
+| Medium | 100 / 2 | 250 / 3 | Claude Builder |
+| Large | 150 / 3 | 500 / 5 | 核心语义偏向 Codex；辅助任务偏向 Claude |
+| Giant | 200 / 3 | 500 / 5 | 核心语义偏向 Codex；辅助任务偏向 Claude |
+
+`task_role` 区分 `core-semantic` 和 `auxiliary`。在 large/giant 仓库中，测试与 Checker、机械批量修改、长时间验证或日志处理、证据收集、独立支持单元，只要超过极小的单文件/50 行修改，就优先交给 Claude。这样 Claude 仍承担有价值的执行工作，但不需要重新理解并复刻 Codex 已经非常详细的核心语义方案。语义集中型门禁仍要求：上下文 local/bounded、方案明确度和语义集中度高、Claude 重新获取上下文成本高、Codex 必须完整复核、委派工作量至少是直接修改的 1.5 倍。风险只提高审查强度；显式风险 override 也只能倾向 Codex。
+
+在 Spark 和任务卡拼装之前，路由器会记录委派/直接执行的经济指标。默认
+`claude-first` 中时延只作观测，除非显式/高风险例外，否则实现仍归 Claude。
+可选 `economy-first` 才要求至少节省 15% 成本、活跃耗时不超过直接执行的
+2.0 倍，并减少至少 30% 的 Codex 工作。
+
+缺少已验收历史的辅助/机械委派先作为一次串行 **canary** 运行，不能释放并行任务或自动 Checker。canary 出现计数型模型失败后，重派前必须重新 ROUTE；传输和审批故障仍保留同 worktree 恢复资格。高效准备阶段还设置了默认 45 秒、24 KiB 任务卡、64 KiB Context Packet 和 80 KiB 合计控制面预算，超限时会在调用 Claude 前停止。
+
+Codex 接受 Builder 主体方向后，每个修订仍必须在编写下一张任务卡之前重新运行 Spark `--routing-event revision`。当 Codex 已持有刚审查过的精确上下文、修正完全确定、不需要新设计决策，且校准后规模满足当前仓库的直接修改门禁时，可以路由为 **reviewer-owned bounded correction（审查者持有的受限修正）**。这是经济性 owner 重路由，不是把第一次 Claude 结果算成重复失败。架构性或大范围方向偏离不适用，应 revise、split 或 reject；若仍由 Claude 修改，优先使用 reviewed same-worktree continuation。
+
+当 Claude 看起来卡住时，先归因再判断：任务卡歧义、混合角色任务、dirty source/stale HEAD、权限或审批拦截、长时间验证、缺少进度产物、外部环境，还是确实无进展。
+
+权限或审批拦截包括 sandbox 写入被拒、禁止修改的文件、CLI 未认证、网络受限命令、需要人工批准的命令，以及任务卡明确写出的“不要读取或修改”路径。这类情况应写入 progress/report 产物，并按环境或编排 blocker 处理；只有在 Claude 忽略了可用的合规路径时，才应归因为 Claude 执行问题。
+
+dirty source 或 stale HEAD 也应按同类逻辑处理：它会阻止可靠委托，但本身不是 Codex 接管实现的理由。应先恢复委托路径，例如提交已接受阶段、stash/patch 未提交改动、刷新 workflow 文件、从更新后的 HEAD 重新派发、请求明确的 dirty-source 派发批准，或停止等待人工处理。如果明确批准当前未提交状态作为基线，应使用 `bash ai/dispatch-to-claude.sh CARD --dirty-source-mode snapshot`；环境变量形式仅用于兼容，因为前置变量赋值无法匹配受托管规则保护的稳定 launcher 前缀。
+
+更新已安装 Skill 或托管 `AGENTS.md` 后必须新建 Codex 会话。已经运行的
+会话会继续使用启动时载入的旧指令，无法热更新新的所有权和路由政策。
+
+对于原地重试和 reviewed continuation，若 Claude 返回 conversation/session not found，dispatcher 会先将其记录为不计模型失败的恢复故障，再以同一 owner、任务、worktree 和写入范围自动尝试一次新会话；其他恢复错误仍然终止。精确路径写入约束使用工作树外的可写 staging，并在模型交互前通过最终挂载布局真实运行收据约束 writer，分别探测控制文件和一个已声明产品文件，因此错误挂载会在启动模型前作为环境阻断退出。沙箱还会提供任务级 `.aiwf-write-staging/` 输入目录，其父目录可写，内置 Edit 可以在其中原子替换固定的完整内容或 old/new 片段文件；base64 参数作为 Edit 和 Write 都缺失时的后备。writer 在进程内部读取不可变收据，不需要读取工作树外路径、展开 `$TMPDIR`/收据变量或等待人工批准；零匹配、多匹配和未声明路径均失败关闭。Windows 上写入描述符保持二进制模式，因此 staging 字节及混合 LF/CRLF 内容不会经过文本换行转换。dispatcher 还会从自身所在的同版本托管包快照精确 writer 与验证 runner，记录协议和文件哈希，并只读挂载到固定的 `.aiwf-runtime/`。历史 worktree 中的旧版 `ai/`/`scripts/` helper 不再参与执行，因此 reviewed continuation 不会出现“新版启动器 + 旧版 writer”的组合；缺失或协议不匹配会在 Builder 启动前按 `workflow-runtime-mismatch` 失败关闭，且不消耗模型轮次。writer 会先构造完整候选内容，再检查 Python 语法/编译、dataclass 字段顺序、新增的顶层重复定义或 import，以及 JSON/TOML 解析；失败时保留上一个检查点。对于至少 4 KiB 的现有文件，覆盖超过 75% 的片段替换还必须得到该路径的完整文件替换授权。
+
+**步骤 1：初始化项目**（一次性）
+
+```powershell
+python $env:USERPROFILE\.codex\skills\ai-coding-workflow\scripts\install_workflow.py .
+```
+
+**步骤 2：创建任务卡**（在 Codex 中  -  观察 + 计划）
+
+```bash
+# 优先根据任务卡前的路由事实做确定性选择；若是 Codex fast path，
+# 只输出 skip 决策，不创建委派任务卡。
+python ai/compose_task_card.py --select-from ai/plans/PROJ-123/task-facts.json \
+  --output ai/task-cards/PROJ-123.md
+# 已明确组件时仍可手工覆盖。
+python ai/compose_task_card.py --preset builder --output ai/task-cards/PROJ-123.md
+# 仅在确实需要时添加 Gate，例如：--gate root-cause
+```
+
+Codex随后只填写拼接出的短卡，默认不读取旧版 870 行完整模板。修订或收窄任务使用
+`--preset revision`，只记录相对于已接受基线的变更要求。
+
+对于有明确完成标准的循环任务，请填写任务卡中的 `Goal Loop Contract`。优先写清楚 success signal、最大尝试次数、重复失败停止阈值、无改进停止阈值、回归停止规则、必须提供的证据和 benchmark tags。宽泛或有歧义的工作先填 `Spec Gate`，bugfix/regression 修复先填 `Root Cause Gate`，需要 red-green 证据时填 `Test-First / TDD Contract`，声明 ready for merge 前填 `Finish Branch Gate`。需要更强模型、Codex reviewer 或人工专家在高风险工作前给建议时，填写 `Advisor Gate`，记录咨询时机、调用上限、输出预算、结果可见性、冲突调和和 fallback 行为。`Unknowns` 则用于记录 blindspot scan、会改变架构的问题、参考样例，以及 Claude 偏离原计划时应记录到哪里。
+
+dispatch 默认使用 `balanced` execution profile：compact Claude task card、brief prompt、fresh worktree、完整 diff evidence。这会减少 prompt/task-card token，同时保留审查证据链。完整 Codex planning card 仍会复制为 `TASK_CARD_FULL.md`。
+
+对于有歧义或高风险的任务，使用 `safe` 恢复 standard prompt 和非 compact execution card：
+
+```bash
+CLAUDE_CODE_EXECUTION_PROFILE=safe \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+只有在填写 large-repo gate 并接受证据取舍后，才使用 `fast-large-repo`：
+
+```bash
+CLAUDE_CODE_EXECUTION_PROFILE=fast-large-repo \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+`fast-large-repo` 会使用 managed reuse worktree、跳过无关 untracked 扫描，并写入 summary diff evidence 而不是完整 patch 文本。它不会 reset 源仓库。如果 `.worktrees/reuse/claude-managed` 已存在，请先保留或审查其中证据，再显式加入 `CLAUDE_CODE_REUSE_WORKTREE_RESET=1`，只 reset 这个受管 worktree。
+
+大型仓库派发前应填写 `Claude Context Packet`。它应该很小、面向执行：目标文件/模块、相关符号、source-of-truth 示例、Claude 不应读取或修改的路径、已知约束，以及窄验证命令。如果这个 packet 不完整，Claude 应 stop-and-report，而不是重新广域扫描整个仓库。
+
+**默认辅助通道：在规划前和实现后使用 Codex Spark**
+
+Spark 是建议层。仅当结构化路由、监测或终态证据能够替代 Codex 读取时
+调用。普通任务至多需要一次路由估算和一次终态检查；Spark不可用时保持
+确定性的 Claude-first 所有权：
+
+- `auto`：短小、按价值触发的阶段路由。执行前仅当路由已识别出一个合理的 Claude 候选、但经济性仍不确定时使用 `execution-cost-estimator`；确定性的 Codex 默认路径跳过 Spark。diff、报告或失败证据仍可在确实会改变决策时触发紧凑的后置分析。
+- 可用 Spark 额度现在默认用于非 Express 的 Claude 委派。所有权经济性尚未确定时运行 `execution-cost-estimator`；否则运行一次有界的 `task-card-audit`。审计结果仅作为 advisory 附录传递，不能扩大冻结范围或修改验收条件。可用 `AI_WORKFLOW_SPARK_GATE=off` 对单个任务关闭；Express 或 Spark 预算为零的路由仍会跳过。
+- `task-size-classifier`：判断任务是 tiny/small/medium/large/unknown，并建议 `codex-fast-path`、`spark-review-only`、`spark-micro-builder`、`claude-builder`、`checker-test`、`spec-first` 或 `human-clarification`。可用时包含执行成本字段。
+- `execution-cost-estimator`：只读模式，预测 diff 范围/文件数和相对直接/委托工作量。首次、revision、收窄、重试、重派和下一阶段任务卡在编写前都必须重新估算，可用 `--routing-event initial|revision|narrow|retry|next-phase` 标记；不能复用上一张卡的 owner 决策。Spark 原始行数上界默认乘 1.5，测试/夹具、shell/进程编排和跨平台任务乘 2.0。owner 通常只依据校准后规模/文件数、上下文充分度、方案明确度、置信度和派发开销；风险标志与验证复杂度提高审查、验证、隔离或审批强度，不得把任务从 Codex 推向 Claude。如果人工/策略显式使用风险作为 owner override，高风险任务只能倾向 Codex。范围、方案和上下文稳定时，实际修改量可以超过预测。
+
+在编写完整任务卡前先执行早期路由：
+
+```bash
+bash ai/run-codex-spark.sh \
+  --brief "目标：修复一个解析分支。证据：预计一个文件。验证：一个聚焦测试。" \
+  --mode execution-cost-estimator \
+  --routing-event initial \
+  --result-mode direct
+```
+
+当父 Codex 环境设置了 `CODEX_SANDBOX_NETWORK_DISABLED=1` 时，默认 `--execution-env auto` 会在不消耗 Spark 调用的情况下快速停止，并输出机器可读的宿主交接状态。不要发送探针。直接调用 helper 时，应在已经获得授权的 host 执行边界中重跑原始请求并使用 `--execution-env host`。高效调度入口可以在外层调用者明确声明已经具备宿主权限时自动重派一次：
+
+```bash
+python ai/dispatch-efficient.py ... --execute --host-authority --host-retry-timeout 120
+python ai/run-workflow.py task.json --execute --spark-host-authority --spark-host-retry-timeout 120
+```
+
+也可以使用 `CODEX_SPARK_HOST_AUTHORITY=1` 明确授权，并用 `CODEX_SPARK_HOST_RETRY_TIMEOUT` 设置正数超时。`spark-dispatch.json` 会分别记录初始沙箱尝试、交接判断、宿主重试、超时和最终状态。没有明确宿主权限时，调度会在 Claude 启动前停止并返回机器可读的 `needs_host_execution`，由外层在已授权的宿主边界原样重试一次。宿主执行成功后，会把上下文绑定的执行环境偏好固化到 `.ai-workflow/spark-execution-availability.json`；默认 24 小时 TTL 内，后续已授权调度直接走宿主，不再重复撞已知受限的沙箱。宿主超时或失败不会回退到其他强模型，也不会退回受限沙箱。TTL 可用 `CODEX_SPARK_EXECUTION_STATE_TTL_SECONDS` 调整。仅在仍受限的沙箱内取消变量不能恢复网络，也不构成宿主权限。
+
+Claude 现在使用相同的外层边界协议。受限沙箱中的启动交互失败会在 Builder
+执行前返回 exit 75 和 `needs_host_execution=true`。外层 Codex 必须通过宿主
+执行权限，使用稳定且可匹配项目授权规则的命令
+`bash ai/dispatch-to-claude.sh CARD --execution-env host
+--preflight-task-id TASK_ID` 原样重放一次（适用于尚未创建 worktree 的前置探测）；
+已有 worktree 的后续传输重试仍使用 `--retry-in-place-task-id TASK_ID`；reviewed continuation 改用
+`--reviewed-continuation APPROVAL`。snapshot 交接还必须携带
+`--dirty-source-mode snapshot`；首次 dirty-source 派发也应使用该选项，使两次命令
+都保留可信 launcher 前缀。固定工具集使用 `--tool-profile minimal-builder`，不要在
+命令前添加 `CLAUDE_CODE_TOOL_PROFILE=...`；host retry 会保留该参数。旧环境变量形式仍兼容，但 CLI 形式不会改变
+命令前缀，并会保留任务卡、worktree 和 session lineage。交接收据将
+`host_retry_args` 标记为权威参数，环境变量映射仅为兼容证据。exit 75 是编排请求，不是放弃模型调用的
+许可；只有宿主重试也失败后，才能判定当前路由不可用。
+
+Dispatcher 会显式打印规范化后的 `Runtime ID`。调度器和监测器共用同一个
+校验器，因此安全的自定义 preflight/DAG ID 可以直接交给
+`monitor-claude.sh`，调用方不得另行拼接 `claude-` 前缀。
+
+revision、收窄、重试、重派、拆分子任务或下一阶段卡必须重复此步骤，并改用对应的 `--routing-event`。只有 Spark 经济建议和确定性 owner gate 都倾向 Codex 时，才直接编辑并省略完整任务卡；否则再编写面向下游的精简执行卡。
+- `review-only`：快速只读审查任务卡或实现方向。
+- `task-card-audit`：派发前检查缺失 gate、职责混合、验收不清和可能导致 Claude 卡住的风险。
+- `plan-splitter`：建议更小的 Builder/Checker 任务卡，或可并行的独立切片。
+- `validation-planner`：给出精确、低噪音验证命令，不运行广域测试。
+- `failure-triage`：在 Claude 卡住/失败后读取有界 artifact 摘要，建议 wait / re-dispatch / narrow / takeover。
+- `evidence-checker`：已有 artifacts 后快速检查证据质量。
+- `parallel-planner`：为独立任务卡生成经过审查的 DAG 调度计划。Spark 只产出严格 schema-v1 JSON，不执行、不派发。Codex/人工必须审查并保存 JSON 计划后，再运行 `bash ai/run-parallel-loop.sh --plan <json>`。
+- `micro-builder`：仅用于任务卡明确允许的极小范围修改，并在 helper 创建的隔离 worktree 中执行；任务卡必须允许 Spark 修改源码、限制为一两个小文件、排除公共 API/契约风险，并给出精确窄验证。
+- `controlled-builder`：窄范围可审计的源码写入模式，需显式 `--allow-write` 路径（1–3 个）、必填 `--max-diff-lines`（1–200）、排除所有 public API/数据/安全/迁移/权限/并发/跨模块风险、需要已有 pattern/source-of-truth、强制 full artifacts 和隔离 worktree，运行后检查 tracked/untracked 路径/行数/二进制证据。违规时以非零退出码退出，保持隔离，不修改源码，不合并，不满足验收。Spark 结果交付模式：`direct`（advisory 默认，无永久目录）、`minimal`（stdout + 紧凑 report）、`full`（保留全部证据）。`--output` 不指定 `--result-mode` 时选 `minimal`；`--output --result-mode direct` 无效。源码写入模式强制 `full`。
+- `observe-synthesizer`：只读模式，用于综合观察证据。
+- `task-card-drafter`：只读模式，用于起草任务卡内容。
+- `context-packet-builder`：只读模式，用于构建上下文包。
+- `preflight-bundle`：只读阶段包，用于普通 Builder 前使用。
+- `direction-precheck`：只读模式，用于预检实现方向。
+- `acceptance-matrix`：只读模式，用于构建验收矩阵。
+- `postflight-bundle`：只读阶段包，用于 diff/report/evidence 使用。
+- `revision-drafter`：只读模式，用于起草修订说明。
+- `lesson-extractor`：只读模式，用于从已完成工作中提取经验教训。
+- `monitor-triage`：只读模式，只判断确定性 helper 生成的紧凑 Claude 监控包；不读取原始进程/日志/diff，也不能授权中断。
+- `execution-cost-estimator`：只读模式，预测 diff 范围/文件数、任务角色与直接/委托的相对工作量。只在存在具体 Claude 规划/批处理候选、而确定性事实无法判断经济性时调用。工作量是相对估算，不是 token 计量；输出无效或缺失时保持 Codex ownership。
+
+包输出使用七个压缩标题：Decision Summary、Risk Flags、Scope and Boundaries、Acceptance Matrix、Evidence Conflicts、Required Codex Decisions、Recommended Next Action。
+
+默认 auto 执行阶段路由：
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md
+```
+
+当显式使用 `task-size-classifier` 模式，或 conservative 预算下的 auto 路由选中该模式时，helper 会在 Spark artifact 目录中用 `workspace-write` sandbox 启动 Codex。这样本地 helper 初始化有可写工作目录，但不会给源仓库写权限，且该模式仍禁止修改源代码。
+
+集成的 `task-card-audit` 默认使用 30 秒短预算；不可用结果会打开一个按模式隔离的 5 分钟熔断器，使等价审查直接跳过，而确定性预检和 Claude 继续执行。
+
+估算器现在会记录仓库规模、历史 worktree 成本、`task_role`、`context_reacquisition_cost`、`codex_semantic_rereview`、`solution_clarity` 和 `semantic_concentration`。`python ai/repository-scale.py --format json` 可在不调用模型的情况下显示确定性事实。`--fast-path-max-diff-lines` / `CODEX_FAST_PATH_MAX_DIFF_LINES` 与 `--concentrated-fast-path-max-diff-lines` / `CODEX_CONCENTRATED_FAST_PATH_MAX_DIFF_LINES` 会显式覆盖自动选择的行数上界。1.5/2.0 倍校准保持不变；范围、方案和上下文稳定时，实际编辑超过预测本身不触发重新路由。
+
+Claude 退出后，dispatcher 会写入 `<task-id>.report-consistency.json` 和 `<task-id>.outcome.json`。报告必须包含精确的变更文件、数量及无意外文件声明。任务分配了测试时，还必须提供 `claimed_test_count=<n>` 且 diff 中存在数量匹配的测试声明；分配了验证时，必须提供 `claimed_validation_command=<command>` 和 `claimed_validation_exit_code=<code>`。修订 finding 使用 `resolved_finding=<id>|file=<path>|symbol=<symbol>|test=<name or not-required>`。声明缺失或与 diff、测试证据矛盾时，终态降级为 `completion_state=needs-review`。已有最终产品 diff 但没有有效报告时，还会记录 `operator_state=implementation-stable-awaiting-review`；它会结束运行态监控，但仍要求 Codex 审查。`dispatch_success`、`artifact_valid`、`validation_success` 与 `semantic_acceptance` 分开记录，只有 Codex 审查能够确认语义验收。
+
+Acceptance bundle 的 `review_evidence` 会直接列出限定范围内的变更文件、
+patch/恢复 diff 哈希、基线提交、报告是否存在，以及每条精确验证命令和退出码。
+因此缺少报告只触发一次有界的确定性恢复收据，不会重新启动实现轮次。
+
+Dirty snapshot 的 runtime 现在区分原始 `source_base_commit` 与合成的
+`execution_base_commit`。同 worktree 重试分别校验源仓库 HEAD 和执行
+worktree HEAD，并继承既有快照基线，不会对仍然 dirty 的源工作区再次制作快照。
+
+有产品 diff 的运行会在 worktree 旁生成 `<task-id>.scoped.patch` 和机器可读的 `<task-id>.scoped-handoff.json`。patch 从执行基线开始，只包含获准产品路径和新增文件。dirty snapshot 的 manifest 会明确禁止整体合并 worktree，并给出供人审查的 `git apply --check` / `git apply` 命令；模型不会应用或合并该交付物。
+
+当 Claude diff 有用但不完整时，应保留 dirty isolated worktree。如果 Codex 已接受实现方向且只剩一个明确的语义阻塞，使用 `aiwf advisor-continuation` 在同一 worktree 中继续，并绑定状态 hash、允许路径、禁止路径和一次性调用限制；不要仅为补报告或小范围补全而重新 checkout、从头实现。
+
+如果是 Codex 已审查通过的 Builder 修订或 Builder→Checker 交接，并不需要再调用 advisor，可使用纯确定性的 reviewed-continuation：
+
+```bash
+python ai/aiwf.py reviewed-continuation prepare \
+  --prior-task-id claude-... \
+  --next-task-card /absolute/next-task.json \
+  --decision accepted-direction \
+  --accepted-existing-path src/accepted-implementation.cc \
+  --allow-new-write-path tests/continuation_test.cc
+
+# 严格执行收据输出的 dispatch_command。
+```
+
+helper 可读取 Task JSON、渲染后的执行卡元数据和旧 Markdown；它会推导下一角色，继承 Builder mode、已验证 tool profile 与 Context Lease lineage，并默认把授权文件写到产品 worktree 之外。审批文件会绑定精确 dirty 状态、文件内容与 mode、source/base/worktree HEAD 及下一张任务卡 hash。调度器只消费一次审批，并复用原 worktree，不执行 reset、clean、checkout，也不再产生新 worktree 的准备窗口。状态漂移、旧进程仍存活、重复消费、范围扩张、managed/advisor/retry/parallel 来源以及 Checker→Builder 都会 fail closed。
+
+同一个冻结方案合同下的连续实现切片，在 Codex 接受每个切片后可签发一次性
+Context Lease：
+
+```bash
+python ai/context-lease.py create \
+  --prior-task-id claude-... \
+  --next-task-card /absolute/slice-2.md \
+  --next-role builder --continuation-kind next-slice \
+  --solution-contract ai/plans/PROJ/solution-contract.json \
+  --accepted-existing-path src/slice_one.py \
+  --allow-new-write-path src/slice_two.py \
+  --tool-profile minimal-builder \
+  --output .worktrees/slice-2.context-lease.json
+
+bash ai/dispatch-to-claude.sh /absolute/slice-2.md \
+  --context-lease .worktrees/slice-2.context-lease.json \
+  --continuation-kind next-slice \
+  --tool-profile minimal-builder
+```
+
+该路径复用已记录的 Claude session 和精确 worktree，但每轮仍重新建立 sandbox
+和写入收据。Lease 会绑定方案合同、worktree 状态、session、角色、工具配置、
+可见时的模型/provider route 以及下一张任务卡 hash，并且只消费一次。下一轮应
+从新验收状态重新签发，并通过 `--parent-lease` 保持 lineage。默认最多连续三次
+warm 调用；下一次兼容调用会自动生成有界确定性 checkpoint，并启动新 session，
+只注入 delta execution capsule，避免无限重放历史对话。checkpoint 仅包含已接受
+的状态 hash、路径和有界 review finding，不复制源码、diff 或对话。仍可通过
+`--rehydrate-from` 显式提供 checkpoint，但该兼容路径会记录为 legacy-unbound。
+
+dispatcher 固定使用 Claude 的 `--bare`，因此仓库 `CLAUDE.md` 不会进入这条
+调度调用的模型上下文。`CLAUDE.md` 仍保留为手工非 bare 会话使用的极简独立
+执行核心，且不再导入 `AGENTS.md`。真正的冷启动载荷是 `CLAUDE_PROMPT.md`；
+execution-only 和 Context Lease 调用只渲染有界的 `CLAUDE_TASK_CARD.md`，完整
+`TASK_CARD_FULL.md` 仅作为审计产物保留。安全政策继续由确定性门禁执行，Claude
+只接收当前可执行合同。
+
+支持该运行时的 dispatcher 会在渲染执行卡之前运行本地、无模型的
+`ai/compile-skill-context.py`。它只从已选组件中选择少量带 provenance 的
+过程、检索和验证提示，并在 `.worktrees/` 下写入 `*.skill-context.md` 与收据，
+再绑定到完整卡片的精确 hash。它不能选择权限，也不能替换冻结的写入范围、验收、
+验证或停止条件。
+
+默认 `coverage` 策略会合并 top-down 的 preset/gate 候选与 bottom-up 的任务事实
+候选，只救回能覆盖缺失过程性需求的 cue。收据会解释每项纳入或排除，包括来源标题
+片段、边际覆盖和零边际淘汰。仅用于成对实验时可传
+`--context-compile-strategy anchors-only`，保留锚点并有意关闭 rescue；它不是普通
+生产路径的低上下文默认值。
+
+运行证据检查：
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode evidence-checker \
+  --artifact .worktrees/claude-<id>.report.md \
+  --artifact .worktrees/claude-<id>.checker-report.md
+```
+
+派发前运行任务卡审查或验证规划：
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode task-card-audit
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode validation-planner
+```
+
+对失败/卡住运行做归因：
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode failure-triage \
+  --artifact .worktrees/claude-<id>.status.txt \
+  --artifact .worktrees/claude-<id>.progress.log
+```
+
+生成经过审查的并行 DAG 计划：
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode parallel-planner
+```
+
+`parallel-planner` 只产出严格 schema-v1 JSON 和标准 reconciliation 字段。Spark 不执行、不派发；Codex/人工必须审查并保存 JSON 计划后，再运行 `bash ai/run-parallel-loop.sh --plan ai/plans/.../parallel-plan.json`。
+
+只有任务卡明确允许时，才运行极小范围隔离修改：
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode micro-builder --sandbox workspace-write
+```
+
+Spark artifacts 会写入 `.worktrees/codex-spark-*`，包括 `codex-spark.report.md`、`codex-spark.prompt.md`、`codex-spark.result.txt`、`codex-spark.stderr.log`、`codex-spark.artifacts.txt`、`codex-spark.worktree-status.txt`，以及可选的 `codex-spark.diff`。helper 不会静默回退到 GPT-5.5 或其他强模型。Spark 永远不授权合并；强 Codex review 仍然必须；无隐式强模型回退；本次变更无模型层级路由。只有当 Spark 不可用也应该成为硬失败时，才使用 `--require-spark`。
+
+Spark 输出是建议。把 `accepted_suggestions`、`ignored_suggestions`、`conflicts_with_claude`、`conflicts_with_local_evidence` 和 `acceptance_satisfied_by_spark` 写入 Spark follow-up 表。Spark 不能独立满足验收，不能替代 Claude Builder 责任，不能批准 Codex 最终 review，也不能授权合并。强 Codex review 仍然必须。无隐式强模型回退。本次变更无模型层级路由。对于多次报告的汇总/benchmark 聚合，记录：helper 调用次数、Spark 总调用次数、唯一 modes/stages/roles、预算模式、临时状态、强 review 要求、合并授权状态，以及 auto-disable 出现次数/原因。
+
+**Spark 结果交付模式** 通过 `--result-mode` 控制结果的返回和持久化方式：
+
+- **`direct`**（advisory/read-only 默认）：将有界结果发送到 stdout，成功时不创建永久目录。输出由 `CODEX_SPARK_STDOUT_MAX_BYTES` 限制（默认 32768）；超大的估算器结果只保留已识别的机器字段，避免上层因输出超限而丢弃整段结果。可选失败也会返回 `spark_status=unavailable` 等机器字段，因此 helper 以 0 退出时不会再出现静默无输出。
+- **`minimal`**：将原始结果发送到 stdout，仅持久化紧凑的 `codex-spark.report.md`。需要持久化指标或 benchmark 聚合但不需要完整证据时使用。
+- **`full`**：保留 prompt、result、stderr、status、diff、task-card 和 manifest 证据。需要完整审计追踪时使用。
+
+传入 `--output` 但未显式指定 `--result-mode` 时，helper 选择 `minimal`。`--output` 与 `--result-mode direct` 组合无效——`direct` 不创建持久化产物。源码写入模式（`controlled-builder`、`micro-builder`）强制使用 `full`。
+
+**可观测性取舍：** `direct` 模式仍不生成 Spark 报告、产物目录和 manifest，但每次终止调用都会尝试向 `.ai-workflow/model-usage.jsonl` 追加一条紧凑记录。只有需要长期保留 advisor 结果本身时才选择 `minimal` 或 `full`；Token/耗时聚合不再要求完整 Spark 产物目录。
+
+Claude 用量记录还会保存仅含哈希的缓存归因：provider route、稳定提示前缀、解析后的工具契约、任务后缀、缓存通道和会话模式。Ledger 不会复制提示正文或工具命令正文。运行 `python ai/aiwf.py usage aggregate .ai-workflow/model-usage.jsonl` 可查看整体和分通道的 Token 加权缓存命中率，以及 `cold-start`、`prefix-drift`、`tool-profile-change`、`provider-route-change`、`resume-failed`、`provider-unknown` 等保守分类。这些标签只解释 Harness 可观测到的变化，不推断服务端 TTL、淘汰或后端路由。
+
+为保持工具 schema 可复用，冻结的验证命令不再逐条嵌入 `allowedTools`，而是统一由固定入口 `.aiwf-runtime/run-approved-validation.py run` 执行。精确写入命令由 helper 在内部读取环境绑定收据，并使用固定的任务级输入文件名，不再在 Bash 中展开 `$TMPDIR`、收据变量或任务专属绝对路径；base64 参数仅作为工具缺失时的后备。Helper 会重新解析不可变任务卡、拒绝 shell 组合并以无 shell 的参数数组运行命令；只读根仍负责强制声明的写入范围。填写任务卡时可先运行 `python ai/compose_task_card.py --lint-card CARD`，在派发前发现不受支持的 shell 组合。
+
+缓存回归应比较同一契约的 warm continuation，而不是所有调用的混合百分比。可通过 `--minimum-warm-cache-calls 5 --minimum-warm-cache-hit-rate 0.95` 生成 `pass`、`regression-candidate` 或 `insufficient-evidence` 结论；仅在受控 benchmark/CI 中再增加 `--require-cache-gate`。`by_model_cache_lane` 会进一步隔离不同模型。默认不启用阈值，因此普通派发不会被任意全局缓存目标阻断。
+
+**Spark 诊断（`--diagnostics`）：** 当 direct 模式调用产生不可用结果（空响应、可用性/执行失败、或 schema-invalid 估算器输出）时，`--diagnostics failure`（默认）在唯一的 `.worktrees/spark-diagnostic-<timestamp>-<suffix>/` 下写入紧凑脱敏记录，避免同秒失败互相覆盖。stderr 摘要中的密钥会被剥离。`--diagnostics off` 禁用所有持久化。`--diagnostics full` 将全部证据复制到永久目录以供复现。成功调用保持零持久化。
+
+direct stdout 使用 `aiwf-spark-stdout-v1` envelope。为避免终端编排器把首个输出 chunk 误判为完成，wrapper 会在阻塞模型调用期间缓冲 stdout，模型返回后再无阻塞地连续输出 `spark_status=started`、有界审查正文和唯一终态。使用 `python ai/parse-spark-output.py FILE --require-terminal` 解析完整 envelope。若 wrapper 在逻辑启动后未经过正常终态路径就退出，EXIT finalizer 会输出带 `spark_failure_class=wrapper-exit-before-terminal` 的完整 `failed` envelope。broker 默认用 `CODEX_SPARK_CALL_TIMEOUT_SECONDS=75` 管理模型进程组，并在 wrapper 结束前写入 terminal ledger。
+
+**Controlled-builder 权限模式** 为 Spark 提供窄范围、可审计的源码写入权限：
+
+- 任务卡必须指定 1–3 个精确的 `--allow-write` 路径，并有对应的 `Controlled-builder allowed paths` 行。
+- `--max-diff-lines` 为必填项，范围 1–200。
+- 策略排除所有 public API、数据模型、安全、迁移、权限、并发和跨模块契约风险。
+- 必须识别已有 pattern 或 source-of-truth。
+- 需要窄验证——不运行大型测试套件。
+- 运行后检查 tracked/untracked 路径、行数和二进制证据。
+- 违规时以非零退出码退出，保持 worktree 隔离，不修改源码，不合并，不满足验收标准。
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode controlled-builder \
+  --allow-write src/module.py --allow-write tests/test_module.py \
+  --max-diff-lines 150 --sandbox workspace-write
+```
+
+`controlled-builder` 任务卡必须包含：
+
+| 字段 | 值 |
+|------|-----|
+| Result mode | `full`（强制） |
+| Controlled-builder 授权？ | yes |
+| Controlled-builder 允许路径 | 精确 1–3 个路径 |
+| 最大文件数 | 3 |
+| 最大 diff 行数 | <=200 |
+| 风险排除 | 每项一行：public API、数据模型、安全、迁移、权限、并发、跨模块 |
+| 已有 pattern / source-of-truth | 文件或 pattern 引用 |
+| 窄验证 | 精确命令 |
+
+**大型仓库 / 慢文件系统**
+
+如果大型项目里 `git worktree add`、文件系统读取、dispatcher status/diff 收集很慢，先在任务卡里填写 `Worktree / Large Repo Strategy Gate`。默认保留完整证据。当 gate 接受 managed reuse 和 summary evidence 取舍时，优先使用显式 fast profile：
+
+同一个 Git 仓库的所有派发都会通过 Git common-dir 解析唯一运行时根，并使用平铺的顶层 `.worktrees/`。即使从已验收的 linked worktree 内启动，新的执行 worktree 也只能成为顶层兄弟目录，不能递归创建在 `source/.worktrees/` 下。已审查任务卡可以继续保存在主 worktree，并以绝对路径传入；dispatcher 会绑定其哈希并复制到执行 worktree，而不会把任务卡写进已验收 source。
+
+```bash
+CLAUDE_CODE_EXECUTION_PROFILE=fast-large-repo \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+如果只想手动开启 managed reuse：
+
+```bash
+CLAUDE_CODE_WORKTREE_STRATEGY=reuse-managed \
+CLAUDE_CODE_REUSE_WORKTREE_RESET=1 \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+这只会复用 `.worktrees/reuse/claude-managed`，并且只 reset/clean 这个受管 worktree，绝不会 reset/clean 源仓库。
+bootstrap 也会确保 workflow runtime artifacts 被忽略：
+
+```gitignore
+/.worktrees/*
+!/.worktrees/.gitkeep
+```
+
+如果未跟踪文件扫描或未跟踪文件 patch 生成太慢，可以使用：
+
+```bash
+CLAUDE_CODE_LARGE_REPO_MODE=1 \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+large-repo mode 会保留 tracked/staged diff 证据，但跳过昂贵的无关 untracked 扫描和 untracked patch 证据。使用前应在任务卡中记录这个证据取舍。
+
+如果只想跳过完整 patch 文本、保留 worktree 供审查：
+
+```bash
+CLAUDE_CODE_EVIDENCE_MODE=summary \
+bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+**实验性：并行派发**
+
+并行仍是显式选择，普通串行任务不会因此增加模型调用。推荐流程是：
+
+1. 先用本地零 Token 判断器筛选候选，不读取全仓库，也不调用模型：
+
+   ```bash
+   python ai/assess-parallel-opportunity.py --json \
+     --work-units 3 --write-scopes src/a,src/b,src/c \
+     --estimated-minutes 30 --validation-count 3
+   ```
+
+2. 只有输出为 `parallel-candidate` 时，才进行一次受限的 Spark `parallel-planner` 调用；`serial-obvious` 直接编写单张串行任务卡。
+3. Codex/人工审查任务卡和计划后，再显式运行并行器；默认最大并发为 2。
+4. 派发前使用零 Token 的确定性校验检查写入范围、owned contracts、共同 Base commit（必须匹配当前 `HEAD`）和验证责任。
+5. 先单独执行一个 canary；只有其窄验证通过才释放其余任务，之后每个单元仍必须通过 helper 验证。
+6. 每个结果仍然串行审查和合并。
+
+| 判断器或 Gate 结果 | 下一步 | 额外模型调用 |
+|--------------------|--------|--------------|
+| `serial-obvious` | 创建一张普通串行任务卡 | 无 |
+| `parallel-candidate` | 最多调用一次受限的 Spark `parallel-planner`，然后审查提案 | 一次 Spark 调用 |
+| 候选被确定性校验拒绝 | 使用输出的串行回退顺序，不自动重新规划 | 无 |
+| 候选通过 | 显式运行 `run-parallel-loop.sh`，通常设置 `--max-concurrency 2` | 每个就绪任务一次 Claude 派发 |
+
+候选发现有意保持宽松，实际派发则严格检查写入范围、contracts、Base commit和验证责任。这样普通串行任务不会承担额外判断成本，同时避免并行条件严苛到永远无法触发。
+
+有两种兼容路径：
+
+*路径 1：扁平独立卡片（位置参数）*
+
+对于文件/模块范围互不重叠的独立任务卡，在每张任务卡中填写 `Parallel Execution Gate`，然后运行：
+
+```bash
+bash ai/run-parallel-loop.sh --max-concurrency 2 \
+  ai/task-cards/PROJ-123-a.md \
+  ai/task-cards/PROJ-123-b.md
+```
+
+helper 会并发运行多个 `dispatch-to-claude.sh`，并写入 `.worktrees/parallel-*/parallel-summary.md`、`parallel-events.jsonl`、`parallel-manifest.tsv` 和每个任务的 dispatch 日志。任务卡必须写明 `Parallel allowed? | yes`、真实 Base commit、验证责任和窄写入范围。精确重叠保持退出码 3；父子路径、contract、base 或验证责任冲突在派发前以退出码 4 停止。`--allow-overlap` 仅用于显式的人工 reconcile 实验，不会绕过 contract、base 和验证责任检查。
+
+*路径 2：经审查的 DAG 计划（`--plan`）*
+
+对于需要依赖排序的并行执行，使用 Spark `parallel-planner` 生成经过审查的 DAG 计划：
+
+```bash
+bash ai/run-codex-spark.sh ai/task-cards/PROJ-123.md --mode parallel-planner
+```
+
+Spark 只产出严格 schema-v1 JSON，只提议不执行。Codex/人工必须审查并保存计划后再派发：
+
+```bash
+bash ai/run-parallel-loop.sh --plan ai/plans/PROJ-123/parallel-plan.json
+```
+
+Schema 字段：`schema_version`（必须为 `1`）、`group_id`、`max_concurrency`、`failure_policy`（目前仅 `skip-dependents`），以及 `tasks` 中每个任务的 `id`、`task_card`、`depends_on`。任务卡路径相对于计划文件解析。显式 CLI `--max-concurrency` 会覆盖计划中的并发上限。所有任务卡必须声明同一个真实 Base commit，并与运行时 `git rev-parse HEAD` 一致。
+
+调度语义：默认先启动一个依赖就绪的 canary，并用确定性 checker helper 执行任务卡声明的窄验证。worktree 不可用、验证命令缺失或验证失败都视为未完成，不释放后续任务。canary 通过后才按并发上限启动其他就绪任务，且每个完成单元都必须通过同一验证门。后续使用 `skip-dependents` 时，失败的前置任务会跳过所有传递依赖，而无关分支继续执行。`--no-ramp-up` 和 `--no-unit-validation` 仅用于诊断实验。校验失败时不会自动重新规划。
+
+这只是派发层并行，不会自动合并 worktree，不替代 Codex review，也不会让冲突实现变安全。每个 diff 仍需串行审查；共享 API、数据模型、全局配置等改动应走普通单任务流程，或单独创建人工 reconcile 任务卡。
+
+**可选：为长任务创建持久计划文件**
+
+```bash
+python ai/init-plan.py PROJ-123
+```
+
+这会创建 `ai/plans/PROJ-123/task_plan.md`、`findings.md` 和 `progress.md`。如果上下文丢失或执行了 `/clear`，可生成恢复上下文：
+
+```bash
+python ai/session-catchup.py --plan PROJ-123
+```
+
+**步骤 3：调度 Builder Claude**（调度 + 执行）
+
+```
+Use the coding executor workflow. Execute this task card and return an evidence packet.
+```
+
+对于实现任务，将任务卡模式设为 `builder`。Builder Claude 负责限定范围内的代码修改和进度汇报。如果需要测试，应在任务卡中说明 Builder Claude 完成实现证据后停止，后续由 Codex 单独派发 `checker-test` 任务。
+
+这会在 `.worktrees/` 下生成以下产物：
+
+**代理行为：** `dispatch-to-claude.sh` 默认会在运行 Claude Code 前清理常见代理环境变量（`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 及其小写形式）。这样 Codex 可以继续使用当前 shell 的代理，而 Claude Code 默认直连。若 Claude Code 必须继承代理，请运行：
+
+```bash
+CLAUDE_CODE_PROXY_MODE=inherit bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+**网络诊断：** dispatcher 默认不检查网络状态。若需要记录 Claude 进程及其子进程的元数据级 socket 快照，可运行：
+
+```bash
+CLAUDE_CODE_NETWORK_MONITOR=1 bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+这会生成 `*.network.log`，内容包括代理模式、已脱敏的代理设置、诊断工具可用性，以及每次心跳的 socket 状态摘要，例如 `established`、`syn_sent`、`close_wait`。它不会捕获 packet 内容、prompt、request body 或 token。如需额外连通性探测，可设置 `CLAUDE_CODE_NETWORK_HEALTHCHECK_URL`；dispatcher 会运行有边界的 `curl -I` healthcheck，并只把状态/输出写入 network log。
+
+| 产物 | 说明 |
+|------|------|
+| `*.result.json` | Claude 原始 JSON 输出 |
+| `*.status.txt` | Claude 标准错误 / 执行日志 |
+| `*.network.log` | 启用 `CLAUDE_CODE_NETWORK_MONITOR=1` 时的可选元数据级网络诊断 |
+| `*.diffstat.txt` | 已跟踪文件的 `git diff --stat` |
+| `*.diff` | 完整差异，包含未跟踪实现文件 |
+| `*.checker-report.md` | `ai/check-worktree.sh` 生成的只检查不修改验证报告 |
+| `*.checker-logs/` | checker 命令的完整日志 |
+| `*.source-status.txt` | 调度前源仓库状态 |
+| `*.worktree-status.txt` | 执行后工作树状态 |
+| `*.untracked.txt` | 未跟踪文件列表和 patch 证据 |
+| `*.usage.txt` | Claude Token/费用使用摘要 |
+| `*.report.md` | Claude 修改报告，供人工和 Codex 审查 |
+| `*.claude-progress.md` | Claude 自报的里程碑进度，用于状态展示和审查证据 |
+| `*.monitor-events.log` | 供阻塞式监控消费的实质变化与终态边界 |
+| `*.phase-metrics.json` | context、implementation、validation、tail、编辑就绪、产品停滞、Context Lease 路由及 checkpoint/capsule 字节指标 |
+| `*.activity-observation.json` | 只基于元数据的会话/控制/产品活动年龄和剩余窗口；不读取 transcript 内容 |
+| `*.extension-capsule.json` / `*.extension-advisor.json` | 隐私受限的近期 assistant/tool 活动，以及绑定产品哈希的 Spark 超时判断 |
+| `*.recovered-completion.json` | Claude 缺少报告时保留的可恢复 diff/收据证据；不能直接验收 |
+| `*.codegraph-worktree.json` | CodeGraph 项目/worktree 身份、pending 状态、修复动作和安全使用结论 |
+| `*.runtime.json` | worktree、会话、超时、进程身份和 guard 配置 |
+| `*.pid` | 角色运行期间的临时 PID 提示；确认终态回收后删除 |
+| `*.process-termination.json` | 身份绑定的整棵进程树终止证据 |
+| `*.dispatcher-abnormal-exit.json` | 可捕获异常退出的终态与回收证据 |
+| `*.progress.log` | 调度心跳、超时和完成日志 |
+| `*.review.txt` | 持久化的 Codex 审查输出 |
+| `*.codex-events.jsonl` | 可用时记录的 Codex 原始 JSON 事件 |
+| `*.codex-usage.txt` | 可用时记录的 Codex 审查 Token/费用摘要 |
+
+Claude 运行期间，Dispatcher 会区分自报的编辑就绪和持久产品内容变化。智能体控制器阻塞等待 `monitor-claude.sh wait`，只在实质或终态边界到达后审查有界 diff/decision 证据。紧凑状态中的 `last_verified_product_event` 只来自 dispatcher 的产品变化、窗口刷新或终态边界。`watch-claude.sh` 与 `status-claude.sh` 仍可用于人工诊断，但不是轮询指令。只有出现相互印证的方向偏离或已确认无进展证据时，才考虑中断 Claude。
+
+显式或自动推导的工具档案会在创建完整 worktree 之前，与早期 stream-init 工具清单比较；能力不匹配会生成 `builder_started=false`、`worktree_created=false` 的完整终态收据。活动收据只读取文件系统元数据，不读取 Claude 会话 JSONL；其中合并的会话活动仅供诊断，不能延长产品修改窗口。
+
+如果任务卡要求 Direction / Boundary Acknowledgement，Claude 应先写出确认内容再编辑。若该确认是阻塞式审批，Codex 需要给出一次最终决策后 Claude 才继续。Codex 给出 `proceed` 后，Claude 应继续执行任务，不应围绕同一事项反复请求确认。
+
+**步骤 4：Codex 审查实现方向**（审查）
+
+```
+Use ai-coding-workflow to review this execution evidence packet and diff. Decide accept / revise / split / reject.
+```
+
+要将 checker、token/费用和仓库状态证据纳入审查：
+
+```bash
+bash ai/review-with-codex.sh ai/task-cards/PROJ-123.md \
+  .worktrees/claude-<id>.result.json \
+  .worktrees/claude-<id>.diff \
+  .worktrees/claude-<id>.checker-report.md \
+  .worktrees/claude-<id>.usage.txt \
+  .worktrees/claude-<id>.source-status.txt \
+  .worktrees/claude-<id>.worktree-status.txt \
+  .worktrees/claude-<id>.untracked.txt
+```
+
+最终审查默认使用绑定哈希的证据胶囊，不再把旧版完整 review prompt 直接传给
+Codex。完整 packet、diff 和日志仍保存在文件中，Codex只按选择器展开语义热点。
+当证据结构复杂且预计至少可减少 8 KiB Codex 输入时，工作流会进行一次可选的
+Spark `postflight-bundle` 压缩；Spark 完整输出留在文件中，Codex只接收有界的
+advisory 胶囊。优先用稳定 CLI 参数
+`--spark-compression auto|off|required` 配置，默认是 `auto`；同名环境变量仅作
+兼容默认值，避免前置环境变量破坏已批准的 launcher 前缀。Spark 仍不能授权
+验收、中断、合并或替代 Codex 语义审查。
+
+如果 Builder 结果符合计划，应先运行精确的确定性检查。只有新增测试、长时间验证或证据处理能够实质减少 Codex 工作时，才派发 `checker-test`；否则记录 `checker skipped: deterministic evidence sufficient` 并进入 Codex 审查。
+
+**步骤 5：循环或合并**
+
+- 如果 **accept**：人工审查并合并。
+- 如果 **revise**：更新任务卡的修订说明，回到步骤 3。
+- 如果 **split**：分解为子任务卡。
+- 如果 **reject**：重新规划。
+
+**可选：使用循环运行器**
+
+```bash
+bash ai/run-loop.sh ai/task-cards/PROJ-123.md 5
+```
+
+循环运行器自动执行步骤 3-5，在接受、达到最大迭代次数或人工干预时停止。它还会写入 `.worktrees/loop-<timestamp>/loop-usage-summary.md`，汇总可用的 Claude 和 Codex 使用量。它不会自动合并。
+
+**只检查验证：** 安装后的项目包含 `ai/check-worktree.sh`。优先运行任务卡里的精确验证命令：
+
+```bash
+bash ai/check-worktree.sh --task-card ai/task-cards/PROJ-123.md --no-discover \
+  --jobs 4 --command 'tests=pytest tests/test_target.py'
+```
+
+checker 会以有界并发（默认 4）运行彼此独立的只读命令，按输入顺序稳定汇总，并在 Markdown report 旁写一份 JSON validation receipt。强制边界预检会为未跟踪文件构造虚拟 patch，并检查 Python/JSON/TOML 与跨文件拼接，因此空的 tracked `git diff --check` 不再算完整证据。dispatcher 会在 Claude 结束后记录这些产物，但默认关闭广域 discover，避免与当前任务无关的 pytest/ruff/mypy 噪音。需要 dispatcher 复跑精确命令时，传入 `CLAUDE_CODE_CHECKER_COMMANDS=$'tests=pytest tests/test_target.py'`；只有任务卡明确允许广域项目检查时，才设置 `CLAUDE_CODE_CHECKER_DISCOVER=1`。
+
+**Checker 复用风险门：** 派发 `checker-test` 任务前，在任务卡中填写 Checker Reuse Risk Gate，包含以下精确行：Public API risk、Data model risk、Security risk、Migration risk、Permission risk、Concurrency risk、Cross-module risk、Production impact。每行必须为显式 `no` 才允许任务派生的 checker worktree 复用默认为 `reuse-managed`。缺失、`unknown`、`n/a`、`duplicate`、`high` 风险、DAG 或并行任务保持 `fresh`。环境变量 `CLAUDE_CODE_WORKTREE_STRATEGY=fresh|reuse-managed` 覆盖此默认。现有 reset 安全（`CLAUDE_CODE_REUSE_WORKTREE_RESET=1`）保持不变。
+
+**权威验证时间线：** dispatcher 保留 Claude 阻塞状态。Checker ALL GREEN 是使最终状态设为 `passed` 的权威信号。Checker 失败则相应设置最终状态。
+
+当传入 `--task-card` 时，checker 也会读取任务卡中的 validation fenced block：
+
+```bash validation
+bazel test //path/to:target
+```
+
+如果任务卡写明 `Local validation allowed? | no`，checker 会把 artifact collection 报告为 `OK`，把 validation 报告为 `SKIPPED by policy`；它不会运行命令，也不代表测试通过。适用于用户或仓库策略明确禁止本地测试的场景；报告里应只给出人类或 CI 可运行的命令。
+
+**项目测试分层：** 这个 workflow 项目的测试分为快速检查和较慢的集成覆盖。按改动范围选择最小验证层级：
+
+```bash
+# Smoke：shell 语法和 whitespace
+bash -n scripts/*.sh
+git diff --check
+
+# 日常编辑默认（不运行 worktree/installer 集成测试）
+python scripts/run-tests.py quick
+
+# 修改工作流编排时运行集成覆盖
+python scripts/run-tests.py integration
+
+# 一个确定性的 integration 分片（CI 会并行运行四片）
+python scripts/run-tests.py integration --shard 1/4
+
+# 本地发布前完整覆盖
+python scripts/run-tests.py full
+```
+
+quick 层会排除创建临时仓库、worktree、调度进程或运行 installer 的 integration 文件。修改这些区域时使用 `integration`，本地发布检查可使用 `full`。CI 会在 OS/Python 矩阵中运行 quick，并把单个 integration 测试用例确定性地划分为四个 Ubuntu/Python 3.12 分片并行运行。各分片完整且互不重叠，因此无需在单独的 full job 中重复 quick 测试；每个分片内部仍保持串行，以保护进程、环境变量和 worktree 隔离。
+
+**Workflow 质量汇总：** `ai/run-loop.sh` 还会写入 `.worktrees/loop-<timestamp>/loop-quality-summary.md` 和 `.json`。也可以手动汇总已有运行：
+
+```bash
+python ai/summarize-loop-run.py .worktrees/loop-<timestamp> \
+  --output .worktrees/loop-<timestamp>/loop-quality-summary.md \
+  --json-output .worktrees/loop-<timestamp>/loop-quality-summary.json
+```
+
+汇总报告会固定输出 `Spark Status` 和 `Claude Evidence Classification` 两段。Spark 字段记录 enabled/invoked 状态、mode、model、artifact path、exit code、auto-disable reason、sandbox 和 strong-model fallback 状态。Claude evidence 会分类为 `diff + valid report`、`no report but diff accepted`、`diff without report`、`acknowledgement only`、`seeded report only`、`fallback report`、`valid report without diff` 或 `no useful progress`。
+
+**Workflow benchmark 汇总：** 要把多次 loop run 聚合成轻量 living benchmark：
+
+```bash
+python ai/benchmark-loop-runs.py .worktrees/loop-* \
+  --output .worktrees/workflow-benchmark.md \
+  --json-output .worktrees/workflow-benchmark.json
+```
+
+benchmark 还会聚合执行 owner、任务卡/审查包字节数、Context Lease/checkpoint/capsule 指标、控制面耗时、是否派发 Checker 模型，以及 Claude diff 的近似复用率。primary run、efficient final-candidate review 和接受的 legacy loop 会自动写入经济性记录，并按 run/task 身份幂等追加历史；`calibrate` 只有在同类任务积累足够样本后才产生保守 owner bias。只有同时绑定 Claude diff 和最终接受 diff 时才计算复用率，否则明确记录 unavailable。原有 decision、quality、时延、token/cost、稳定性、Advisor、Spark 和并行元数据仍会保留。
+
+**经济性实验准备：** Codex、Spark 和 Claude 包装器会把终止调用归一化到同一个追加式账本。提供方没有返回的字段保持 `null`，并标记 `usage_complete=false`；工作流不会估算 Token。消耗模型额度前先生成平衡的三臂实验清单：
+
+```bash
+python ai/aiwf.py experiment init --experiment-id routing-v1 \
+  --task-id docs-fix --task-id python-helper --task-id shell-fix \
+  --repetitions 3 --output .ai-workflow/experiments/routing-v1/manifest.json
+python ai/aiwf.py experiment validate \
+  .ai-workflow/experiments/routing-v1/manifest.json
+python ai/aiwf.py experiment prepare \
+  .ai-workflow/experiments/routing-v1/manifest.json
+```
+
+固定实验臂为 `codex-direct`、`delegation-no-spark` 和 `full-workflow`。`prepare` 会为每次运行生成不含秘密的 `run-context.json` 和 `run-metrics.template.json`。上下文包含 `AI_WORKFLOW_CLAUDE_PHASE_METRICS_FILE`；运行前导出该变量后，Dispatcher 会自动把上下文获取、实现、验证和尾部耗时复制进实验目录供汇总。模板还分别记录 observe、route、plan、worktree setup、dispatch、execute、verify、review 和产物收尾耗时，但不会伪造结果产物。模型、工具和确定性流程写入 `active_elapsed_seconds`，可测量的用户确认等待写入 `human_approval_seconds`，完整端到端包络写入 `end_to_end_elapsed_seconds`；无法可靠归因的差值只能写入 `unattributed_wait_seconds`，不得猜成审批耗时。效率对比只使用活跃时间。保持任务输入和重复次数一致；生成产物后先运行 `experiment validate --check-artifacts`，再运行 `experiment summarize`。这些准备步骤完全确定性，不会调用模型。
+
+对于写入范围互斥且各自拥有契约的任务批次，`experiment init --include-parallel-arm` 会增加最大并发为2的 `delegation-parallel-no-spark` 实验臂。它只是诊断对照，不是新的默认策略；共享契约、路径重叠或缺少串行协调证据时仍禁止使用。
+
+接入真实项目时，从 [`benchmarks/real-project-task.example.json`](benchmarks/real-project-task.example.json) 复制任务规范，并同时冻结任务输入和 Git 基线：
+
+```bash
+python ai/aiwf.py experiment init --experiment-id real-v1 \
+  --project-root /path/to/project \
+  --task-spec /path/to/task-a.json --task-spec /path/to/task-b.json \
+  --repetitions 3 --output /path/to/results/real-v1/manifest.json
+python ai/aiwf.py experiment prepare /path/to/results/real-v1/manifest.json
+python ai/aiwf.py experiment status /path/to/results/real-v1/manifest.json
+```
+
+除非显式传入 `--allow-dirty`，`prepare` 会拒绝存在已跟踪修改的仓库；它会复制经过审查的任务规范并绑定 SHA-256，记录基线提交，并为每次运行生成实验臂契约。应按照 `sequence` 执行；各实验臂会在不同重复轮次中轮换顺序，以减小缓存和时段偏差。`full-workflow` 现在表示忠实执行 Skill 自动路由：如果路由选择 `codex-direct`，必须在编写任务卡和委派前停止。`--forced-full-pipeline` 只用于诊断编排开销。`status` 会显示部分进度、下一次待运行任务和项目 HEAD 漂移，不会伪造缺失的模型用量。
+
+只有通过 `codex exec --json` 包装器运行直接修改实验臂时，才能获得精确的 Codex Token。交互式 Codex 界面不一定向仓库脚本暴露自身 Token 计数；此时对应字段保持 unavailable，但仍记录各工作流阶段的墙钟耗时。
+
+当提供方没有返回可比较的美元费用时，可在 `experiment summarize` 后添加 `--pricing ai/examples/model-pricing.json`。带日期的价格目录只生成独立的折算费用，不覆盖提供方原始费用。只有质量不退化、活跃耗时不超过直接修改的2.0倍、且费用至少下降15%时，摘要才标记 `balanced-candidate`；证据不完整时必须保持无法判定。
+
+经济性摘要仍分别记录 Spark 的调用和 Token，但把 `spark` 角色视为赠送额度：Spark 的提供方费用和折算费用都不进入 `billable_by_arm`、配对成本比例和最终推荐；原始 `by_arm` 仍保留，便于观察赠送额度消耗。真实任务规格应在测试前冻结带权重的 `improvement_units`，每个实验臂记录实际满足的 `improvement_units_satisfied`。比较结果同时报告完成权重、单位改进成本和单位改进耗时；语义 diff 行数、修改文件数、新增/通过测试数仅作描述，不会因为修改更多而自动获得更高价值评分。
+
+直接修改实验臂应保存 Codex JSONL 事件，再运行 `python ai/aiwf.py usage capture --source codex --input EVENTS.jsonl --ledger MODEL-USAGE.jsonl --call-id CALL --role codex --stage execute`；run/task/arm 参数取自 `run-context.json`。
+
+**效率证据强制执行：** `python scripts/compare-efficiency.py BASELINE CANDIDATE --enforce` 评估真实聚合证据（Codex 调用减少、时延、首次通过率、质量门控、延续成功、redispatch 避免和重新探索指标）。使用 `--enforce` 时，若 Advisor 效率证据不足或门控失败，脚本返回非零退出码；它必须不虚构 Token/时间节省。
+
+**追加式 loop 事件：** `ai/run-loop.sh` 会写入 `.worktrees/loop-<timestamp>/loop-events.jsonl`，记录 run start、iteration start、dispatch complete、review complete、decision、revision task created 和 stop reason。它保留恢复上下文，不重写旧观察。
+
+**结构化进度记忆与主动退出：** Claude 会维护包含稳定字段的 `CLAUDE_PROGRESS.md`：Goal、Current Phase、Next Check、Blocker、Last Update、Execution Phase、Implementation Complete、Assigned Tail Work、Tail Work Complete 和 Completion Ready。Builder 卡默认只启用“审查本次改动文件”，窄验证、文档和长验证均保持禁用，直到 Codex 给出精确任务。实现完成后 Claude 只执行这些有界收尾，标记完成并主动正常退出。紧凑监控会返回阶段和收尾建议，但不会授权杀进程。每次调度还会写出近似的上下文、实现、验证和尾部阶段耗时到 `<task-id>.phase-metrics.json`。
+
+---
+
+## Windows 注意事项
+
+### PowerShell UTF-8 设置
+
+Windows PowerShell 的控制台代码页, `$OutputEncoding` 和子进程编码不一致时，容易把中文等非 ASCII 文本写成乱码或 `?`。在 PowerShell 里编辑或生成中文文档前，先 dot-source helper：
+
+```powershell
+. .\scripts\pwsh-utf8.ps1
+```
+
+在已安装 workflow 的项目里，使用：
+
+```powershell
+. .\ai\pwsh-utf8.ps1
+```
+
+如需对后续 PowerShell 会话生效，可选择写入 profile：
+
+```powershell
+. .\ai\pwsh-utf8.ps1 -Persist
+```
+
+该 helper 会设置 console input/output encoding, `$OutputEncoding`, `PYTHONUTF8`, `PYTHONIOENCODING` 和 code page `65001`。优先使用它，不要临时手写 `chcp` 或用包含中文的 PowerShell here-string 做文本替换。
+
+在 Windows 上，PATH 中的 `bash` 可能解析为 WSL 而非 Git Bash。如果 WSL 没有默认发行版，直接调用 `bash -n` 会失败。这并不意味着脚本无效。
+
+安装程序（`install_workflow.py`）会显式搜索 Git Bash，当 bash 不可用时报告 `WARN_SKIPPED`，不会将其视为硬性失败。
+
+**解决方案：**
+1. 安装 Git for Windows，确保 `C:\Program Files\Git\bin` 在 PATH 中位于 WSL 之前
+2. 安装 WSL 发行版（`wsl --install -d Ubuntu`）
+3. 通过安装程序验证，而不是直接运行 `bash -n`
+
+---
+
+## 调度可观测性
+
+`dispatch-to-claude.sh` 在 Claude Code 运行期间会在 `.worktrees/` 下写入临时 PID、持久进程身份和心跳证据：
+
+- `.worktrees/claude-<id>.pid` 是临时 Claude PID 提示，在身份确认的终态回收后删除。
+- `.worktrees/claude-<id>.progress.log` 记录启动、心跳、超时和完成事件。
+- 最终化后的机器可读状态字段：`overall_running=yes`、`running=no`、`claude=not-running`。只有 dispatcher 设置这些字段；Claude 不自行最终化状态。
+- `CLAUDE_CODE_HEARTBEAT_SECONDS` 控制心跳频率，默认 `30`。
+- `CLAUDE_CODE_CONTEXT_ACQUISITION_TIMEOUT_SECONDS` 限制读取和定位阶段；所有执行 profile 默认都与活动执行窗口相同（默认 `600` 秒）。execution-only、batch 和负责测试编写的 Checker，其首进展停止门禁使用同一数值。narrow、retry、revision 和 split-child 只缩小任务范围，绝不缩短响应窗口；任务卡自然语言不会改变调度计时。
+- `CLAUDE_CODE_TIMEOUT_SECONDS` 表示活动执行窗口，默认 `600` 秒；首次符合角色要求的实质执行信号会启动完整窗口，之后每次真实产品内容哈希变化都会再次刷新该窗口，但仍受硬上限约束。
+- 临近首次上下文获取边界以及后续每个活动窗口截止时间时，`CLAUDE_CODE_TIMEOUT_ADVISOR=auto` 会在 Claude 继续运行的同时启动一次有界 Spark `monitor-triage`。`CLAUDE_CODE_TIMEOUT_ADVISOR_LEAD_SECONDS` 默认 `60` 秒，调用上限默认 `90` 秒，每个窗口最多尝试 `2` 次。窗口到期后进入 `extension-pending`；Spark 缺失或结果无效不会直接停止 Claude。首次真实产品写入会作废上下文阶段判断并启动完整活动窗口。
+- `CLAUDE_CODE_ACTIVE_PROGRESS_EXTENSION_SECONDS` 在产品内容保持静默时提供首次经当前哈希绑定、Spark 确认的扩展，默认 `300` 秒；`CLAUDE_CODE_GROWING_PROGRESS_EXTENSION_SECONDS` 默认同为 `300` 秒。每次真实产品修改都会刷新完整活动窗口；若 Spark 正在判断，该修改还会取消过期判断。控制文件、报告、文本或 token 活动不能续窗，硬上限始终生效。
+- `CLAUDE_CODE_HARD_TIMEOUT_SECONDS` 是绝对总上限，默认 `1500` 秒且始终优先；只有确实需要禁用某一边界时才将对应值设为 `0`。
+- `CLAUDE_CODE_NO_OUTPUT_TIMEOUT_SECONDS` 可选地在 result/status/report/progress 产物长期无变化时停止 Claude；默认 `0` 为禁用，仅在需要快速失败时设为正数。
+- `CLAUDE_CODE_WORKTREE_PROGRESS` 控制 worktree 进度详细程度。默认 `quiet` 显示紧凑时间和路径；`verbose` 显示详细 worktree 状态。
+- `CLAUDE_CODE_EDIT_READY_GRACE_SECONDS` 为已完成上下文获取并声明精确首次写入的 Builder 提供短桥接窗口，默认 `120` 秒；该声明不会刷新完整活动执行窗口。
+- `CLAUDE_CODE_PRODUCT_IDLE_TIMEOUT_SECONDS` 默认在产品内容 digest 连续 `600` 秒不变后标记 idle candidate；`CLAUDE_CODE_PRODUCT_IDLE_CONFIRMATIONS` 默认 `2`。启用 timeout advisor 时，这些确认只用于佐证 Spark 的高置信度停止建议，不再单独停止 Claude。活跃验证、明确 blocker 和已分配 tail work 会被豁免；`CLAUDE_CODE_TIMEOUT_ADVISOR=off` 保留兼容行为。
+- `CLAUDE_CODE_CODEGRAPH_POLICY=fallback` 默认拒绝 pending 或来自其他 worktree 的 CodeGraph 证据，不承担重建成本；显式使用 `repair` 才会同步/重建执行 worktree 索引，`off` 则跳过探测。
+- `CLAUDE_CODE_APPROVAL_BLOCKED_CONVERGENCE` 启用保守的审批阻塞早期收敛。默认 `1`（启用）；设为 `0` 可禁用。启用后，如果存在完整报告、变更仅为测试范围、存在精确验证审批阻塞器、且观察到两次稳定心跳，dispatcher 会触发 checker helper。这不是验证成功或验收——这是 checker 的早期证据收集路径。
+
+Claude 会在自然里程碑更新 `CLAUDE_PROGRESS.md`。只有同时包含 `Context Acquisition Complete: yes` 和非空 `Planned First Write` 时，`Execution Phase: implementation` 才表示编辑就绪；它仍不等于持久进展。Builder 的持久进展来自统一计算的产品内容变化。工作树根部的 dispatcher 控制文件会在 tracked、staged、untracked 三种状态中一致排除，但产品子目录中的同名文件不会被隐藏。终态收据分别记录 `product_changes`、`control_changes` 和总 `worktree_changes`，供人查看的 Markdown 状态不会再作为机器证据解析。
+
+`dispatch-to-claude.sh` 会打印可复制的 `monitor-claude.sh wait` 命令。智能体控制器只使用这一次阻塞等待，不重复运行 status、进程、日志尾部或时钟查询。
+
+`watch-claude.sh` 只用于人工终端诊断，不是智能体等待接口。它默认展示低成本
+状态面板，只有显式传入 `--details` 才打印完整 progress/status/network 尾部。
+检测到终态后，它会写入与任务绑定的观察收据；再次 watch 同一个终态会被拒绝，
+避免错误循环持续产生 `process is not running` 噪声。智能体控制器只调用一次
+`monitor-claude.sh wait ... --until terminal`。
+
+`watch-claude.sh` 和 `status-claude.sh` 还会打印机器可读监控字段（`monitor_level`、`action`、`evidence_state`、quiet/elapsed 秒数，以及可用时的 suspect count）。Codex 应优先读取这些低 token 字段，再决定是否展开完整 status、progress 或 network tail。
+
+智能体运行时由 Dispatcher 作为唯一采样者，只把实质变化、窗口变化和完成后的终态写入 `*.monitor-events.log`。Codex 应只发起一次阻塞式 `monitor-claude.sh wait <task-id> --until terminal`；禁止重复执行 `watch`、`ps`、`tail`、status、进程树或纯时钟检查。同一个 terminal wait 会立即流出 `active-window-refreshed`、`active-window-extended` 和 `extension-evaluation-*` 结构化通知，随后继续等待终态；因此 Codex 无需轮询就能看到新截止时间以及 Spark 的等待/结果状态，也不得再根据已等待时长自行推断。不再启动分离的 supervisor。活动窗口到期时，Spark 还可以在 Claude 继续运行期间读取隐私受限的 extension capsule 并返回有界建议；它不会收到原始进程列表、完整日志、network tail、源码 diff、thinking 内容、用户输入或工具结果正文。Spark 不直接控制任何进程；dispatcher 校验产品哈希并执行固定的延长/停止规则，hard timeout 始终优先。
+
+Spark 的路由、Claude 监控、失败归因和并行规划现在共用一套严格控制协议。成功的 direct 调用会输出 `spark_decision_json`，下游直接校验并消费紧凑对象，不再重新阅读建议正文；证据哈希会抑制重复监控判断。Spark 不能授权中断、接管、派发、验收或合并；并行建议最多两个 worker，并且必须串行协调与审查。
+
+监控优先级应保守编排，尽量避免误杀 Claude：
+
+1. L0：只执行一次阻塞式 `monitor-claude.sh wait ... --until terminal`。
+2. L1：审查已完成的 diff、报告、outcome 和验证证据。
+3. L2：只有终态证据需要有界 triage 时，才调用一次 `monitor-claude.sh decision`。
+4. L3：仅在可见性或诊断异常时使用 `status-claude.sh --details` 或人工 watch。
+5. L4：只有多个证据源都表明有效进展不太可能时，才使用 `kill-claude.sh`。
+
+即使 Claude 超时或非零退出，调度器仍会尽量收集 diffstat、diff、未跟踪文件、usage fallback、worktree status 和 fallback report。
+
+对于复杂或多次修订的任务，在任务卡中添加 `## Execution Phases` 表。Claude 必须将它作为外层执行合同，在阶段边界更新进度，并在长时间验证或跨过停止门之前写入 `CLAUDE_REPORT.md`。
+```bash
+CLAUDE_CODE_CONTEXT_ACQUISITION_TIMEOUT_SECONDS=600 \
+CLAUDE_CODE_TIMEOUT_SECONDS=600 CLAUDE_CODE_ACTIVE_PROGRESS_EXTENSION_SECONDS=300 \
+CLAUDE_CODE_HARD_TIMEOUT_SECONDS=1500 CLAUDE_CODE_HEARTBEAT_SECONDS=15 \
+  bash ai/dispatch-to-claude.sh ai/task-cards/PROJ-123.md
+```
+
+---
+
+## Claude 外部集成
+
+Claude 内置工具 profile（Bash、Edit、文件操作）是自动可用的。外部 MCP 服务器和插件默认关闭，必须在每个任务卡中显式声明。
+
+在任务卡中填写 `Claude External Integration Gate`，以启用仓库本地 MCP 配置文件或插件目录：
+
+| 门控规则 | 行为 |
+|----------|------|
+| 缺少门控或 `External integrations allowed?` = `no` | Dispatcher 使用 `--bare`；不传入 `--mcp-config` 或 `--plugin-dir` 参数 |
+| `External integrations allowed?` = `yes` | 仅接受已声明的、仓库相对路径下已存在的路径 |
+| `Strict MCP isolation?` | 当允许集成时必须为 `yes` |
+
+允许集成时：
+
+- **路径在 worktree 创建后验证。** Dispatcher 会拒绝绝对路径、空条目、`..` 路径遍历、控制字符，以及解析到 worktree 之外的路径。
+- **MCP 条目**必须是已存在的仓库相对 `.json` 文件。**插件条目**必须是已存在的仓库相对目录或 `.zip` 文件。
+- **路径以数组传递，保留大小写和空格。** Dispatcher 不会执行全局配置扫描、`mcp list`、`plugin list`、安装、启用或下载操作。
+- **证据记录**仅存储所选相对路径和拒绝类别；MCP/插件文件内容和密钥不会被记录。
+- **外部集成不会扩大内置 Bash/Edit 权限。** Tool profile 和允许的工具集保持不变。
+
+---
+
+## 控制面例外
+
+默认角色分工是：Codex负责核心规划和审查；Claude负责实现与修订。
+workflow 控制面修复也使用同一 owner route。
+
+## Claude 调度运维
+
+当 Claude 运行缓慢、卡住或需要清理时，可以使用以下辅助脚本：
+
+```bash
+# 查看最近一次 Claude 运行状态，或传入具体 claude-<timestamp> id
+bash ai/status-claude.sh
+bash ai/status-claude.sh claude-20260701-093934
+
+# 智能体运行推荐：阻塞等待一次，不重复运行 watch/ps/tail/status
+bash ai/monitor-claude.sh wait claude-20260701-093934 --until terminal
+# 审查边界可选的一次性本地/Spark triage
+bash ai/monitor-claude.sh decision claude-20260701-093934
+# 仅用于例外情况下的人工诊断：
+bash ai/status-claude.sh claude-20260701-093934 --details
+
+# 身份确认后停止该 dispatch 的完整 Claude 进程树
+bash ai/kill-claude.sh claude-20260701-093934
+
+# 移除已停止的 worktree，同时保留 .worktrees/claude-<id>.* 证据 artifact
+bash ai/cleanup-worktree.sh claude-20260701-093934
+
+# 只预览某一次已停止 dispatch 及其相邻运行时产物
+python ai/clean_runtime.py --task-id claude-20260701-093934
+
+# 只删除这一次 dispatch 的运行时产物
+python ai/clean_runtime.py --task-id claude-20260701-093934 --apply
+```
+
+`cleanup-worktree.sh` 会优先校验任务绑定的进程身份，旧运行才回退到 PID。仅当 `git worktree remove` 因损坏或 dirty worktree 需要时才使用 `--force`。
+`clean_runtime.py --task-id ...` 适合大仓库恢复场景，因为它避免广域 root artifact 清理，并保留其他 dispatch。注册 worktree 必须具有当前有效的 `cleanup-eligible` 收据；收据缺失或过期时会保留整个任务 bundle。
+
+---
+
+## 保留约束
+
+以下约束在所有工作流变更中保留：
+
+- **无模型层级：** 没有自动的模型层级路由或从 Spark 到 Claude 到更强模型的升级。
+- **无隐式回退：** Spark 不会静默回退到 GPT-5.5 或其他更强模型。如果 Spark 不可用，报告缺口并让 Codex 或人工决定。
+- **无自动合并：** 人工审查和合并保持独立。工作流永不自动合并。
+
+---
+
+## 安全策略
+
+以下操作需要**明确的人工批准**才能执行：
+
+- 破坏性命令（如 `rm -rf`、`DROP TABLE`、`git push --force`、`git reset --hard`）
+- 文件删除
+- 数据库迁移
+- 认证或授权变更
+- 计费或支付变更
+- 部署或基础设施变更
+- 公共 API 表面变更
+- 密钥或凭据编辑（API 密钥、令牌、密码）
+- 生产数据变更
+
+智能体不得擅自执行上述操作。如有疑问，请停止并询问人工。
+
+---
+
+## 验证安装
+
+运行以下命令确认安装成功：
+
+```powershell
+# Windows PowerShell
+mkdir $env:TEMP\ai-workflow-test
+cd $env:TEMP\ai-workflow-test
+git init
+python $env:USERPROFILE\.codex\skills\ai-coding-workflow\scripts\install_workflow.py .
+python $env:USERPROFILE\.codex\skills\ai-coding-workflow\scripts\install_workflow.py .
+```
+
+```bash
+# macOS / Linux
+mkdir /tmp/ai-workflow-test
+cd /tmp/ai-workflow-test
+git init
+python ~/.codex/skills/ai-coding-workflow/scripts/install_workflow.py .
+python ~/.codex/skills/ai-coding-workflow/scripts/install_workflow.py .
+```
+
+预期结果：
+- AGENTS.md 存在
+- CLAUDE.md 存在
+- ai/ 目录存在
+- ai/doctor_workflow.py 存在
+- .worktrees/.gitkeep 存在
+- 第二次运行报告文件未变/已跳过
+
+**运行工作流 doctor 检查就绪状态：**
+
+```bash
+python ai/doctor_workflow.py
+```
+
+如果 doctor 报告 `Project workflow is not bootstrapped`，按它打印的 bootstrap 命令先引导项目。仓库没有本地 `ai/` 工作流目录时，不能直接运行 `bash ai/dispatch-to-claude.sh ...`。
+
+**清理运行时产物：**
+
+```bash
+# 预览将要删除的内容（干运行）
+python ai/clean_runtime.py
+
+# 实际删除产物
+python ai/clean_runtime.py --apply
+
+# 大仓库：只预览某一次已停止 dispatch 及其相邻产物
+python ai/clean_runtime.py --task-id claude-20260709-120000
+
+# 大仓库：只删除这一次 dispatch 的运行时产物
+python ai/clean_runtime.py --task-id claude-20260709-120000 --apply
+
+# 人工合并后，仅标记“已终态 + 已合并 + 产品路径干净”的工作树
+python ai/clean_runtime.py --mark-cleanup-eligible
+
+# 输出机器可读的分组预览
+python ai/clean_runtime.py --json
+```
+
+cleanup-eligible 收据绑定仓库/worktree HEAD、状态、终态证据和
+进程身份，apply 会拒绝过期收据；session store、归档及控制快照不会进入
+通用清理，只有某 lineage 的最后一个合格 worktree 被移除后才删除其 session
+store。该收据不授权合并，也不会强制删除脏工作树。
+
+`doctor_workflow.py` 以预览模式运行：显示运行时产物的数量、大小和年龄。它不会自动删除任何内容。
+
+**工作流反馈：** 在相关交互后，由用户明确要求 Codex 对 Skill 做只读复盘。
+Codex 只总结当前对话及最少量必要运行收据，不持久化遥测、不启动模型、
+不创建任务卡也不修改代码；只有用户另行要求修复后才进入实施。详见
+`references/feedback-policy.md`。
+
+**检查上下文工具：**
+
+```bash
+# 检查哪些 LSP/代码检查工具可用（只读）
+python ai/install_context_tools.py
+
+# 显示某个 profile 的安装命令（干运行）
+python ai/install_context_tools.py --apply python --manager npm
+
+# 实际安装（需要 --apply、--manager 和 --yes）
+python ai/install_context_tools.py --apply python --manager npm --yes
+```
+
+上下文工具助手检查常见的 LSP、代码检查和代码智能工具（pyright、ruff、mypy、typescript-language-server、gopls、rust-analyzer）。默认调用为只读。实际执行包管理器命令需要三个标志：`--apply PROFILE`、`--manager MANAGER` 和 `--yes`。
+
+注意：安装上下文工具二进制文件不会自动将它们暴露为 Codex LSP/codegraph 工具。Codex 代理需要单独配置才能使用它们。
+
+---
+
+## 开发验证
+
+修改安装器或工作流脚本前，运行本地 smoke tests：
+
+```powershell
+python scripts/run-tests.py quick
+```
+
+测试只使用 Python 标准库，覆盖安装器幂等性、managed block 用户内容保留、
+极简 `CLAUDE.md` 的迁移，以及 Codex skill 复制时的运行时产物排除规则。
+
+## 许可证
+
+MIT 许可证 - 详见 [LICENSE](LICENSE)
+
+## 链接
+
+- GitHub 仓库: https://github.com/luozj1020/ai-coding-workflow
+- 问题反馈: https://github.com/luozj1020/ai-coding-workflow/issues

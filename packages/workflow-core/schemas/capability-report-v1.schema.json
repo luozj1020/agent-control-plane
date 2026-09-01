@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-coding-workflow.local/schemas/capability-report-v1.schema.json",
+  "title": "Harness Capability Report v1",
+  "description": "Installation- and version-bound evidence for Harness capabilities.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schemaVersion",
+    "id",
+    "harnessId",
+    "installationId",
+    "adapterVersion",
+    "harnessVersion",
+    "observedAt",
+    "compatibility",
+    "capabilities"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "id": {"$ref": "#/$defs/nonempty"},
+    "harnessId": {"$ref": "#/$defs/id"},
+    "installationId": {"$ref": "#/$defs/nonempty"},
+    "adapterVersion": {"$ref": "#/$defs/nonempty"},
+    "harnessVersion": {"$ref": "#/$defs/nonempty"},
+    "observedAt": {"type": "string", "format": "date-time"},
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "os",
+        "architecture",
+        "authenticationMode",
+        "providerRoute",
+        "configSchema"
+      ],
+      "properties": {
+        "os": {"$ref": "#/$defs/nullableNonempty"},
+        "architecture": {"$ref": "#/$defs/nullableNonempty"},
+        "authenticationMode": {"$ref": "#/$defs/nullableNonempty"},
+        "providerRoute": {"$ref": "#/$defs/nullableNonempty"},
+        "configSchema": {"$ref": "#/$defs/nullableNonempty"}
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/evidence"}
+    }
+  },
+  "$defs": {
+    "nonempty": {"type": "string", "minLength": 1},
+    "nullableNonempty": {
+      "oneOf": [{"$ref": "#/$defs/nonempty"}, {"type": "null"}]
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["state", "source", "observedAt", "evidenceRef"],
+      "properties": {
+        "state": {
+          "enum": ["supported", "unsupported", "unverified", "degraded"]
+        },
+        "source": {"$ref": "#/$defs/nonempty"},
+        "observedAt": {"type": "string", "format": "date-time"},
+        "evidenceRef": {"$ref": "#/$defs/nonempty"},
+        "expiresAt": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

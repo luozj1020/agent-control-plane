@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-coding-workflow.local/schemas/activation-receipt-v1.schema.json",
+  "title": "Toolchain Activation Receipt v1",
+  "description": "Durable evidence for transactional activation and safe rollback.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schemaVersion",
+    "id",
+    "profileId",
+    "state",
+    "createdAt",
+    "adapterVersions",
+    "changes",
+    "backup",
+    "verification"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "id": {"$ref": "#/$defs/nonempty"},
+    "profileId": {"$ref": "#/$defs/nonempty"},
+    "state": {"enum": ["committed", "failed", "rolled-back"]},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "adapterVersions": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/nonempty"},
+      "minProperties": 1
+    },
+    "changes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/change"}
+    },
+    "backup": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["available", "location", "contentHash"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "location": {"$ref": "#/$defs/nullableNonempty"},
+        "contentHash": {"$ref": "#/$defs/nullableHash"}
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["status", "checks"],
+      "properties": {
+        "status": {"enum": ["passed", "failed", "unknown"]},
+        "checks": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": true}
+        }
+      }
+    },
+    "rollbackOf": {"$ref": "#/$defs/nullableNonempty"}
+  },
+  "$defs": {
+    "nonempty": {"type": "string", "minLength": 1},
+    "nullableNonempty": {
+      "oneOf": [{"$ref": "#/$defs/nonempty"}, {"type": "null"}]
+    },
+    "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "nullableHash": {
+      "oneOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "path",
+        "operation",
+        "beforeHash",
+        "afterHash",
+        "ownedByReceipt"
+      ],
+      "properties": {
+        "path": {"$ref": "#/$defs/nonempty"},
+        "operation": {"enum": ["create", "update", "delete"]},
+        "beforeHash": {"$ref": "#/$defs/nullableHash"},
+        "afterHash": {"$ref": "#/$defs/nullableHash"},
+        "ownedByReceipt": {"type": "boolean"}
+      }
+    }
+  }
+}

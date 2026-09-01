@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+Thumbs.db
+*.log
+task-cards/
+tmp-*/
+
+# Repository-local workflow bootstrap, runtime, indexes, and planning inputs.
+/AGENTS.md
+/CLAUDE.md
+/ai/
+/.ai-workflow/
+/.codegraph/
+/ref/
+/AI Coding Workflow 跨模型信息传递优化规划.*
+/*.docx
+
+/.worktrees/*
+!/.worktrees/.gitkeep

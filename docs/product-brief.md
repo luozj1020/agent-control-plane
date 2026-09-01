@@ -2,10 +2,10 @@
 
 ## Outcome
 
-Provide a CC-Switch-style visual workflow Skill manager. Users select a mode,
-main agent, and downstream role bindings; the product resolves them into an
-effective Skill bundle, activates that bundle for the main agent, and lets the
-user launch the main agent normally.
+Provide a CC-Switch-style visual control plane with an embedded, versioned
+workflow core. Users select a mode, main agent, and downstream role bindings;
+the product resolves them into an effective projection, activates it for the
+main agent, and lets the user launch that agent normally.
 
 ## Canonical flow
 
@@ -22,17 +22,17 @@ select profile
 
 Example: `main=codex`, `mode=overnight`, `builder=claude-code`. Starting Codex
 causes Codex to freeze intent, delegate implementation to Claude Code, and
-review the result because activation projected the product-owned Overnight
-template into Codex.
+review the result because activation projected the embedded Overnight contract
+into Codex.
 
 ## Product invariants
 
 1. The product is primarily a configuration switcher. Overnight may launch one
    detached, run-scoped supervisor and Balanced may invoke one foreground,
    bounded local Runner; neither requires an always-running workflow daemon.
-2. Overnight, Balanced, and Interactive are versioned product-owned mode
-   templates. The product compiles them into agent-specific Skills,
-   instructions, and configuration.
+2. Overnight, Balanced, and Interactive semantics are owned and versioned by
+   the internal `packages/workflow-core` package. The application compiles its
+   contract projections into agent-specific Skills, instructions, and config.
 3. The managed unit is an effective Skill bundle whose identity binds the mode,
    agent bindings, adapter versions, source hashes, and generated artifacts.
 4. One effective Skill contains exactly one mode. Inactive modes and unused
@@ -50,7 +50,8 @@ template into Codex.
 10. Removing the application must not leave Codex, Claude Code, or another agent
    unusable; the last known-good configuration remains recoverable.
 11. Balanced timing and budgets are enforced by tools, not natural-language
-    claims. Product-content hashes are the only window-refresh authority.
+    claims. Upstream contract and product-content hashes are the only
+    window-refresh authority.
 12. A downstream exit never authorizes semantic acceptance or merge.
 13. Overnight and Balanced reference versioned external-monitor policies with
     the same ordered layers: process, activity, state, evidence, and wake. The
@@ -78,9 +79,9 @@ template into Codex.
   repository scope, and optional provider-profile references.
 - **Role binding:** builder, reviewer, tester, planner, or subagent mapped to an
   installed agent command/profile.
-- **Mode Skill template:** one product-owned, versioned orchestration contract
-  for exactly one mode, with role requirements, capabilities,
-  continuation/review policy, and render inputs.
+- **Mode Skill projection:** one target-specific rendering of an embedded,
+  versioned orchestration contract for exactly one mode, with role
+  requirements, capabilities, continuation/review policy, and render inputs.
 - **External monitor policy:** a versioned, agent-neutral contract defining the
   downstream monitoring hierarchy, upstream sleep boundary, wake states, and
   terminal states that must not generate duplicate wakes.
@@ -98,7 +99,7 @@ template into Codex.
 - **Activation receipt:** before/after hashes, backups, compatibility result,
   warnings, and reload instructions.
 
-## Product-owned modes
+## Projected workflow modes
 
 - **Overnight / convergent:** the main agent freezes intent, delegates durable
   downstream work, and ends its current inference episode. Every rejected

@@ -21,6 +21,11 @@ const HANDOFF_KEYS = new Set([
 const VALIDATION_KEYS = new Set(["id", "command", "description", "local_allowed"]);
 const TASK_SHAPE_KEYS = new Set([
   "responsibilities", "new_modules", "split_decision", "split_reason",
+  "participants", "interfaces",
+]);
+const PARTICIPANT_KEYS = new Set(["id", "owner", "responsibilities"]);
+const INTERFACE_KEYS = new Set([
+  "id", "producer", "consumer", "owner", "contract", "validation_id",
 ]);
 const COMPLEX_GATE_KEYS = new Set([
   "enabled", "counterexamples", "fail_closed_conditions", "not_applicable_reason",
@@ -199,7 +204,75 @@ function validateCommands(value) {
   return result;
 }
 
-function validateExtensions(value) {
+function validateTaskParticipants(value, path) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) {
+    fail("task.invalid", `${path} must contain 1 to 64 participants.`, path);
+  }
+  const participants = value.map((item, index) => {
+    const itemPath = `${path}[${index}]`;
+    if (!isObject(item)) fail("task.invalid", `${itemPath} must be an object.`, itemPath);
+    assertKnownKeys(item, PARTICIPANT_KEYS, itemPath);
+    return {
+      id: identifier(item.id, `${itemPath}.id`),
+      owner: identifier(item.owner, `${itemPath}.owner`),
+      responsibilities: textArray(item.responsibilities, `${itemPath}.responsibilities`, {
+        minimum: 1,
+        maximum: 64,
+      }),
+    };
+  });
+  unique(participants.map((item) => item.id), path);
+  return participants;
+}
+
+function validateTaskInterfaces(value, path, participantIds, validationIds) {
+  if (!Array.isArray(value) || value.length > 256) {
+    fail("task.invalid", `${path} must be an array of at most 256 interfaces.`, path);
+  }
+  const interfaces = value.map((item, index) => {
+    const itemPath = `${path}[${index}]`;
+    if (!isObject(item)) fail("task.invalid", `${itemPath} must be an object.`, itemPath);
+    assertKnownKeys(item, INTERFACE_KEYS, itemPath);
+    const result = {
+      id: identifier(item.id, `${itemPath}.id`),
+      producer: identifier(item.producer, `${itemPath}.producer`),
+      consumer: identifier(item.consumer, `${itemPath}.consumer`),
+      owner: identifier(item.owner, `${itemPath}.owner`),
+      contract: text(item.contract, `${itemPath}.contract`, { maximum: 4096 }),
+      ...(item.validation_id === undefined ? {} : {
+        validation_id: identifier(item.validation_id, `${itemPath}.validation_id`),
+      }),
+    };
+    if (result.producer === result.consumer) {
+      fail(
+        "task.invalid_interface",
+        `Interface '${result.id}' producer and consumer must be different participants.`,
+        `${itemPath}.consumer`,
+      );
+    }
+    for (const field of ["producer", "consumer", "owner"]) {
+      if (!participantIds.has(result[field])) {
+        fail(
+          "task.invalid_reference",
+          `Interface '${result.id}' references unknown participant '${result[field]}' as ${field}.`,
+          `${itemPath}.${field}`,
+        );
+      }
+    }
+    if (result.validation_id && !validationIds.has(result.validation_id)) {
+      fail(
+        "task.invalid_reference",
+        `Interface '${result.id}' references unknown validation '${result.validation_id}'.`,
+        `${itemPath}.validation_id`,
+      );
+    }
+    return result;
+  });
+  unique(interfaces.map((item) => item.id), path);
+  return interfaces;
+}
+
+function validateExtensions(value, validationIds = new Set()) {
   if (value === undefined) return {};
   if (!isObject(value)) fail("task.invalid", "extensions must be an object.", "extensions");
   const result = structuredClone(value);
@@ -212,6 +285,30 @@ function validateExtensions(value) {
       if (value.task_shape[key] !== undefined) {
         result.task_shape[key] = textArray(value.task_shape[key], `extensions.task_shape.${key}`);
       }
+    }
+    const participants = value.task_shape.participants === undefined
+      ? []
+      : validateTaskParticipants(
+        value.task_shape.participants,
+        "extensions.task_shape.participants",
+      );
+    if (value.task_shape.participants !== undefined) {
+      result.task_shape.participants = participants;
+    }
+    if (value.task_shape.interfaces !== undefined) {
+      if (participants.length === 0) {
+        fail(
+          "task.invalid_reference",
+          "extensions.task_shape.participants is required when interfaces are declared.",
+          "extensions.task_shape.participants",
+        );
+      }
+      result.task_shape.interfaces = validateTaskInterfaces(
+        value.task_shape.interfaces,
+        "extensions.task_shape.interfaces",
+        new Set(participants.map((item) => item.id)),
+        validationIds,
+      );
     }
     if (
       value.task_shape.split_decision !== undefined &&
@@ -321,12 +418,14 @@ function validateCanonicalTaskCard(task) {
     handoff: validateHandoff(task.handoff),
     validation,
     stop_conditions: textArray(task.stop_conditions, "stop_conditions"),
-    extensions: validateExtensions(task.extensions),
+    extensions: validateExtensions(task.extensions, validationIds),
   };
   const gateText = [
     canonical.goal,
     ...canonical.acceptance.map((item) => item.description),
     ...(canonical.extensions.task_shape?.responsibilities ?? []),
+    ...(canonical.extensions.task_shape?.participants ?? [])
+      .flatMap((participant) => participant.responsibilities),
   ].join("\n").toLowerCase();
   if (
     COMPLEX_GATE_MARKERS.some((marker) => gateText.includes(marker)) &&
@@ -495,6 +594,40 @@ function renderComplexGate(task) {
   ].join("\n");
 }
 
+function renderCoordinationInterfaces(task) {
+  const shape = task.extensions.task_shape;
+  const participants = shape?.participants ?? [];
+  const interfaces = shape?.interfaces ?? [];
+  if (participants.length === 0 && interfaces.length === 0) return "";
+  const parts = [];
+  if (participants.length > 0) {
+    parts.push(
+      "**Participants:**",
+      markdownTable(
+        ["ID", "Owner", "Responsibilities"],
+        participants.map((item) => [item.id, item.owner, item.responsibilities.join("; ")]),
+      ),
+    );
+  }
+  if (interfaces.length > 0) {
+    parts.push(
+      "**Interfaces:**",
+      markdownTable(
+        ["ID", "Producer", "Consumer", "Owner", "Contract", "Validation"],
+        interfaces.map((item) => [
+          item.id,
+          item.producer,
+          item.consumer,
+          item.owner,
+          item.contract,
+          item.validation_id ?? "",
+        ]),
+      ),
+    );
+  }
+  return parts.join("\n\n");
+}
+
 export function renderTaskCardMarkdown(taskInput, options = {}) {
   const task = validateTaskCard(taskInput);
   const view = options.view ?? "audit";
@@ -521,6 +654,10 @@ export function renderTaskCardMarkdown(taskInput, options = {}) {
   );
   const complexGate = renderComplexGate(task);
   if (complexGate) sections.push(complexGate, "");
+  const coordinationInterfaces = renderCoordinationInterfaces(task);
+  if (coordinationInterfaces) {
+    sections.push("## Coordination Interfaces", "", coordinationInterfaces, "");
+  }
   sections.push(
     "## Acceptance Criteria", "",
     markdownTable(

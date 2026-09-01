@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-coding-workflow/schemas/coordination-event-v1.schema.json",
+  "title": "Coordination Event v1",
+  "description": "Content-free runtime evidence for comparable multi-agent coordination telemetry.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "eventId", "recordedAt", "runId", "mode", "kind", "actor", "measurement"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "eventId": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "recordedAt": { "type": "string", "format": "date-time" },
+    "runId": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "mode": { "enum": ["overnight", "balanced", "interactive"] },
+    "kind": {
+      "enum": [
+        "run_created", "agent_invoke_started", "agent_invoke_completed",
+        "artifact_read", "artifact_write", "state_transition", "review_decision",
+        "validation_completed", "wake_requested", "wake_delivered",
+        "interrupt_requested"
+      ]
+    },
+    "actor": { "$ref": "#/$defs/endpoint" },
+    "target": { "$ref": "#/$defs/endpoint" },
+    "causationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "confidence"],
+      "properties": {
+        "source": { "enum": ["runtime", "filesystem_snapshot", "provider_reported", "derived", "agent_claimed"] },
+        "confidence": { "enum": ["observed", "reported", "derived", "unknown"] },
+        "tokens": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "elapsedMilliseconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "detail": {
+      "type": "object",
+      "description": "Non-content metadata only; prompts, source text, and secrets are forbidden by policy."
+    }
+  },
+  "$defs": {
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "enum": ["control_plane", "agent", "artifact", "state", "operator", "validator", "transport"] },
+        "id": { "type": "string", "minLength": 1, "maxLength": 240 }
+      }
+    }
+  }
+}

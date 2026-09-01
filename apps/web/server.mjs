@@ -19,6 +19,8 @@ import { createPreferredUsageSource } from "./preferred-usage-source.mjs";
 import { createBalancedRuntime } from "./balanced-runtime.mjs";
 import { createOvernightRuntime } from "./overnight-runtime.mjs";
 import { createEditableCodexAgentStore } from "./codex-agent-role-store.mjs";
+import { createIntegrationRegistry } from "./integration-registry.mjs";
+import { createWorkflowCoreAdapter } from "./workflow-core-adapter.mjs";
 import { createSkillStore, SkillStoreError } from "./skill-store.mjs";
 import {
   createTaskCardTemplate,
@@ -39,7 +41,6 @@ const PUBLIC_ROOT = fileURLToPath(new URL("./public/", import.meta.url));
 const CONTRACTS_ROOT = fileURLToPath(
   new URL("../../packages/contracts/dist/", import.meta.url),
 );
-const TASK_CARD_SCHEMA_ROOT = fileURLToPath(new URL("./", import.meta.url));
 
 const MIME_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -143,11 +144,16 @@ export function createAppServer(options = {}) {
   const codexAgentStore =
     options.codexAgentStore ??
     createEditableCodexAgentStore({ codexHome: options.codexHome ?? inferredCodexHome });
+  const workflowCoreAdapter = options.workflowCoreAdapter ?? createWorkflowCoreAdapter({
+    sourceRoot: options.workflowCoreRoot,
+  });
   const balancedRuntime = options.balancedRuntime ?? createBalancedRuntime({
     runtimeRoot: options.balancedRuntimeRoot,
+    protocolProvider: (mode) => workflowCoreAdapter.runtimeProtocol(mode),
   });
   const overnightRuntime = options.overnightRuntime ?? createOvernightRuntime({
     runtimeRoot: options.overnightRuntimeRoot,
+    protocolProvider: (mode) => workflowCoreAdapter.runtimeProtocol(mode),
   });
   const preflightAdapters = options.preflightAdapters ?? EXAMPLE_AGENTS
     .filter((agent) => agent.capabilities.includes("bounded-execution"))
@@ -159,6 +165,11 @@ export function createAppServer(options = {}) {
         ? ["ANTHROPIC_", "CLAUDE_", "CC_SWITCH_"]
         : [],
       filesystemIsolation: "post-run-only",
+      readContainment: agent.id === "claude-code" ? "partial-event-audit" : "unsupported",
+      writeContainment: "post-run-audit",
+      filesystemEventSource: agent.id === "claude-code"
+        ? "claude-stream-json-explicit-read-tool-v1"
+        : null,
       command: agent.id === "claude-code"
         ? (process.env.AGENT_CONTROL_CLAUDE_COMMAND ?? "claude")
         : null,
@@ -173,6 +184,10 @@ export function createAppServer(options = {}) {
       adapters: connectivityAdapters,
       environment: options.preflightEnvironment ?? process.env,
     }));
+  const integrationRegistry = options.integrationRegistry ?? createIntegrationRegistry({
+    defaultProjectRoot: options.integrationProjectRoot ?? process.cwd(),
+    environment: options.integrationEnvironment ?? process.env,
+  });
   let usageMonitor = options.usageMonitor;
   if (!usageMonitor) {
     let usageSources = options.usageSources;
@@ -215,7 +230,7 @@ export function createAppServer(options = {}) {
         sendJson(
           response,
           200,
-          { status: "ok", product: "agent-workflow-switch" },
+          { status: "ok", product: "ai-coding-workflow-control-plane" },
           request.method === "HEAD",
         );
         return;
@@ -223,6 +238,52 @@ export function createAppServer(options = {}) {
 
       if (pathname === "/api/status" && (request.method === "GET" || request.method === "HEAD")) {
         sendJson(response, 200, await store.status(), request.method === "HEAD");
+        return;
+      }
+
+      if (pathname === "/api/workflow-core" && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(response, 200, await workflowCoreAdapter.status(), request.method === "HEAD");
+        return;
+      }
+
+      if (pathname === "/api/workflow-core/diagnose" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        await readJsonBody(request);
+        sendJson(response, 200, await workflowCoreAdapter.diagnose());
+        return;
+      }
+
+      if (pathname === "/api/integrations" && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(
+          response,
+          200,
+          await integrationRegistry.list({
+            projectRoot: requestUrl.searchParams.get("projectRoot") || undefined,
+          }),
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      const integrationAction = pathname.match(/^\/api\/integrations\/([^/]+)\/(diagnose|plan)$/);
+      if (integrationAction && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const integrationId = integrationAction[1];
+        const action = integrationAction[2];
+        const body = await readJsonBody(request);
+        sendJson(
+          response,
+          200,
+          action === "diagnose"
+            ? await integrationRegistry.diagnose(integrationId, body)
+            : await integrationRegistry.plan(integrationId, body),
+        );
         return;
       }
 
@@ -280,6 +341,91 @@ export function createAppServer(options = {}) {
         return;
       }
 
+      const coordinationRun = pathname.match(
+        /^\/api\/coordination\/(balanced|overnight)\/([a-z0-9][a-z0-9._-]{0,159})$/,
+      );
+      if (coordinationRun && (request.method === "GET" || request.method === "HEAD")) {
+        const [, mode, runId] = coordinationRun;
+        const maximumEvents = Math.min(
+          500,
+          Math.max(1, Number.parseInt(requestUrl.searchParams.get("limit") ?? "200", 10) || 200),
+        );
+        const runtime = mode === "balanced" ? balancedRuntime : overnightRuntime;
+        if (typeof runtime.coordinationDetail !== "function") {
+          sendJson(response, 501, { error: "coordination.detail_unsupported" }, request.method === "HEAD");
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          await runtime.coordinationDetail(runId, { maximumEvents }),
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      if (pathname === "/api/coordination" && (request.method === "GET" || request.method === "HEAD")) {
+        const [balancedRuns, overnightRuns] = await Promise.all([
+          balancedRuntime.listRuns(),
+          overnightRuntime.listRuns(),
+        ]);
+        const requestedMode = requestUrl.searchParams.get("mode") ?? "all";
+        const limit = Math.min(200, Math.max(1, Number.parseInt(requestUrl.searchParams.get("limit") ?? "50", 10) || 50));
+        const runs = [...balancedRuns, ...overnightRuns]
+          .map((run) => run.coordination)
+          .filter(Boolean)
+          .filter((run) => requestedMode === "all" || run.mode === requestedMode)
+          .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
+          .slice(0, limit);
+        const aggregate = {
+          runs: runs.length,
+          events: runs.reduce((total, run) => total + run.eventCount, 0),
+          agentInvocations: runs.reduce((total, run) => total + run.agentInvocations, 0),
+          artifactReads: runs.reduce((total, run) => total + (run.artifactReads ?? 0), 0),
+          artifactWrites: runs.reduce((total, run) => total + run.artifactWrites, 0),
+          readViolations: runs.reduce((total, run) => total + (run.readViolations ?? 0), 0),
+          readClassifications: {
+            allowed: runs.reduce((total, run) => total + (run.readClassifications?.allowed ?? 0), 0),
+            outOfScope: runs.reduce((total, run) => total + (run.readClassifications?.outOfScope ?? 0), 0),
+            forbidden: runs.reduce((total, run) => total + (run.readClassifications?.forbidden ?? 0), 0),
+            unknown: runs.reduce((total, run) => total + (run.readClassifications?.unknown ?? 0), 0),
+          },
+          topology: {
+            nodeCount: runs.reduce((total, run) => total + (run.topology?.nodeCount ?? 0), 0),
+            relationshipCount: runs.reduce((total, run) => total + (run.topology?.relationshipCount ?? 0), 0),
+            uniqueReadArtifacts: runs.reduce((total, run) => total + (run.topology?.uniqueReadArtifacts ?? 0), 0),
+            repeatedArtifactReads: runs.reduce((total, run) => total + (run.topology?.repeatedArtifactReads ?? 0), 0),
+            artifactReaderLinks: runs.reduce((total, run) => total + (run.topology?.artifactReaderLinks ?? 0), 0),
+            maxArtifactReaderFanOut: runs.reduce(
+              (maximum, run) => Math.max(maximum, run.topology?.maxArtifactReaderFanOut ?? 0),
+              0,
+            ),
+          },
+          stateTransitions: runs.reduce((total, run) => total + run.stateTransitions, 0),
+          reviewDecisions: runs.reduce((total, run) => total + run.reviewDecisions, 0),
+          validationEvents: runs.reduce((total, run) => total + run.validationEvents, 0),
+          wakeEvents: runs.reduce((total, run) => total + run.wakeEvents, 0),
+          observedTokens: runs.reduce((total, run) => total + run.observedTokens, 0),
+        };
+        const coverage = Object.fromEntries(["invoke", "write", "read", "message"].map((dimension) => {
+          const values = runs.map((run) => run.coverage?.[dimension]).filter(Boolean);
+          const unique = new Set(values);
+          const status = values.length === 0
+            ? "not-observed"
+            : unique.size === 1
+              ? values[0]
+              : "mixed";
+          return [dimension, status];
+        }));
+        sendJson(
+          response,
+          200,
+          { schemaVersion: 1, generatedAt: new Date().toISOString(), aggregate, coverage, runs },
+          request.method === "HEAD",
+        );
+        return;
+      }
+
       if (
         pathname === "/api/task-card/template" &&
         (request.method === "GET" || request.method === "HEAD")
@@ -305,12 +451,8 @@ export function createAppServer(options = {}) {
         pathname === "/api/task-card/schema" &&
         (request.method === "GET" || request.method === "HEAD")
       ) {
-        await serveFile(
-          request,
-          response,
-          TASK_CARD_SCHEMA_ROOT,
-          "task-card-v1.schema.json",
-        );
+        const projected = await workflowCoreAdapter.schema("task-card-v1");
+        sendJson(response, 200, projected.schema, request.method === "HEAD");
         return;
       }
 
@@ -341,6 +483,7 @@ export function createAppServer(options = {}) {
           200,
           {
             ...TASK_CARD_PREFLIGHT_OPTIONS,
+            workflowCore: await workflowCoreAdapter.status(),
             adapters: preflightAdapters.map((adapter) => ({
               ...adapter,
               connectivityProbeSupported: diagnosticAdapterIds.has(adapter.id),
@@ -362,6 +505,7 @@ export function createAppServer(options = {}) {
           await preflightTaskCard(await readJsonBody(request), {
             adapters: preflightAdapters,
             environment: options.preflightEnvironment ?? process.env,
+            workflowContract: await workflowCoreAdapter.status(),
           }),
         );
         return;
@@ -586,6 +730,6 @@ if (isEntryPoint()) {
     const address = server.address();
     const activePort = typeof address === "object" && address ? address.port : port;
     const storage = localPaths.codexHome ? ` · Codex home: ${localPaths.codexHome}` : " · preview only";
-    process.stdout.write(`Agent Workflow Switch: http://${host}:${activePort}${storage}\n`);
+    process.stdout.write(`AI Coding Workflow Control Plane: http://${host}:${activePort}${storage}\n`);
   });
 }

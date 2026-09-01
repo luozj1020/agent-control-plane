@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-coding-workflow/schemas/workflow-contract-v1.schema.json",
+  "title": "AI Coding Workflow Contract v1",
+  "description": "Versioned machine boundary exported to workflow control planes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract_id",
+    "contract_version",
+    "producer",
+    "modes",
+    "overnight_strategies",
+    "runtime",
+    "review",
+    "projections",
+    "invariants",
+    "schema_bindings"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "contract_id": { "const": "ai-coding-workflow" },
+    "contract_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "cli"],
+      "properties": {
+        "repository": { "const": "ai-coding-workflow" },
+        "cli": { "const": "aiwf" }
+      }
+    },
+    "modes": {
+      "type": "array",
+      "minItems": 3,
+      "items": { "$ref": "#/$defs/mode" }
+    },
+    "overnight_strategies": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/$defs/strategy" }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bookend", "balanced"],
+      "properties": {
+        "bookend": { "$ref": "#/$defs/runtimeProtocol" },
+        "balanced": { "$ref": "#/$defs/runtimeProtocol" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["overnight_decisions", "balanced_decisions", "revision_delta"],
+      "properties": {
+        "overnight_decisions": { "$ref": "#/$defs/strings" },
+        "balanced_decisions": { "$ref": "#/$defs/strings" },
+        "revision_delta": { "const": "bounded-non-expanding" }
+      }
+    },
+    "projections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_card", "control_plane_runtime", "coordination_observability"],
+      "properties": {
+        "task_card": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_binding", "schema_version", "interface_ownership"],
+          "properties": {
+            "schema_binding": { "const": "task-card-v1" },
+            "schema_version": { "const": 1 },
+            "interface_ownership": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["participant_path", "interface_path", "reference_policy", "validation_policy"],
+              "properties": {
+                "participant_path": { "const": "extensions.task_shape.participants" },
+                "interface_path": { "const": "extensions.task_shape.interfaces" },
+                "reference_policy": { "const": "declared-participants-only" },
+                "validation_policy": { "const": "reference-or-preflight-warning" }
+              }
+            }
+          }
+        },
+        "control_plane_runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["overnight", "balanced"],
+          "properties": {
+            "overnight": { "$ref": "#/$defs/overnightProjection" },
+            "balanced": { "$ref": "#/$defs/balancedProjection" }
+          }
+        },
+        "coordination_observability": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "event_schema_binding", "summary_schema_binding", "detail_schema_binding", "event_kinds",
+            "measurement_sources", "content_policy", "coverage_policy",
+            "read_containment_modes", "write_containment_modes", "read_audit_policy",
+            "derived_metric_policy", "topology_metrics", "detail_projection_policy",
+            "temporal_order_policy"
+          ],
+          "properties": {
+            "event_schema_binding": { "const": "coordination-event-v1" },
+            "summary_schema_binding": { "const": "coordination-run-summary-v1" },
+            "detail_schema_binding": { "const": "coordination-run-detail-v1" },
+            "event_kinds": { "$ref": "#/$defs/strings" },
+            "measurement_sources": { "$ref": "#/$defs/strings" },
+            "content_policy": { "const": "metadata-only" },
+            "coverage_policy": { "const": "unsupported-is-not-zero" },
+            "read_containment_modes": {
+              "type": "array",
+              "items": { "enum": ["exact-paths", "partial-event-audit", "unsupported"] },
+              "minItems": 3,
+              "maxItems": 3,
+              "uniqueItems": true
+            },
+            "write_containment_modes": {
+              "type": "array",
+              "items": { "enum": ["exact-paths", "post-run-audit", "unsupported"] },
+              "minItems": 3,
+              "maxItems": 3,
+              "uniqueItems": true
+            },
+            "read_audit_policy": { "const": "explicit-events-only" },
+            "derived_metric_policy": { "const": "recorded-events-only" },
+            "topology_metrics": { "$ref": "#/$defs/strings" },
+            "detail_projection_policy": { "const": "allowlist-metadata-only" },
+            "temporal_order_policy": { "const": "append-sequence" }
+          }
+        }
+      }
+    },
+    "invariants": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "schema_bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/schemaBinding" }
+    }
+  },
+  "$defs": {
+    "strings": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "mode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "ownership", "entrypoint", "upstream_lifecycle"],
+      "properties": {
+        "id": { "enum": ["overnight", "balanced", "interactive"] },
+        "ownership": { "enum": ["downstream-convergence", "round-based", "upstream-continuous"] },
+        "entrypoint": {
+          "oneOf": [
+            { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+            { "type": "null" }
+          ]
+        },
+        "upstream_lifecycle": { "enum": ["bookends", "active-between-rounds", "continuous"] }
+      }
+    },
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scope_rule", "stop_rule"],
+      "properties": {
+        "id": { "enum": ["convergent", "continuous-improvement"] },
+        "scope_rule": { "enum": ["non-expanding", "acceptance-floor-preserving"] },
+        "stop_rule": { "enum": ["acceptance-approved", "operator-interrupt"] }
+      }
+    },
+    "runtimeProtocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["states", "wake_states", "terminal_states", "success_states"],
+      "properties": {
+        "states": { "$ref": "#/$defs/strings" },
+        "wake_states": { "$ref": "#/$defs/strings" },
+        "terminal_states": { "$ref": "#/$defs/strings" },
+        "success_states": { "$ref": "#/$defs/strings" }
+      }
+    },
+    "overnightProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["states", "initial_state", "active_state", "wake_states", "terminal_states", "review_decisions", "outcome_states", "decision_states"],
+      "properties": {
+        "states": { "$ref": "#/$defs/strings" },
+        "initial_state": { "type": "string", "minLength": 1 },
+        "active_state": { "type": "string", "minLength": 1 },
+        "wake_states": { "$ref": "#/$defs/strings" },
+        "terminal_states": { "$ref": "#/$defs/strings" },
+        "review_decisions": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/strings" }
+        },
+        "outcome_states": { "$ref": "#/$defs/stateMap" },
+        "decision_states": { "$ref": "#/$defs/stateMap" }
+      }
+    },
+    "balancedProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["states", "initial_state", "active_state", "review_state", "terminal_states", "evidence_statuses", "review_decisions", "outcome_states", "decision_states"],
+      "properties": {
+        "states": { "$ref": "#/$defs/strings" },
+        "initial_state": { "type": "string", "minLength": 1 },
+        "active_state": { "type": "string", "minLength": 1 },
+        "review_state": { "type": "string", "minLength": 1 },
+        "terminal_states": { "$ref": "#/$defs/strings" },
+        "evidence_statuses": { "$ref": "#/$defs/strings" },
+        "review_decisions": { "$ref": "#/$defs/strings" },
+        "outcome_states": { "$ref": "#/$defs/stateMap" },
+        "decision_states": { "$ref": "#/$defs/stateMap" }
+      }
+    },
+    "stateMap": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "schemaBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "sha256"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "path": { "type": "string", "pattern": "^schemas/[A-Za-z0-9._-]+\\.json$" },
+        "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

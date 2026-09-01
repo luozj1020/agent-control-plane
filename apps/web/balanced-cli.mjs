@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { BalancedRuntimeError, createBalancedRuntime } from "./balanced-runtime.mjs";
 import { OvernightRuntimeError, createOvernightRuntime } from "./overnight-runtime.mjs";
+import { createWorkflowCoreAdapter } from "./workflow-core-adapter.mjs";
 import {
   TaskCardError,
   createTaskCardTemplate,
@@ -15,6 +16,8 @@ import {
 } from "./task-card.mjs";
 
 const CLI_PATH = fileURLToPath(import.meta.url);
+const workflowCoreAdapter = createWorkflowCoreAdapter();
+const runtimeProtocolProvider = (mode) => workflowCoreAdapter.runtimeProtocol(mode);
 
 function writeStream(stream, value) {
   return new Promise((resolveWrite, rejectWrite) => {
@@ -206,7 +209,7 @@ function launchOvernightSupervisor(runDirectory) {
 }
 
 async function runOvernightCommand(command, options) {
-  const runtime = createOvernightRuntime();
+  const runtime = createOvernightRuntime({ protocolProvider: runtimeProtocolProvider });
   if (command === "submit") {
     requireAllowedOptions(options, new Set([
       "task", "worktree", "adapter", "strategy", "wake-adapter",
@@ -311,7 +314,7 @@ async function main(argv) {
     await writeStream(process.stdout, `${JSON.stringify(await runOvernightCommand(command, options), null, 2)}\n`);
     return;
   }
-  const runtime = createBalancedRuntime();
+  const runtime = createBalancedRuntime({ protocolProvider: runtimeProtocolProvider });
   let result;
   if (command === "run") {
     requireAllowedOptions(options, new Set([

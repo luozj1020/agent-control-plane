@@ -11,6 +11,19 @@ import {
   validateBalancedTask,
 } from "../balanced-runtime.mjs";
 import { createTaskCardTemplate } from "../task-card.mjs";
+import { EMBEDDED_RUNTIME_PROTOCOLS } from "../workflow-runtime-protocol.mjs";
+
+const TEST_CONTRACT_SHA256 = `sha256:${"a".repeat(64)}`;
+
+function protocolProvider(mode) {
+  return Promise.resolve({
+    sourceId: "agent-control-plane/workflow-core",
+    contractVersion: "1.1.0",
+    contractSha256: TEST_CONTRACT_SHA256,
+    mode,
+    protocol: EMBEDDED_RUNTIME_PROTOCOLS[mode],
+  });
+}
 
 async function withWorkspace(run) {
   const root = await mkdtemp(join(tmpdir(), "agent-control-balanced-"));
@@ -171,6 +184,7 @@ test("runtime applies bounded timing overrides to the effective round policy", a
     const runtime = createBalancedRuntime({
       runtimeRoot,
       adapters: adapterRegistry(adapter),
+      protocolProvider,
     });
     const timing = {
       contextAcquisitionSeconds: 45,
@@ -189,9 +203,51 @@ test("runtime applies bounded timing overrides to the effective round policy", a
     });
 
     assert.equal(result.review.roundStatus, "review_pending");
+    assert.deepEqual(result.review.workflowContract, {
+      source: "agent-control-plane/workflow-core",
+      version: "1.1.0",
+      sha256: TEST_CONTRACT_SHA256,
+    });
     for (const [key, value] of Object.entries(timing)) {
       assert.equal(result.review.timeWindowPlan[key], value);
     }
+    const coordinationEvents = await readFile(join(result.runDirectory, "coordination-events.jsonl"), "utf8");
+    assert.match(coordinationEvents, /"kind":"agent_invoke_started"/);
+    assert.match(coordinationEvents, /"kind":"agent_invoke_completed"/);
+    assert.match(coordinationEvents, /"kind":"validation_completed"/);
+    const runs = await runtime.listRuns();
+    assert.equal(runs[0].coordination.agentInvocations, 1);
+    assert.equal(runs[0].coordination.coverage.message, "unsupported");
+  });
+});
+
+test("runtime projects explicit adapter reads into coordination evidence", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const adapter = editingAdapter({
+      readContainment: "partial-event-audit",
+      observedReads: ["app.txt", "unscoped.txt"],
+    });
+    const runtime = createBalancedRuntime({
+      runtimeRoot,
+      adapters: adapterRegistry(adapter),
+      protocolProvider,
+    });
+    await runtime.run({
+      task: task(),
+      worktree,
+      adapterId: adapter.id,
+      policyRef: "balanced-default@1.0.0",
+    });
+    const [run] = await runtime.listRuns();
+    assert.equal(run.coordination.artifactReads, 2);
+    assert.equal(run.coordination.readViolations, 1);
+    assert.equal(run.coordination.coverage.read, "observed");
+    assert.equal(run.coordination.containment.read, "partial-event-audit");
+    const detail = await runtime.coordinationDetail(run.runId, { maximumEvents: 2 });
+    assert.equal(detail.runId, run.runId);
+    assert.equal(detail.mode, "balanced");
+    assert.equal(detail.timeline.returnedEvents, 2);
+    assert.equal(detail.timeline.truncated, true);
   });
 });
 
@@ -223,10 +279,13 @@ test("runtime rejects a hard cap shorter than a configured wait window", async (
   });
 });
 
-function editingAdapter() {
+function editingAdapter(options = {}) {
   let calls = 0;
   return {
     id: "fake-builder",
+    readContainment: options.readContainment ?? "unsupported",
+    writeContainment: "post-run-audit",
+    filesystemEventSource: options.readContainment ? "fake-read-events" : null,
     async start(context) {
       calls += 1;
       let finish;
@@ -236,6 +295,15 @@ function editingAdapter() {
       });
       context.onEvent({ type: "output", bytes: 10 });
       context.onEvent({ type: "task-directed" });
+      for (const path of options.observedReads ?? []) {
+        context.onEvent({
+          type: "artifact-read",
+          path,
+          tool: "Read",
+          source: "fake-read-events",
+          coverage: options.readContainment ?? "partial-event-audit",
+        });
+      }
       setTimeout(async () => {
         const value = await readFile(join(context.worktree, "app.txt"), "utf8");
         await writeFile(join(context.worktree, "app.txt"), `${value}round-${calls}\n`, "utf8");

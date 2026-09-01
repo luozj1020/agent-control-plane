@@ -12,6 +12,7 @@ import {
   resolveRuntimeEnvironment,
   runtimeEnvironmentOptions,
 } from "./runtime-environment.mjs";
+import { normalizeAdapterContainment } from "./adapter-containment.mjs";
 import { normalizeTaskCard } from "./task-card.mjs";
 
 const WORKFLOW_MODES = new Set(["overnight", "balanced"]);
@@ -73,6 +74,43 @@ export async function preflightTaskCard(input, options = {}) {
   const issues = [];
   const checks = [];
   let normalized = null;
+
+  const workflowContract = options.workflowContract;
+  if (workflowContract) {
+    if (!workflowContract.available) {
+      issues.push(issue(
+        "error",
+        "preflight.workflow_contract_unavailable",
+        "Embedded Workflow Core is unavailable; delegated execution cannot start.",
+        "workflowContract",
+      ));
+      checks.push(check("workflow-contract", "Workflow Contract", "failed", "内置核心缺失"));
+    } else if (!workflowContract.compatible) {
+      issues.push(issue(
+        "error",
+        "preflight.workflow_contract_incompatible",
+        `AI Coding Workflow Contract ${workflowContract.contractVersion ?? "unknown"} is incompatible.`,
+        "workflowContract",
+      ));
+      checks.push(check("workflow-contract", "Workflow Contract", "failed", "版本、Schema 或协议投影不兼容"));
+    } else {
+      const drifted = workflowContract.health === "drift-detected";
+      if (drifted) {
+        issues.push(issue(
+          "warning",
+          "preflight.workflow_contract_drift",
+          "Embedded Workflow Contract is compatible, but the runtime safety projection has drifted.",
+          "workflowContract",
+        ));
+      }
+      checks.push(check(
+        "workflow-contract",
+        "Workflow Contract",
+        drifted ? "warning" : "passed",
+        `v${workflowContract.contractVersion} · ${drifted ? "存在运行投影漂移" : "协议一致"}`,
+      ));
+    }
+  }
 
   try {
     normalized = normalizeTaskCard(input?.task);
@@ -183,7 +221,8 @@ export async function preflightTaskCard(input, options = {}) {
         ? "仅传递基础环境与供应商范围变量"
         : "兼容模式：继承全部环境变量",
     ));
-    if (adapter?.filesystemIsolation !== undefined && adapter.filesystemIsolation !== "exact-write-paths") {
+    const containment = normalizeAdapterContainment(adapter ?? {}, { requireExtractor: false });
+    if (containment.write !== "exact-paths") {
       issues.push(issue(
         "warning",
         "preflight.filesystem_isolation_advisory",
@@ -191,13 +230,34 @@ export async function preflightTaskCard(input, options = {}) {
         "runtimeEnvironment",
       ));
       checks.push(check(
-        "filesystem-isolation",
-        "文件系统沙箱",
+        "write-containment",
+        "写入隔离",
         "warning",
-        "尚未强制 exact-write-paths；当前为运行后 scope 证据",
+        containment.write === "post-run-audit"
+          ? "运行后审计；尚未强制 exact write paths"
+          : "未提供写入隔离或运行后审计",
       ));
-    } else if (adapter?.filesystemIsolation === "exact-write-paths") {
-      checks.push(check("filesystem-isolation", "文件系统沙箱", "passed", "exact-write-paths"));
+    } else {
+      checks.push(check("write-containment", "写入隔离", "passed", "exact-paths"));
+    }
+    if (containment.read === "exact-paths") {
+      checks.push(check("read-containment", "读取隔离", "passed", "exact-paths"));
+    } else {
+      const partial = containment.read === "partial-event-audit";
+      issues.push(issue(
+        "warning",
+        partial ? "preflight.read_containment_partial" : "preflight.read_containment_unsupported",
+        partial
+          ? "Only explicit adapter read events are audited; Bash, MCP, language-server, and other reads may remain invisible."
+          : "This adapter does not enforce or audit read paths.",
+        "runtimeEnvironment",
+      ));
+      checks.push(check(
+        "read-containment",
+        "读取隔离",
+        "warning",
+        partial ? "部分事件审计；不能证明完整读取边界" : "不支持；不会将缺失审计显示为 0",
+      ));
     }
   } catch (error) {
     issues.push(issue(
@@ -325,6 +385,47 @@ export async function preflightTaskCard(input, options = {}) {
       ));
     }
 
+    const taskShape = normalized.task.extensions.task_shape ?? {};
+    const participants = taskShape.participants ?? [];
+    const interfaces = taskShape.interfaces ?? [];
+    if (participants.length <= 1 && interfaces.length === 0) {
+      checks.push(check(
+        "interface-ownership",
+        "接口所有权",
+        "passed",
+        participants.length === 1 ? "单一结构化参与者，无跨参与者边界" : "未声明任务分解边界",
+      ));
+    } else if (participants.length > 1 && interfaces.length === 0) {
+      issues.push(issue(
+        "warning",
+        "preflight.interfaces_undeclared",
+        "Multiple participants are declared, but no interface contracts identify their boundaries.",
+        "extensions.task_shape.interfaces",
+      ));
+      checks.push(check(
+        "interface-ownership",
+        "接口所有权",
+        "warning",
+        `${participants.length} 个参与者，但未声明接口边界`,
+      ));
+    } else {
+      const validatedInterfaces = interfaces.filter((item) => item.validation_id).length;
+      if (validatedInterfaces < interfaces.length) {
+        issues.push(issue(
+          "warning",
+          "preflight.interface_validation_partial",
+          `${interfaces.length - validatedInterfaces} interface contract(s) have no deterministic validation reference.`,
+          "extensions.task_shape.interfaces",
+        ));
+      }
+      checks.push(check(
+        "interface-ownership",
+        "接口所有权",
+        validatedInterfaces < interfaces.length ? "warning" : "passed",
+        `${interfaces.length} 个接口均有负责人 · ${validatedInterfaces}/${interfaces.length} 有确定性验证`,
+      ));
+    }
+
     const elevatedRisks = Object.entries(normalized.task.risk)
       .filter(([, value]) => value === "yes")
       .map(([key]) => key);
@@ -362,6 +463,14 @@ export async function preflightTaskCard(input, options = {}) {
       worktree: worktree || null,
       adapterId: adapter?.id ?? (adapterId || null),
       runtimeEnvironment: runtimeEnvironment?.profile ?? null,
+      ...(workflowContract ? {
+        workflowContract: {
+          sourceId: workflowContract.sourceId ?? "ai-coding-workflow",
+          version: workflowContract.contractVersion ?? null,
+          sha256: workflowContract.contractSha256 ?? null,
+          compatible: workflowContract.compatible === true,
+        },
+      } : {}),
       ...(workflowMode === "overnight" ? { strategy: strategy || null } : {}),
       ...(workflowMode === "balanced" ? {
         timing: input?.timing ?? null,

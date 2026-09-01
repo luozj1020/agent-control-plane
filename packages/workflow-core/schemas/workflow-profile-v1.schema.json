@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-coding-workflow.local/schemas/workflow-profile-v1.schema.json",
+  "title": "Agent Workflow Profile v1",
+  "description": "A versioned upstream, mode, execution backend, and role selection.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schemaVersion",
+    "id",
+    "upstream",
+    "mode",
+    "executionBackend",
+    "roles"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "id": {"$ref": "#/$defs/nonempty"},
+    "upstream": {"$ref": "#/$defs/harnessBinding"},
+    "mode": {"enum": ["overnight", "balanced", "interactive"]},
+    "executionBackend": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["external-harness", "native-subagents"]},
+        "harnessId": {"$ref": "#/$defs/id"},
+        "installationId": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "roles": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/role"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "interactive"}}},
+      "then": {
+        "properties": {
+          "executionBackend": {
+            "properties": {"kind": {"const": "native-subagents"}}
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {"enum": ["overnight", "balanced"]}
+        }
+      },
+      "then": {
+        "properties": {
+          "executionBackend": {
+            "required": ["kind", "harnessId", "installationId"],
+            "properties": {"kind": {"const": "external-harness"}}
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nonempty": {"type": "string", "minLength": 1},
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "harnessBinding": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["harnessId", "installationId"],
+      "properties": {
+        "harnessId": {"$ref": "#/$defs/id"},
+        "installationId": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "model": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["providerId", "modelId"],
+          "properties": {
+            "providerId": {"$ref": "#/$defs/id"},
+            "modelId": {"$ref": "#/$defs/nonempty"},
+            "source": {
+              "enum": ["runtime", "endpoint", "catalog", "fallback", "manual"]
+            }
+          }
+        },
+        "instructions": {"type": "string"},
+        "settings": {"type": "object", "additionalProperties": true}
+      }
+    }
+  }
+}

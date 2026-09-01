@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "id": "example-fix-typo-001",
+  "mode": "builder",
+  "goal": "Fix a typo in the project README.",
+  "profiles": ["base", "bugfix"],
+  "scope": {
+    "write_paths": ["README.md"]
+  },
+  "acceptance": [
+    {
+      "id": "typo-fixed",
+      "description": "The typo 'teh' is corrected to 'the' in README.md line 42."
+    },
+    {
+      "id": "no-other-changes",
+      "description": "No other lines in README.md are modified."
+    }
+  ],
+  "risk": {
+    "public_api": "no",
+    "data_model": "no",
+    "security": "no",
+    "migration": "no",
+    "permission": "no",
+    "concurrency": "no",
+    "cross_module": "no",
+    "production_impact": "no"
+  },
+  "handoff": {
+    "must_do": [
+      "Fix the typo",
+      "Show before/after diff"
+    ],
+    "must_not_do": [
+      "Change formatting or structure",
+      "Rewrite surrounding sentences"
+    ],
+    "may_decide": [],
+    "must_report": [
+      "Exact line changed"
+    ]
+  },
+  "validation": [],
+  "stop_conditions": [
+    "typo_not_found",
+    "scope_boundary_crossed"
+  ],
+  "extensions": {}
+}

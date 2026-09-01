@@ -17,6 +17,15 @@ import { basename, isAbsolute, join, parse, resolve, sep } from "node:path";
 
 import { createBuiltInAdapterRegistry } from "./agent-adapters.mjs";
 import { snapshotWorktree } from "./balanced-runtime.mjs";
+import {
+  appendCoordinationEvent,
+  coordinationDetailForRun,
+  coordinationSummaryForRun,
+} from "./coordination-events.mjs";
+import {
+  classifyObservedRead,
+  normalizeAdapterContainment,
+} from "./adapter-containment.mjs";
 import { normalizeRuntimeEnvironment } from "./runtime-environment.mjs";
 import {
   createNextCycleTemplate,
@@ -25,15 +34,10 @@ import {
   validateTaskCard,
 } from "./task-card.mjs";
 import { createWakeAdapterRegistry } from "./wake-adapters.mjs";
+import { resolveRuntimeProtocol } from "./workflow-runtime-protocol.mjs";
 
 const RUNTIME_SCHEMA_VERSION = 1;
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,159}$/;
-const STRATEGIES = new Set(["convergent", "continuous-improvement"]);
-const TERMINAL_STATES = new Set([
-  "accepted",
-  "stopped",
-  "interrupted",
-]);
 
 export class OvernightRuntimeError extends Error {
   constructor(code, message, status = 400, details = undefined) {
@@ -339,19 +343,42 @@ export function createOvernightRuntime(options = {}) {
   const pollMilliseconds = options.pollMilliseconds ?? 1000;
   const executionEpochMilliseconds = options.executionEpochMilliseconds ?? 6 * 60 * 60 * 1000;
   const validationTimeoutMilliseconds = options.validationTimeoutMilliseconds ?? 15 * 60 * 1000;
+  const protocolProvider = options.protocolProvider;
+
+  const recordCoordination = (runDirectory, metadata, kind, input = {}) =>
+    appendCoordinationEvent(
+      runDirectory,
+      {
+        runId: metadata.runId,
+        mode: "overnight",
+        kind,
+        actor: input.actor ?? { type: "control_plane", id: "overnight-runner" },
+        ...input,
+      },
+      { clock },
+    );
+
+  async function workflowProtocol() {
+    return resolveRuntimeProtocol("overnight", protocolProvider);
+  }
 
   async function persistMetadata(runDirectory, metadata, state = metadata.state) {
     metadata.state = state;
     metadata.updatedAt = new Date(clock()).toISOString();
     await writeJsonAtomic(join(runDirectory, "run.json"), metadata);
     await appendEvent(runDirectory, clock, "state-transition", { state, cycle: metadata.cycle });
+    await recordCoordination(runDirectory, metadata, "state_transition", {
+      target: { type: "state", id: state },
+      detail: { to: state, cycle: metadata.cycle },
+    });
   }
 
   async function createRun(input) {
+    const protocol = await workflowProtocol();
     if (!input || typeof input.worktree !== "string" || !input.worktree.trim()) {
       throw new OvernightRuntimeError("runtime.invalid_input", "An absolute worktree path is required.");
     }
-    if (!STRATEGIES.has(input.strategy)) {
+    if (!protocol.allowedStrategies.has(input.strategy)) {
       throw new OvernightRuntimeError("runtime.invalid_strategy", "Strategy must be convergent or continuous-improvement.");
     }
     const worktree = await ensureDirectory(resolve(input.worktree), "Worktree");
@@ -367,6 +394,10 @@ export function createOvernightRuntime(options = {}) {
       throw new OvernightRuntimeError("runtime.wake_adapter_unknown", `Unknown wake adapter '${input.wakeAdapterId}'.`);
     }
     const runtimeEnvironment = normalizeRuntimeEnvironment(input.runtimeEnvironment);
+    const containment = normalizeAdapterContainment({
+      filesystemIsolation: "post-run-only",
+      ...adapter,
+    }, { requireExtractor: false });
     const runId = `${new Date(clock()).toISOString().replace(/[:.]/g, "-").toLowerCase()}-${task.id.slice(0, 64)}-${randomUUID()}`;
     const runDirectory = join(runtimeRoot, runId);
     const cycleDirectory = join(runDirectory, "cycles", "001");
@@ -377,7 +408,7 @@ export function createOvernightRuntime(options = {}) {
     const metadata = {
       schemaVersion: RUNTIME_SCHEMA_VERSION,
       runId,
-      state: "submitted",
+      state: protocol.initialState,
       strategy: input.strategy,
       taskId: task.id,
       initialTaskSha256: sha256(taskText),
@@ -385,21 +416,41 @@ export function createOvernightRuntime(options = {}) {
       worktree,
       adapterId: adapter.id,
       runtimeEnvironment,
+      containment,
       wakeAdapterId: wakeAdapter.id,
       cycle: 1,
       sessionId: null,
       activeProcess: null,
       latestWakePath: null,
       latestWakeSha256: null,
+      workflowContract: {
+        source: protocol.source,
+        version: protocol.contractVersion,
+        sha256: protocol.contractSha256,
+      },
       createdAt: new Date(clock()).toISOString(),
       updatedAt: new Date(clock()).toISOString(),
     };
     await writeJsonAtomic(join(runDirectory, "run.json"), metadata);
     await appendEvent(runDirectory, clock, "run-submitted", { strategy: input.strategy, cycle: 1 });
+    await recordCoordination(runDirectory, metadata, "run_created", {
+      target: { type: "artifact", id: "run.json" },
+      detail: { state: metadata.state, strategy: metadata.strategy },
+    });
+    await recordCoordination(runDirectory, metadata, "artifact_write", {
+      target: { type: "artifact", id: "cycles/001/task.json" },
+      bytes: Buffer.byteLength(taskText),
+      detail: { artifactKind: "frozen_task", sha256: metadata.currentTaskSha256 },
+    });
+    await recordCoordination(runDirectory, metadata, "state_transition", {
+      target: { type: "state", id: metadata.state },
+      detail: { to: metadata.state, cycle: 1 },
+    });
     return { runDirectory, metadata };
   }
 
   async function loadRun(runDirectoryInput) {
+    const protocol = await workflowProtocol();
     const root = await existingRoot(runtimeRootConfigured);
     if (!root) throw new OvernightRuntimeError("runtime.path_missing", "Overnight runtime root does not exist.", 404);
     const runDirectory = await ensureDirectory(resolve(runDirectoryInput), "Run directory");
@@ -427,15 +478,20 @@ export function createOvernightRuntime(options = {}) {
     if (!wakeAdapter) {
       throw new OvernightRuntimeError("runtime.wake_adapter_unknown", `Unknown wake adapter '${metadata.wakeAdapterId}'.`);
     }
-    return { runDirectory, cycleDirectory, metadata, task, initialTask, adapter, wakeAdapter };
+    return { runDirectory, cycleDirectory, metadata, task, initialTask, adapter, wakeAdapter, protocol };
   }
 
   async function writeWake(loaded, evidence, state) {
-    const { runDirectory, metadata } = loaded;
+    const { runDirectory, metadata, protocol } = loaded;
     const evidenceText = stableJson(evidence);
     const evidencePath = join(loaded.cycleDirectory, "evidence.json");
     await writeFile(evidencePath, evidenceText, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    if (state === "interrupted") {
+    await recordCoordination(runDirectory, metadata, "artifact_write", {
+      target: { type: "artifact", id: `cycles/${String(metadata.cycle).padStart(3, "0")}/evidence.json` },
+      bytes: Buffer.byteLength(evidenceText),
+      detail: { artifactKind: "cycle_evidence", sha256: sha256(evidenceText), state },
+    });
+    if (protocol.terminalStates.has(state)) {
       await persistMetadata(runDirectory, metadata, state);
       await appendEvent(runDirectory, clock, "terminal-without-wake", {
         state,
@@ -454,12 +510,7 @@ export function createOvernightRuntime(options = {}) {
       taskSha256: metadata.currentTaskSha256,
       evidencePath,
       evidenceSha256: sha256(evidenceText),
-      allowedDecisions:
-        state === "improvement_cycle_ready"
-          ? ["continue", "revise", "stop"]
-          : state === "revision_pending"
-            ? ["accept", "revise", "stop"]
-            : ["stop"],
+      allowedDecisions: [...(protocol.reviewDecisions[state] ?? [])],
       requestedAt: new Date(clock()).toISOString(),
     };
     const wakeText = stableJson(wake);
@@ -473,6 +524,11 @@ export function createOvernightRuntime(options = {}) {
       cycle: metadata.cycle,
       wakeSha256: metadata.latestWakeSha256,
       evidenceSha256: wake.evidenceSha256,
+    });
+    await recordCoordination(runDirectory, metadata, "wake_requested", {
+      target: { type: "artifact", id: "wake-request.json" },
+      bytes: Buffer.byteLength(wakeText),
+      detail: { state, cycle: metadata.cycle, wakeSha256: metadata.latestWakeSha256 },
     });
     let delivery;
     try {
@@ -509,6 +565,11 @@ export function createOvernightRuntime(options = {}) {
       status: deliveryReceipt.status,
       wakeSha256: metadata.latestWakeSha256,
     });
+    await recordCoordination(runDirectory, metadata, "wake_delivered", {
+      actor: { type: "transport", id: loaded.wakeAdapter.id },
+      target: { type: "artifact", id: "wake-delivery.json" },
+      detail: { cycle: metadata.cycle, status: deliveryReceipt.status, wakeSha256: metadata.latestWakeSha256 },
+    });
     return { wake, wakePath, wakeSha256: metadata.latestWakeSha256, delivery: deliveryReceipt };
   }
 
@@ -517,17 +578,29 @@ export function createOvernightRuntime(options = {}) {
     return withRunLock(loaded.runDirectory, async () => {
       const current = await loadRun(loaded.runDirectory);
       const { runDirectory, cycleDirectory, metadata, task, adapter } = current;
-      if (metadata.state !== "submitted") {
+      if (metadata.state !== current.protocol.initialState) {
         throw new OvernightRuntimeError("runtime.invalid_state", `Cannot supervise a run in '${metadata.state}'.`, 409);
       }
-      await persistMetadata(runDirectory, metadata, "running");
+      await persistMetadata(runDirectory, metadata, current.protocol.activeState);
       const baseline = await snapshot(metadata.worktree);
       const baselineRecord = { digest: baseline.digest, fileCount: baseline.fileCount, totalBytes: baseline.totalBytes };
       await writeJsonAtomic(join(cycleDirectory, "baseline.json"), baselineRecord);
+      await recordCoordination(runDirectory, metadata, "artifact_write", {
+        target: { type: "artifact", id: `cycles/${String(metadata.cycle).padStart(3, "0")}/baseline.json` },
+        measurementSource: "filesystem_snapshot",
+        confidence: "observed",
+        detail: { artifactKind: "baseline", digest: baseline.digest },
+      });
       let interrupted = false;
       let timedOut = false;
       const events = [];
       const eventWrites = [];
+      const invocationStartedAt = clock();
+      await recordCoordination(runDirectory, metadata, "agent_invoke_started", {
+        target: { type: "agent", id: metadata.adapterId },
+        correlationId: `cycle-${metadata.cycle}`,
+        detail: { cycle: metadata.cycle, resumed: Boolean(metadata.sessionId) },
+      });
       const controller = await adapter.start({
         worktree: metadata.worktree,
         prompt: buildPrompt(task, {
@@ -549,6 +622,21 @@ export function createOvernightRuntime(options = {}) {
               activity: recorded,
             }),
           );
+          if (event.type === "artifact-read") {
+            eventWrites.push(recordCoordination(runDirectory, metadata, "artifact_read", {
+              actor: { type: "agent", id: metadata.adapterId },
+              target: { type: "artifact", id: event.path },
+              measurementSource: "runtime",
+              confidence: "observed",
+              detail: {
+                cycle: metadata.cycle,
+                classification: classifyObservedRead(task, event.path),
+                source: event.source ?? metadata.containment.eventSource,
+                tool: event.tool ?? null,
+                coverage: metadata.containment.read,
+              },
+            }));
+          }
         },
       });
       metadata.activeProcess = controller.identity ?? { pid: controller.pid ?? null };
@@ -585,9 +673,29 @@ export function createOvernightRuntime(options = {}) {
         interrupted,
         timedOut,
       });
+      const usage = adapterResult.usage ?? controller.usage?.() ?? { totalTokens: 0 };
+      await recordCoordination(runDirectory, metadata, "agent_invoke_completed", {
+        target: { type: "agent", id: metadata.adapterId },
+        correlationId: `cycle-${metadata.cycle}`,
+        measurementSource: adapterResult.usage ? "provider_reported" : "runtime",
+        confidence: adapterResult.usage ? "reported" : "observed",
+        tokens: Number.isSafeInteger(usage.totalTokens) ? usage.totalTokens : undefined,
+        elapsedMilliseconds: Math.max(0, clock() - invocationStartedAt),
+        detail: {
+          cycle: metadata.cycle,
+          exitCode: adapterResult.exitCode,
+          interrupted,
+          timedOut,
+        },
+      });
       const after = await snapshot(metadata.worktree);
       const projection = reviewProjection(task, baseline, after);
       const validation = await runValidation(task, metadata.worktree, validationTimeoutMilliseconds);
+      await recordCoordination(runDirectory, metadata, "validation_completed", {
+        actor: { type: "validator", id: "task-validation" },
+        target: { type: "artifact", id: `cycles/${String(metadata.cycle).padStart(3, "0")}/evidence.json` },
+        detail: { cycle: metadata.cycle, status: validation.status },
+      });
       const evidence = {
         schemaVersion: 1,
         kind: "overnight-cycle-evidence",
@@ -604,17 +712,22 @@ export function createOvernightRuntime(options = {}) {
         recordedAt: new Date(clock()).toISOString(),
       };
       let state;
-      if (interrupted) state = "interrupted";
+      if (interrupted) state = current.protocol.outcomeStates.interrupted;
       else if (
         timedOut ||
         adapterResult.exitCode !== 0 ||
         adapterResult.error ||
         adapterResult.failureCategory
-      ) state = "runtime_blocked";
-      else if (projection.violations.length > 0) state = "scope_violation";
-      else if (validation.status !== "passed") state = "validation_failed";
-      else if (projection.entries.length === 0 && !taskAllowsNoChanges(task)) state = "revision_pending";
-      else state = metadata.strategy === "convergent" ? "revision_pending" : "improvement_cycle_ready";
+      ) state = current.protocol.outcomeStates.runtime_failure;
+      else if (projection.violations.length > 0) state = current.protocol.outcomeStates.scope_failure;
+      else if (validation.status !== "passed") state = current.protocol.outcomeStates.validation_failure;
+      else if (projection.entries.length === 0 && !taskAllowsNoChanges(task)) {
+        state = current.protocol.outcomeStates.no_change;
+      } else {
+        state = metadata.strategy === "convergent"
+          ? current.protocol.outcomeStates.convergent_ready
+          : current.protocol.outcomeStates.improvement_ready;
+      }
       metadata.latestFailureCategory = adapterResult.failureCategory ?? null;
       metadata.latestRuntimeDiagnostics = adapterResult.diagnostics ?? null;
       return { runDirectory, state, ...(await writeWake(current, evidence, state)) };
@@ -638,7 +751,7 @@ export function createOvernightRuntime(options = {}) {
         throw new OvernightRuntimeError("review.invalid_decision", `Decision '${input.decision}' is not allowed in '${metadata.state}'.`, 409);
       }
       if (input.decision === "accept" || input.decision === "stop") {
-        const state = input.decision === "accept" ? "accepted" : "stopped";
+        const state = current.protocol.decisionStates[input.decision];
         const decision = {
           schemaVersion: 1,
           decision: input.decision,
@@ -646,6 +759,11 @@ export function createOvernightRuntime(options = {}) {
           decidedAt: new Date(clock()).toISOString(),
         };
         await writeJsonAtomic(join(current.cycleDirectory, "review-decision.json"), decision);
+        await recordCoordination(runDirectory, metadata, "review_decision", {
+          actor: { type: "operator", id: "upstream-reviewer" },
+          target: { type: "artifact", id: `cycles/${String(metadata.cycle).padStart(3, "0")}/review-decision.json` },
+          detail: { cycle: metadata.cycle, decision: input.decision, wakeSha256: metadata.latestWakeSha256 },
+        });
         await persistMetadata(runDirectory, metadata, state);
         return { runDirectory, state, resumeRequired: false };
       }
@@ -681,16 +799,22 @@ export function createOvernightRuntime(options = {}) {
         wakeSha256: metadata.latestWakeSha256,
         decidedAt: new Date(clock()).toISOString(),
       });
+      await recordCoordination(runDirectory, metadata, "review_decision", {
+        actor: { type: "operator", id: "upstream-reviewer" },
+        target: { type: "artifact", id: `cycles/${String(metadata.cycle).padStart(3, "0")}/review-decision.json` },
+        detail: { cycle: metadata.cycle, decision: input.decision, nextCycle },
+      });
       metadata.cycle = nextCycle;
       metadata.currentTaskSha256 = sha256(taskText);
-      await persistMetadata(runDirectory, metadata, "submitted");
-      return { runDirectory, state: "submitted", cycle: nextCycle, resumeRequired: true };
+      const submittedState = current.protocol.decisionStates[input.decision];
+      await persistMetadata(runDirectory, metadata, submittedState);
+      return { runDirectory, state: submittedState, cycle: nextCycle, resumeRequired: true };
     });
   }
 
   async function interrupt(runDirectoryInput) {
     const loaded = await loadRun(runDirectoryInput);
-    if (TERMINAL_STATES.has(loaded.metadata.state)) {
+    if (loaded.protocol.terminalStates.has(loaded.metadata.state)) {
       return { runDirectory: loaded.runDirectory, state: loaded.metadata.state, alreadyTerminal: true };
     }
     await writeJsonAtomic(join(loaded.runDirectory, "interrupt-request.json"), {
@@ -699,21 +823,36 @@ export function createOvernightRuntime(options = {}) {
       requestedForCycle: loaded.metadata.cycle,
     });
     await appendEvent(loaded.runDirectory, clock, "interrupt-requested", { cycle: loaded.metadata.cycle });
-    if (loaded.metadata.state !== "running") {
+    await recordCoordination(loaded.runDirectory, loaded.metadata, "interrupt_requested", {
+      actor: { type: "operator", id: "control-plane-user" },
+      target: { type: "state", id: loaded.metadata.state },
+      detail: { cycle: loaded.metadata.cycle },
+    });
+    if (loaded.metadata.state !== loaded.protocol.activeState) {
       try {
         await withRunLock(loaded.runDirectory, async () => {
           const current = await loadRun(loaded.runDirectory);
-          await persistMetadata(current.runDirectory, current.metadata, "interrupted");
+          await persistMetadata(
+            current.runDirectory,
+            current.metadata,
+            current.protocol.decisionStates.interrupt,
+          );
         });
-        return { runDirectory: loaded.runDirectory, state: "interrupted" };
+        return { runDirectory: loaded.runDirectory, state: loaded.protocol.decisionStates.interrupt };
       } catch (error) {
         if (error instanceof OvernightRuntimeError && error.code === "runtime.locked") {
-          return { runDirectory: loaded.runDirectory, state: "interrupt_requested" };
+          return {
+            runDirectory: loaded.runDirectory,
+            state: loaded.protocol.decisionStates.interrupt_requested,
+          };
         }
         throw error;
       }
     }
-    return { runDirectory: loaded.runDirectory, state: "interrupt_requested" };
+    return {
+      runDirectory: loaded.runDirectory,
+      state: loaded.protocol.decisionStates.interrupt_requested,
+    };
   }
 
   async function interruptById(runId) {
@@ -741,7 +880,13 @@ export function createOvernightRuntime(options = {}) {
       if (!entry.isDirectory() || !SAFE_ID.test(entry.name)) continue;
       try {
         const metadata = await readJson(join(root, entry.name, "run.json"));
-        if (metadata?.schemaVersion === RUNTIME_SCHEMA_VERSION) runs.push(metadata);
+        if (metadata?.schemaVersion === RUNTIME_SCHEMA_VERSION) {
+          const coordination = await coordinationSummaryForRun(join(root, entry.name), {
+            ...metadata,
+            mode: "overnight",
+          });
+          runs.push({ ...metadata, coordination });
+        }
       } catch {
         // One corrupt run must not hide healthy run history.
       }
@@ -749,7 +894,25 @@ export function createOvernightRuntime(options = {}) {
     return runs.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
+  async function coordinationDetail(runId, options = {}) {
+    if (!SAFE_ID.test(runId ?? "")) {
+      throw new OvernightRuntimeError("runtime.unsafe_path", "Run id is invalid.");
+    }
+    const root = await existingRoot(runtimeRootConfigured);
+    if (!root) throw new OvernightRuntimeError("runtime.path_missing", "Overnight runtime root does not exist.", 404);
+    const runDirectory = await ensureDirectory(resolve(root, runId), "Run directory");
+    const metadata = await readJson(join(runDirectory, "run.json"));
+    if (
+      metadata?.schemaVersion !== RUNTIME_SCHEMA_VERSION || metadata.runId !== runId ||
+      basename(runDirectory) !== runId || resolve(root, runId) !== runDirectory
+    ) {
+      throw new OvernightRuntimeError("runtime.corrupt_run", "Overnight run identity is invalid.", 409);
+    }
+    return coordinationDetailForRun(runDirectory, { ...metadata, mode: "overnight" }, options);
+  }
+
   return Object.freeze({
+    coordinationDetail,
     createRun,
     executeCycle,
     interrupt,
