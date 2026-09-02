@@ -85,8 +85,10 @@ function sharedConfigSha256(projectId, overrides) {
   return sha256({ projectId, overrides });
 }
 
-function effectiveConfigSha256(projectId, sharedOverrides, localOverrides) {
-  return sha256({ projectId, sharedOverrides, localOverrides });
+function effectiveConfigSha256(projectId, workspaceId, sharedOverrides, localOverrides) {
+  return projectId !== null
+    ? sha256({ projectId, sharedOverrides, localOverrides })
+    : sha256({ workspaceId, sharedOverrides, localOverrides });
 }
 
 function effectiveOverrides(sharedOverrides, localOverrides) {
@@ -275,9 +277,11 @@ function validateInstallation(value) {
 function validateBinding(value, expected) {
   if (
     !value || value.schemaVersion !== LOCAL_SCHEMA_VERSION || value.owner !== OWNER ||
-    !safeIdentifier(value.workspaceId) || !safeIdentifier(value.projectId) ||
+    !safeIdentifier(value.workspaceId) ||
+    (value.projectId !== null && !safeIdentifier(value.projectId)) ||
     typeof value.projectRoot !== "string" || !isAbsolute(value.projectRoot) ||
-    value.workspaceId !== expected.workspaceId || value.projectId !== expected.projectId ||
+    value.workspaceId !== expected.workspaceId ||
+    (expected.projectId !== null && value.projectId !== null && value.projectId !== expected.projectId) ||
     value.projectRoot !== expected.projectRoot
   ) {
     throw new ProjectConfigError("project.binding_invalid", "Local workspace binding is invalid.", 409);
@@ -288,7 +292,9 @@ function validateBinding(value, expected) {
 function validateState(value, expected) {
   if (
     !value || value.schemaVersion !== LOCAL_SCHEMA_VERSION || value.owner !== OWNER ||
-    value.workspaceId !== expected.workspaceId || value.projectId !== expected.projectId ||
+    value.workspaceId !== expected.workspaceId ||
+    (value.projectId !== null && !safeIdentifier(value.projectId)) ||
+    (expected.projectId !== null && value.projectId !== null && value.projectId !== expected.projectId) ||
     !Number.isSafeInteger(value.revision) || value.revision < 0 ||
     typeof value.updatedAt !== "string" || !Number.isFinite(Date.parse(value.updatedAt))
   ) {
@@ -300,7 +306,9 @@ function validateState(value, expected) {
 function validateSnapshot(value, expected) {
   if (
     !value || value.schemaVersion !== LOCAL_SCHEMA_VERSION || value.owner !== OWNER ||
-    value.workspaceId !== expected.workspaceId || value.projectId !== expected.projectId ||
+    value.workspaceId !== expected.workspaceId ||
+    (value.projectId !== null && !safeIdentifier(value.projectId)) ||
+    (expected.projectId !== null && value.projectId !== null && value.projectId !== expected.projectId) ||
     !Number.isSafeInteger(value.revision) || value.revision < 0 ||
     typeof value.updatedAt !== "string" || !Number.isFinite(Date.parse(value.updatedAt)) ||
     !["local", "shared", "restore", "migration"].includes(value.action)
@@ -317,7 +325,9 @@ function validateSnapshot(value, expected) {
 function validateRecent(value, expected) {
   if (
     !value || value.schemaVersion !== LOCAL_SCHEMA_VERSION || value.owner !== OWNER ||
-    value.workspaceId !== expected.workspaceId || value.projectId !== expected.projectId ||
+    value.workspaceId !== expected.workspaceId ||
+    (value.projectId !== null && !safeIdentifier(value.projectId)) ||
+    (expected.projectId !== null && value.projectId !== null && value.projectId !== expected.projectId) ||
     value.projectRoot !== expected.projectRoot ||
     typeof value.displayName !== "string" || value.displayName.length === 0 || value.displayName.length > 255 ||
     typeof value.lastOpenedAt !== "string" || !Number.isFinite(Date.parse(value.lastOpenedAt)) ||
@@ -362,7 +372,7 @@ export function createProjectConfigStore(options = {}) {
     }
     const canonical = await realpath(requested);
     if (canonical === parse(canonical).root) {
-      throw new ProjectConfigError("project.root_invalid", "Filesystem root cannot be initialized as a project.", 400, "projectRoot");
+      throw new ProjectConfigError("project.root_invalid", "Filesystem root cannot be registered as a workspace.", 400, "projectRoot");
     }
     const metadata = await stat(canonical);
     if (!metadata.isDirectory()) {
@@ -500,7 +510,38 @@ export function createProjectConfigStore(options = {}) {
     };
     const binding = validateBinding(await readJson(descriptor.binding), expected);
     const state = validateState(await readJson(descriptor.state), expected);
-    return { binding, descriptor, state };
+    return anchorWorkspaceProjectId({ binding, descriptor, state }, projectId);
+  }
+
+  async function anchorWorkspaceProjectId(workspace, projectId) {
+    if (projectId === null || workspace.binding.projectId === projectId) return workspace;
+    if (workspace.binding.projectId !== null) {
+      throw new ProjectConfigError(
+        "project.binding_invalid",
+        "Local workspace identity does not match the repository project identity.",
+        409,
+      );
+    }
+    const entries = await readdir(workspace.descriptor.history, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^revision-\d+\.json$/.test(entry.name)) continue;
+      const path = join(workspace.descriptor.history, entry.name);
+      const snapshot = validateSnapshot(await readJson(path), workspace.binding);
+      await writeJsonAtomic(path, { ...snapshot, projectId }, nonceFactory());
+    }
+    const recentType = await pathType(workspace.descriptor.recent);
+    if (!new Set(["missing", "file"]).has(recentType)) {
+      throw new ProjectConfigError("project.recent_invalid", "Recent workspace metadata is unsafe.", 409);
+    }
+    if (recentType === "file") {
+      const recent = validateRecent(await readJson(workspace.descriptor.recent), workspace.binding);
+      await writeJsonAtomic(workspace.descriptor.recent, { ...recent, projectId }, nonceFactory());
+    }
+    const binding = { ...workspace.binding, projectId };
+    const state = { ...workspace.state, projectId };
+    await writeJsonAtomic(workspace.descriptor.state, state, nonceFactory());
+    await writeJsonAtomic(workspace.descriptor.binding, binding, nonceFactory());
+    return { ...workspace, binding, state };
   }
 
   async function listHistory(workspace) {
@@ -525,41 +566,53 @@ export function createProjectConfigStore(options = {}) {
     return result.sort((left, right) => right.revision - left.revision);
   }
 
-  function publicLegacy(projectRoot, repository) {
+  async function publicLegacy(projectRoot, repository, workspace = null) {
     const sharedOverrides = clone(repository.workflow.overrides);
+    const localOverrides = clone(workspace?.state.localOverrides ?? {});
     return {
       schemaVersion: REPOSITORY_SCHEMA_VERSION,
       storageVersion: LEGACY_SCHEMA_VERSION,
       projectRoot,
-      initialized: true,
+      initialized: workspace !== null,
+      workspaceRegistered: workspace !== null,
+      repositoryConfigEnabled: true,
       migrationRequired: true,
       projectId: repository.identity.projectId,
-      workspaceId: null,
-      revision: repository.workflow.revision,
+      workspaceId: workspace?.binding.workspaceId ?? null,
+      revision: workspace?.state.revision ?? repository.workflow.revision,
       sharedConfigSha256: sharedConfigSha256(repository.identity.projectId, sharedOverrides),
-      configSha256: effectiveConfigSha256(repository.identity.projectId, sharedOverrides, {}),
-      overrides: sharedOverrides,
+      configSha256: effectiveConfigSha256(
+        repository.identity.projectId,
+        workspace?.binding.workspaceId ?? null,
+        sharedOverrides,
+        workspace?.state.localOverrides ?? {},
+      ),
+      overrides: effectiveOverrides(sharedOverrides, localOverrides),
       sharedOverrides,
-      localOverrides: {},
-      history: [],
+      localOverrides,
+      history: workspace ? await listHistory(workspace) : [],
     };
   }
 
   async function publicCurrent(projectRoot, repository, workspace) {
-    const sharedOverrides = clone(repository.workflow.overrides);
+    const projectId = repository?.identity.projectId ?? null;
+    const sharedOverrides = clone(repository?.workflow.overrides ?? {});
     const localOverrides = clone(workspace.state.localOverrides);
     return {
       schemaVersion: REPOSITORY_SCHEMA_VERSION,
-      storageVersion: REPOSITORY_SCHEMA_VERSION,
+      storageVersion: repository ? REPOSITORY_SCHEMA_VERSION : LOCAL_SCHEMA_VERSION,
       projectRoot,
       initialized: true,
+      workspaceRegistered: true,
+      repositoryConfigEnabled: repository !== null,
       migrationRequired: false,
-      projectId: repository.identity.projectId,
+      projectId,
       workspaceId: workspace.binding.workspaceId,
       revision: workspace.state.revision,
-      sharedConfigSha256: sharedConfigSha256(repository.identity.projectId, sharedOverrides),
+      sharedConfigSha256: sharedConfigSha256(projectId, sharedOverrides),
       configSha256: effectiveConfigSha256(
-        repository.identity.projectId,
+        projectId,
+        workspace.binding.workspaceId,
         sharedOverrides,
         localOverrides,
       ),
@@ -572,7 +625,7 @@ export function createProjectConfigStore(options = {}) {
 
   async function touchRecent(state) {
     if (!state?.initialized || state.migrationRequired || !state.workspaceId) return state;
-    const descriptor = await workspaceDescriptor(state.projectRoot, state.projectId);
+    const descriptor = await workspaceDescriptor(state.projectRoot, state.projectId ?? null);
     const lastOpenedAt = clock().toISOString();
     const recent = {
       schemaVersion: LOCAL_SCHEMA_VERSION,
@@ -593,7 +646,21 @@ export function createProjectConfigStore(options = {}) {
   }
 
   async function openProject(input) {
-    return touchRecent(await inspect(input));
+    const projectRoot = await requireProjectRoot(input);
+    const repository = await readRepository(projectRoot);
+    if (repository?.legacy) {
+      const workspace = await readWorkspace(projectRoot, repository.identity.projectId, {
+        revision: repository.workflow.revision,
+        updatedAt: repository.workflow.updatedAt,
+        localOverrides: {},
+      });
+      return touchRecent(await publicLegacy(projectRoot, repository, workspace));
+    }
+    const workspace = await readWorkspace(
+      projectRoot,
+      repository?.identity.projectId ?? null,
+    );
+    return touchRecent(await publicCurrent(projectRoot, repository, workspace));
   }
 
   async function recent() {
@@ -631,24 +698,30 @@ export function createProjectConfigStore(options = {}) {
         if (rawRecent) {
           metadata = validateRecent(rawRecent, expected);
         } else {
-          let overrides = state.localOverrides;
-          let configSha256 = null;
+          let projectId = null;
+          let sharedOverrides = {};
           if ((await pathType(binding.projectRoot)) === "directory") {
             const repository = await readRepository(binding.projectRoot);
-            if (
-              repository && !repository.legacy &&
-              repository.identity.projectId === binding.projectId
-            ) {
-              overrides = effectiveOverrides(repository.workflow.overrides, state.localOverrides);
-              configSha256 = effectiveConfigSha256(
-                binding.projectId,
-                repository.workflow.overrides,
-                state.localOverrides,
-              );
+            if (repository && !repository.legacy) {
+              if (
+                binding.projectId !== null &&
+                repository.identity.projectId !== binding.projectId
+              ) {
+                throw new ProjectConfigError("project.binding_invalid", "Recent workspace project identity does not match the repository.", 409);
+              }
+              projectId = repository.identity.projectId;
+              sharedOverrides = repository.workflow.overrides;
             }
           }
+          const overrides = effectiveOverrides(sharedOverrides, state.localOverrides);
+          const configSha256 = effectiveConfigSha256(
+            projectId,
+            binding.workspaceId,
+            sharedOverrides,
+            state.localOverrides,
+          );
           metadata = {
-            projectId: binding.projectId,
+            projectId,
             workspaceId: binding.workspaceId,
             projectRoot: binding.projectRoot,
             displayName: basename(binding.projectRoot),
@@ -689,12 +762,19 @@ export function createProjectConfigStore(options = {}) {
   async function inspect(input) {
     const projectRoot = await requireProjectRoot(input);
     const repository = await readRepository(projectRoot);
-    if (!repository) {
+    const descriptor = await workspaceDescriptor(
+      projectRoot,
+      repository?.identity.projectId ?? null,
+    );
+    const workspaceExists = (await pathType(descriptor.root)) === "directory";
+    if (!repository && !workspaceExists) {
       return {
         schemaVersion: REPOSITORY_SCHEMA_VERSION,
         storageVersion: null,
         projectRoot,
         initialized: false,
+        workspaceRegistered: false,
+        repositoryConfigEnabled: false,
         migrationRequired: false,
         projectId: null,
         workspaceId: null,
@@ -707,15 +787,20 @@ export function createProjectConfigStore(options = {}) {
         history: [],
       };
     }
-    if (repository.legacy) return publicLegacy(projectRoot, repository);
-    const workspace = await readWorkspace(projectRoot, repository.identity.projectId);
+    const workspace = await readWorkspace(
+      projectRoot,
+      repository?.identity.projectId ?? null,
+      repository?.legacy ? {
+        revision: repository.workflow.revision,
+        updatedAt: repository.workflow.updatedAt,
+        localOverrides: {},
+      } : {},
+    );
+    if (repository?.legacy) return publicLegacy(projectRoot, repository, workspace);
     return publicCurrent(projectRoot, repository, workspace);
   }
 
-  async function initialize(input) {
-    const projectRoot = await requireProjectRoot(input);
-    const existing = await readRepository(projectRoot);
-    if (existing) return openProject(projectRoot);
+  async function createRepository(projectRoot, overrides = {}) {
     const paths = repositoryPaths(projectRoot);
     const temporary = join(projectRoot, `${CONTROL_DIRECTORY}.tmp-${nonceFactory()}`);
     await mkdir(temporary, { mode: 0o700 });
@@ -729,14 +814,22 @@ export function createProjectConfigStore(options = {}) {
       await writeFile(join(temporary, WORKFLOW_FILE), `${JSON.stringify({
         schemaVersion: REPOSITORY_SCHEMA_VERSION,
         owner: OWNER,
-        overrides: {},
+        overrides,
       }, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
       await rename(temporary, paths.control);
     } catch (error) {
       await rm(temporary, { recursive: true, force: true });
       throw error;
     }
-    await readWorkspace(projectRoot, projectId);
+    return readRepository(projectRoot);
+  }
+
+  async function initialize(input) {
+    const projectRoot = await requireProjectRoot(input);
+    const existing = await readRepository(projectRoot);
+    if (existing) return openProject(projectRoot);
+    await readWorkspace(projectRoot, null);
+    await createRepository(projectRoot);
     return openProject(projectRoot);
   }
 
@@ -770,7 +863,7 @@ export function createProjectConfigStore(options = {}) {
       revision: workspace.state.revision,
       updatedAt: workspace.state.updatedAt,
       action,
-      sharedOverrides: clone(repository.workflow.overrides),
+      sharedOverrides: clone(repository?.workflow.overrides ?? {}),
       localOverrides: clone(workspace.state.localOverrides),
     };
     const path = join(workspace.descriptor.history, `revision-${snapshot.revision}.json`);
@@ -801,16 +894,24 @@ export function createProjectConfigStore(options = {}) {
   }) {
     const state = await withLock(workspace.descriptor, async () => {
       const currentRepository = await readRepository(projectRoot);
-      if (!currentRepository || currentRepository.legacy) {
+      if (currentRepository?.legacy) {
         throw new ProjectConfigError("project.migration_required", "Migrate the project before changing configuration.", 409);
       }
-      const currentWorkspace = await readWorkspace(projectRoot, currentRepository.identity.projectId);
+      if (
+        repository?.identity.projectId !== currentRepository?.identity.projectId
+      ) {
+        throw new ProjectConfigError("project.shared_conflict", "Repository policy changed after it was loaded.", 409);
+      }
+      const currentWorkspace = await readWorkspace(
+        projectRoot,
+        currentRepository?.identity.projectId ?? null,
+      );
       if (expectedRevision !== currentWorkspace.state.revision) {
         throw new ProjectConfigError("project.revision_conflict", "Local project configuration changed after it was loaded.", 409);
       }
       const currentSharedHash = sharedConfigSha256(
-        currentRepository.identity.projectId,
-        currentRepository.workflow.overrides,
+        currentRepository?.identity.projectId ?? null,
+        currentRepository?.workflow.overrides ?? {},
       );
       if (
         typeof expectedSharedConfigSha256 !== "string" ||
@@ -819,7 +920,12 @@ export function createProjectConfigStore(options = {}) {
         throw new ProjectConfigError("project.shared_conflict", "Shared project policy changed after it was loaded.", 409);
       }
       await writeSnapshot(currentWorkspace, currentRepository, action);
-      if (sha256(nextSharedOverrides) !== sha256(currentRepository.workflow.overrides)) {
+      if (
+        sha256(nextSharedOverrides) !== sha256(currentRepository?.workflow.overrides ?? {})
+      ) {
+        if (!currentRepository) {
+          throw new ProjectConfigError("project.repository_required", "Enable repository configuration before restoring shared policy.", 409);
+        }
         await writeJsonAtomic(currentRepository.paths.workflow, {
           schemaVersion: REPOSITORY_SCHEMA_VERSION,
           owner: OWNER,
@@ -852,21 +958,57 @@ export function createProjectConfigStore(options = {}) {
     }
     const projectRoot = await requireProjectRoot(input);
     const repository = await readRepository(projectRoot);
-    if (!repository) {
-      throw new ProjectConfigError("project.not_initialized", "Initialize the project before saving overrides.", 409);
-    }
-    if (repository.legacy) {
+    if (repository?.legacy) {
       throw new ProjectConfigError("project.migration_required", "Migrate the project before saving overrides.", 409);
     }
-    const workspace = await readWorkspace(projectRoot, repository.identity.projectId);
+    const workspace = await readWorkspace(projectRoot, repository?.identity.projectId ?? null);
     const next = validateOverrides(overrides);
+    if (scope === "shared" && !repository) {
+      const state = await withLock(workspace.descriptor, async () => {
+        if (await readRepository(projectRoot)) {
+          throw new ProjectConfigError("project.shared_conflict", "Repository policy changed after it was loaded.", 409);
+        }
+        const currentWorkspace = await readWorkspace(projectRoot, null);
+        if (expectedRevision !== currentWorkspace.state.revision) {
+          throw new ProjectConfigError("project.revision_conflict", "Local workspace configuration changed after it was loaded.", 409);
+        }
+        const currentSharedHash = sharedConfigSha256(null, {});
+        if (expectedSharedConfigSha256 !== currentSharedHash) {
+          throw new ProjectConfigError("project.shared_conflict", "Repository policy changed after it was loaded.", 409);
+        }
+        await writeSnapshot(currentWorkspace, null, "shared");
+        const createdRepository = await createRepository(projectRoot, next);
+        const anchoredWorkspace = await anchorWorkspaceProjectId(
+          currentWorkspace,
+          createdRepository.identity.projectId,
+        );
+        await writeJsonAtomic(anchoredWorkspace.descriptor.state, {
+          schemaVersion: LOCAL_SCHEMA_VERSION,
+          owner: OWNER,
+          workspaceId: anchoredWorkspace.binding.workspaceId,
+          projectId: anchoredWorkspace.binding.projectId,
+          revision: anchoredWorkspace.state.revision + 1,
+          updatedAt: clock().toISOString(),
+          localOverrides: {},
+        }, nonceFactory());
+        return publicCurrent(projectRoot, createdRepository, {
+          ...anchoredWorkspace,
+          state: {
+            ...anchoredWorkspace.state,
+            revision: anchoredWorkspace.state.revision + 1,
+            localOverrides: {},
+          },
+        });
+      });
+      return touchRecent(await state);
+    }
     return commitConfiguration({
       projectRoot,
       repository,
       workspace,
       expectedRevision,
       expectedSharedConfigSha256,
-      nextSharedOverrides: scope === "shared" ? next : repository.workflow.overrides,
+      nextSharedOverrides: scope === "shared" ? next : repository?.workflow.overrides ?? {},
       nextLocalOverrides: scope === "shared" ? {} : next,
       action: scope,
     });
@@ -880,13 +1022,13 @@ export function createProjectConfigStore(options = {}) {
   }) {
     const projectRoot = await requireProjectRoot(input);
     const repository = await readRepository(projectRoot);
-    if (!repository || repository.legacy) {
+    if (repository?.legacy) {
       throw new ProjectConfigError("project.migration_required", "Migrate the project before restoring local history.", 409);
     }
     if (!Number.isSafeInteger(revision) || revision < 0) {
       throw new ProjectConfigError("project.history_invalid", "revision must be a non-negative integer.", 400);
     }
-    const workspace = await readWorkspace(projectRoot, repository.identity.projectId);
+    const workspace = await readWorkspace(projectRoot, repository?.identity.projectId ?? null);
     const rawSnapshot = await readJson(join(workspace.descriptor.history, `revision-${revision}.json`));
     if (!rawSnapshot) {
       throw new ProjectConfigError("project.history_not_found", "Local project revision was not found.", 404);
@@ -908,7 +1050,7 @@ export function createProjectConfigStore(options = {}) {
     const projectRoot = await requireProjectRoot(input);
     const repository = await readRepository(projectRoot);
     if (!repository) {
-      throw new ProjectConfigError("project.not_initialized", "Project is not initialized.", 409);
+      throw new ProjectConfigError("project.not_initialized", "No repository configuration is available to migrate.", 409);
     }
     if (!repository.legacy) return { ...(await openProject(projectRoot)), migration: null };
     if ((await pathType(repository.paths.legacyLock)) !== "missing") {
@@ -958,13 +1100,11 @@ export function createProjectConfigStore(options = {}) {
       owner: OWNER,
       overrides: repository.workflow.overrides,
     }, nonceFactory());
-    if (historyType === "directory") {
-      await rm(repository.paths.legacyHistory, { recursive: true });
-    }
     return {
       ...(await openProject(projectRoot)),
       migration: {
         movedHistory,
+        preservedLegacyHistory: historyType === "directory",
         localStateRoot: workspace.descriptor.root,
       },
     };

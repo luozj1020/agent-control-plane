@@ -22,7 +22,9 @@ export function normalizeRuntimeActivation(input, ErrorType) {
         ? requestedProjectHash.slice("sha256:".length)
         : requestedProjectHash;
     if (
-      !requestedProject || !SAFE_ID.test(requestedProject.projectId) ||
+      !requestedProject ||
+      (requestedProject.projectId !== undefined && requestedProject.projectId !== null &&
+        !SAFE_ID.test(requestedProject.projectId)) ||
       !SAFE_ID.test(requestedProject.workspaceId) ||
       !Number.isSafeInteger(requestedProject.projectRevision) || requestedProject.projectRevision < 0 ||
       typeof projectConfigSha256 !== "string" || !SHA256.test(projectConfigSha256)
@@ -30,7 +32,7 @@ export function normalizeRuntimeActivation(input, ErrorType) {
       throw new ErrorType("runtime.invalid_activation", "Project activation binding is invalid.");
     }
     projectBinding = {
-      projectId: requestedProject.projectId,
+      projectId: requestedProject.projectId ?? null,
       workspaceId: requestedProject.workspaceId,
       projectRevision: requestedProject.projectRevision,
       projectConfigSha256,

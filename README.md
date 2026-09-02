@@ -352,93 +352,91 @@ switching routes and probing again consumes another explicitly confirmed call.
 `packages/workflow-core`. There is no second Web-owned schema copy: an absent
 core, incompatible Contract, or hash mismatch fails closed.
 
-## Personal project scopes
+## Workspace scopes
 
-The configuration page is a personal project hub. Opening a project restores
-that checkout's mode, Agent bindings, runtime controls, and Skill appendix. It
-also shows whether the resolved Skill is active or stale, the latest bound run,
-current integration health, and up to eight recent projects. Activity defaults
-to the current workspace and can be expanded to all local projects explicitly.
+The current working directory is the control entry for workflow, Skill,
+runtime, integration, and evidence state. Opening a directory registers a
+local workspace, restores its overrides, and does not write to the repository.
+Recent workspaces only reduce directory-selection friction; they are not a
+project catalog or a separate product domain.
 
-Each initialized project may contain a minimal repository-owned
-`.agent-control-plane/` directory. These files are declarative; personal use
-does not require committing or sharing them:
-
-```text
-repo/.agent-control-plane/
-├── project.json       # logical project identity
-└── workflow.json      # shared delta over the global Profile
-```
-
-Mutable state is deliberately kept outside the repository:
+The mandatory local state is:
 
 ```text
 ~/.agent-control-plane/workspaces/<workspaceId>/
 ├── binding.json       # this physical checkout
 ├── state.json         # local revision and local overrides
-├── recent.json        # validated personal project summary
+├── recent.json        # validated workspace summary
 ├── history/           # immutable local snapshots
 └── project.lock       # local single-writer lock
 ```
 
 `AGENT_CONTROL_PROJECT_STATE_DIR` may select another absolute local state root.
-`projectId` identifies the logical project configuration; `workspaceId`
-identifies one physical checkout on one control-plane installation. Two clones
-therefore keep independent personal overrides, locks, revision history, and
-runtime identity.
+`workspaceId` is the base identity and is derived from the control-plane
+installation identity plus the canonical directory path. An arbitrary existing
+checkout can therefore use ACP without creating untracked repository files.
 
-The primary **保存项目配置** action writes only local state and masks matching
-repository fields. Writing the current effective delta to `workflow.json` is an
-advanced experimental action hidden behind **高级 · 仓库配置**; it is not part
-of the normal personal workflow and never commits or pushes Git. The delta may
-select the mode and Agent bindings, retain the relevant Overnight or Balanced
-controls, and add a bounded project Skill appendix. It never copies the
-complete mode Skill, embeds secrets, or rewrites an existing `AGENTS.md`.
+Repository policy is an optional portable layer. Only the explicit
+**启用仓库级配置** action creates:
 
-Project paths can be typed or selected through an explicit host directory
+```text
+repo/.agent-control-plane/
+├── project.json       # optional portable project identity
+└── workflow.json      # optional repository delta over the global Profile
+```
+
+`projectId` is nullable and exists only when repository policy is enabled or an
+older repository-owned configuration is being adopted. Two clones can share
+that portable identity while retaining independent workspace overrides, locks,
+revision history, and runtime identity. Effective precedence is Global Profile,
+then optional Repository Policy, then Local Workspace Override.
+
+The primary **保存 Workspace 配置** action writes only local state and masks
+matching repository fields. Publishing the current delta to `workflow.json` is
+an advanced experimental action and never commits or pushes Git. The delta may
+select the mode and Agent bindings, retain relevant Overnight or Balanced
+controls, and add a bounded Skill appendix. It never copies the complete mode
+Skill, embeds secrets, or rewrites an existing `AGENTS.md`.
+
+Workspace paths can be typed or selected through an explicit host directory
 dialog. WSL/Windows uses the Windows folder browser and maps the result back to
 the WSL path; macOS uses Finder, while Linux tries Zenity and then KDialog. The
-browser never invents a filesystem path: the local server canonicalizes the
-selected existing directory, cancellation preserves the current value, and an
-unavailable desktop picker is reported without changing project state.
+local server canonicalizes the selected existing directory, cancellation keeps
+the current value, and an unavailable picker does not change workspace state.
 
-Recent-project metadata is stored as `recent.json` beside local workspace
-state. Opening, initializing, migrating, saving, or restoring a project updates
-its validated local summary. Older workspace state without this file is
-projected from its binding and last update time, so upgrading does not hide
-existing personal projects. Missing paths remain visible but cannot be opened.
+Recent-workspace metadata is stored as `recent.json` beside local state.
+Opening, enabling repository policy, migrating, saving, or restoring updates
+the validated summary. Older state without this file is projected from its
+binding and last update time. Missing paths remain visible but cannot be opened.
 
-Project writes use optimistic local-revision and shared-policy-hash checks, a
-workspace-local single-writer lock, atomic replacement, immutable local
-snapshots, and explicit restore. Unknown fields, unsafe control paths, stale
-revisions, concurrent Git/shared-policy changes, malformed timing or call
-budgets, and Skill appendices above 32 KiB fail closed. Initialization and
-project-override saves do not activate a Harness. Every effective configuration
-has a deterministic SHA-256 independent of its local revision number.
+The current Workspace card is also a state-driven control surface. A missing or
+stale Effective Skill exposes **激活 Skill** or **重新激活 Skill**; a persisted
+run opens its exact Activity/evidence record, with review-required states shown
+as **查看并继续**; delegated modes without a run open Task Card. Integration
+refresh reuses the current workspace path. These actions call the existing
+activation, Activity, Task Card, and integration paths—they do not invent a
+second runtime transition API or silently continue a blocked run.
+
+Writes use optimistic local-revision and repository-policy-hash checks, a
+workspace-local single-writer lock, atomic replacement, immutable snapshots,
+and explicit restore. Unknown fields, unsafe paths, stale revisions, repository
+drift, malformed controls, and Skill appendices above 32 KiB fail closed.
+Registration, policy enablement, and override saves never activate a Harness.
 
 Projects created by the previous repository-local state format remain readable
-but cannot be edited or activated until the user confirms **迁移本地状态**. The
-migration preserves the logical `projectId`, moves legacy revision snapshots to
-the workspace state root, rewrites only the declarative repository files, and
-removes the old repository-local lock/history layout after successful copying.
-There is no silent migration.
+but cannot be edited or activated until **迁移本地状态** is confirmed. Migration
+preserves `projectId`, copies legacy revision snapshots into local workspace
+state, rewrites only the declarative repository files, and leaves legacy
+repository history intact. There is no silent repository migration or
+destructive cleanup.
 
-The explicit activation request sends the workspace id, local revision, and
-effective hash back to the server. The server reloads both shared and local
-configuration and rejects stale workspace context, profile mismatches, or a
-missing Skill appendix before any managed Skill write.
-
-The verified project/workspace binding is stored in the active manifest and
-immutable activation history. Balanced and Overnight runtime discovery
-propagates the same binding into run metadata. Activity association requires
-project identity, workspace identity, revision, and configuration hash to
-match; a run without that evidence remains global or unlinked instead of being
-inferred into another checkout. Legacy activation history remains readable but
-is not projected into new workspace-bound runtime lineage. This keeps
-activation, rollback, runtime evidence, and coordination telemetry on one
-auditable checkout identity chain. Native writes into Harness-specific project
-configuration remain a separate adapter capability and are not implied by
-initializing project overrides.
+Activation sends the mandatory workspace id, local revision, and effective hash
+back to the server, plus `projectId` only when portable repository identity is
+available. The verified binding is stored in the active manifest and immutable
+activation history, then propagated into Balanced and Overnight run metadata.
+Activity association requires workspace identity, optional project identity,
+revision, and configuration hash to match. Missing evidence remains global or
+unlinked rather than being inferred into another checkout.
 
 ## Tools and integrations
 

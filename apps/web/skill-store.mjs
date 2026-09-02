@@ -61,19 +61,27 @@ function validVersionedRef(value) {
   );
 }
 
-function validProjectBinding(value) {
-  return (
-    value === undefined || value === null ||
-    (value && safeIdentifier(value.projectId) &&
-      (value.workspaceId === undefined || safeIdentifier(value.workspaceId)) &&
-      Number.isSafeInteger(value.projectRevision) && value.projectRevision >= 0 &&
-      typeof value.projectConfigSha256 === "string" &&
-      /^[a-f0-9]{64}$/.test(value.projectConfigSha256))
-  );
+function validProjectBinding(value, { allowLegacy = false } = {}) {
+  if (value === undefined || value === null) return true;
+  const versionValid =
+    Number.isSafeInteger(value.projectRevision) && value.projectRevision >= 0 &&
+    typeof value.projectConfigSha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(value.projectConfigSha256);
+  if (!versionValid) return false;
+  if (safeIdentifier(value.workspaceId)) {
+    return value.projectId === undefined || value.projectId === null || safeIdentifier(value.projectId);
+  }
+  return allowLegacy && safeIdentifier(value.projectId) && value.workspaceId === undefined;
 }
 
 function sameProjectBinding(left, right) {
-  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+  if (left == null || right == null) return left == null && right == null;
+  return (
+    (left.projectId ?? null) === (right.projectId ?? null) &&
+    left.workspaceId === right.workspaceId &&
+    left.projectRevision === right.projectRevision &&
+    left.projectConfigSha256 === right.projectConfigSha256
+  );
 }
 
 function sha256(content) {
@@ -197,7 +205,7 @@ async function readOwnedDirectory(directory) {
       409,
     );
   }
-  if (!validProjectBinding(manifest.projectBinding)) {
+  if (!validProjectBinding(manifest.projectBinding, { allowLegacy: true })) {
     throw new SkillStoreError(
       "store.corrupt_active",
       "Managed Skill has an invalid project binding.",
@@ -526,7 +534,7 @@ export function createSkillStore(options = {}) {
       !Array.isArray(metadata.includedAgentIds) ||
       !metadata.includedAgentIds.every(safeIdentifier) ||
       !validVersionedRef(metadata.overnightLoopPolicy) ||
-      !validProjectBinding(metadata.projectBinding) ||
+      !validProjectBinding(metadata.projectBinding, { allowLegacy: true }) ||
       typeof metadata.recordedAt !== "string" ||
       !Number.isFinite(Date.parse(metadata.recordedAt)) ||
       typeof metadata.activatedAt !== "string" ||

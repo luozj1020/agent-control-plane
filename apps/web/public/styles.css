@@ -644,6 +644,8 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 42px); line-height: 1.08; letter-spa
 .project-current-grid span, .project-current-grid strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-current-grid span { color: var(--muted); font-size: 9px; }
 .project-current-grid strong { margin-top: 5px; color: #dce3ec; font-size: 11px; }
+.project-current-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line-soft); background: rgba(10, 13, 17, .7); }
+.project-current-actions .button { min-width: 112px; }
 .recent-project-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; }
 .recent-project-heading > div { display: flex; align-items: baseline; gap: 10px; }
 .recent-project-heading strong { font-size: 12px; }
@@ -1043,7 +1045,7 @@ body { font-size: 14px; line-height: 1.45; }
   .mode-grid, .field-grid, .overnight-policy-rules, .project-root-row, .project-config-meta, .project-current-grid, .recent-project-list { grid-template-columns: 1fr; }
   .project-current-heading, .project-repository-policy > div { align-items: stretch; flex-direction: column; }
   .directory-input-row { grid-template-columns: 1fr; }
-  .project-config-actions { align-items: stretch; flex-direction: column; }
+  .project-config-actions, .project-current-actions { align-items: stretch; flex-direction: column; }
   .balanced-window-grid, .balanced-budget-grid { grid-template-columns: 1fr 1fr; }
   .interactive-global-grid, .interactive-role-controls { grid-template-columns: 1fr; }
   .interactive-role-toolbar { align-items: flex-start; flex-direction: column; }

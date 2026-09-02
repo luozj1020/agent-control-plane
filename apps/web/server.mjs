@@ -211,7 +211,7 @@ export function createAppServer(options = {}) {
     }
     const project = await projectConfigStore.inspect(input.projectRoot);
     if (!project.initialized) {
-      throw new ProjectConfigError("project.not_initialized", "Project activation requires initialization.", 409);
+      throw new ProjectConfigError("project.not_initialized", "Activation requires an opened local workspace.", 409);
     }
     if (project.migrationRequired || !project.workspaceId) {
       throw new ProjectConfigError("project.migration_required", "Migrate project-local state before activation.", 409);

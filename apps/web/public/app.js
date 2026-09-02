@@ -196,12 +196,15 @@ const elements = {
   projectConfigStatus: document.querySelector("#project-config-status"),
   projectConfigWorkspace: document.querySelector("#project-config-workspace"),
   projectCurrentActive: document.querySelector("#project-current-active"),
+  projectCurrentActivate: document.querySelector("#project-current-activate"),
   projectCurrentBuilder: document.querySelector("#project-current-builder"),
+  projectCurrentIntegrations: document.querySelector("#project-current-integrations"),
   projectCurrentMain: document.querySelector("#project-current-main"),
   projectCurrentMode: document.querySelector("#project-current-mode"),
   projectCurrentName: document.querySelector("#project-current-name"),
   projectCurrentPath: document.querySelector("#project-current-path"),
   projectCurrentRun: document.querySelector("#project-current-run"),
+  projectCurrentRunAction: document.querySelector("#project-current-run-action"),
   projectCurrentTools: document.querySelector("#project-current-tools"),
   projectSkillAppendix: document.querySelector("#project-skill-appendix"),
   recentProjectList: document.querySelector("#recent-project-list"),
@@ -880,7 +883,7 @@ function historyActionLabel(action) {
   }
 }
 
-function switchView(view) {
+function switchView(view, options = {}) {
   activeView = view;
   const configuration = view === "configuration";
   const taskCard = view === "task-card";
@@ -903,9 +906,9 @@ function switchView(view) {
     elements.taskCardWorkflowMode.value = selectedModeId;
     synchronizeTaskCardStrategy();
   }
-  if (integrations && !integrationsData) loadIntegrations();
-  if (usage) loadRuntimeUsage();
-  if (history) {
+  if (options.load !== false && integrations && !integrationsData) loadIntegrations();
+  if (options.load !== false && usage) loadRuntimeUsage();
+  if (options.load !== false && history) {
     loadCoordination();
     loadHistory({ selectEntry: true });
   }
@@ -1739,7 +1742,7 @@ function renderHistoryList() {
 
   const currentScope = elements.historyScopeFilter.value === "current";
   elements.historyStatus.textContent = currentScope
-    ? `${projectConfigState?.workspaceId ? projectName(projectConfigState.projectRoot) : "当前项目未初始化"} · ${entries.length} 条激活 · ${scopedRuns.length} 条运行`
+    ? `${projectConfigState?.workspaceId ? projectName(projectConfigState.projectRoot) : "尚未打开工作目录"} · ${entries.length} 条激活 · ${scopedRuns.length} 条运行`
     : `${entries.length} 条激活 · ${scopedRuns.length} 条运行 · ${historyData.activitySummary?.projects ?? 0} 个项目 · ${historyData.activitySummary?.workspaces ?? 0} 个工作区`;
   const corrupt = historyData.corruptEntries ?? 0;
   elements.historyIntegrity.textContent = corrupt === 0 ? "完整性通过" : `${corrupt} 条损坏记录`;
@@ -1771,7 +1774,7 @@ function renderHistoryList() {
     time.textContent = `${historyActionLabel(entry.action)} · ${formatHistoryDate(entry.recordedAt)}`;
     const mode = document.createElement("code");
     mode.textContent = entry.projectBinding
-      ? `${entry.mode.id}@${entry.mode.version} · project ${shortHash(entry.projectBinding.projectId)}`
+      ? `${entry.mode.id}@${entry.mode.version} · workspace ${shortHash(entry.projectBinding.workspaceId)}`
       : `${entry.mode.id}@${entry.mode.version} · global`;
     main.append(title, time, mode);
     const state = document.createElement("span");
@@ -1792,7 +1795,7 @@ function renderHistoryMeta(entry) {
     ["Profile", entry.profileId],
     ["Activated", formatHistoryDate(entry.activatedAt)],
     ["Skill hash", entry.contentSha256 ? entry.contentSha256.slice(0, 12) : "—"],
-    ["Project", entry.projectBinding?.projectId ?? "global"],
+    ["Repository project", entry.projectBinding?.projectId ?? "not enabled"],
     ["Workspace", entry.projectBinding?.workspaceId ?? "—"],
     ["Project revision", entry.projectBinding ? `r${entry.projectBinding.projectRevision}` : "—"],
     ["Project config", entry.projectBinding?.projectConfigSha256?.slice(0, 12) ?? "—"],
@@ -2284,7 +2287,7 @@ function renderModeCards() {
       renderModeCards();
       refresh();
       if (projectConfigState?.initialized) {
-        showToast("已更新个人项目草稿；保存项目配置后再显式激活。");
+        showToast("已更新当前 workspace 草稿；保存配置后再显式激活。");
         return;
       }
       modeSwitchCoordinator.request(mode.id);
@@ -2468,9 +2471,47 @@ function currentWorkspaceRuns() {
     .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")));
 }
 
+const WORKSPACE_REVIEW_STATES = new Set([
+  "review_pending",
+  "revision_pending",
+  "improvement_cycle_ready",
+  "runtime_blocked",
+  "budget_exhausted",
+  "scope_violation",
+  "validation_failed",
+]);
+
+function workspaceRunAction(run) {
+  if (run) {
+    return {
+      kind: "run",
+      label: WORKSPACE_REVIEW_STATES.has(run.state) ? "查看并继续" : "查看运行",
+    };
+  }
+  if (["balanced", "overnight"].includes(selectedModeId)) {
+    return { kind: "task-card", label: "打开 Task Card" };
+  }
+  return null;
+}
+
+async function openWorkspaceRun(run) {
+  selectedCoordinationRun = `${run.mode}:${run.runId}`;
+  const activation = historyData?.entries?.find((entry) =>
+    (entry.runs ?? []).some((candidate) => candidate.mode === run.mode && candidate.runId === run.runId)
+  );
+  selectedHistoryId = activation?.historyId ?? null;
+  switchView("history", { load: false });
+  await Promise.all([loadCoordination(), loadHistory({ selectEntry: true })]);
+  const refreshed = [
+    ...(historyData?.entries ?? []).flatMap((entry) => entry.runs ?? []),
+    ...(historyData?.unlinkedRuns ?? []),
+  ].find((candidate) => candidate.mode === run.mode && candidate.runId === run.runId);
+  if (refreshed) await loadCoordinationDetail(refreshed);
+}
+
 function projectActivationState() {
   const state = projectConfigState;
-  if (!state?.initialized) return { label: "尚未初始化", tone: "" };
+  if (!state?.initialized) return { label: "尚未打开", tone: "" };
   if (state.migrationRequired) return { label: "需要迁移", tone: "error" };
   if (!serverStatusLoaded) return { label: "正在检查", tone: "" };
   if (!serverStatus.writeEnabled) return { label: "仅本地预览", tone: "" };
@@ -2493,8 +2534,8 @@ function projectActivationState() {
 function renderProjectHub() {
   const state = projectConfigState;
   const root = state?.projectRoot ?? elements.projectConfigRoot.value.trim();
-  elements.projectCurrentName.textContent = root ? projectName(root) : "尚未选择项目";
-  elements.projectCurrentPath.textContent = root || "从文件管理器选择或输入项目目录";
+  elements.projectCurrentName.textContent = root ? projectName(root) : "尚未选择工作目录";
+  elements.projectCurrentPath.textContent = root || "从文件管理器选择或输入工作目录";
   elements.projectCurrentPath.title = root;
   elements.projectCurrentMode.textContent = modeDisplayName(selectedModeId);
   elements.projectCurrentMain.textContent = selectedAgentLabel(elements.mainAgent);
@@ -2521,6 +2562,22 @@ function renderProjectHub() {
   } else {
     elements.projectCurrentTools.textContent = root ? "等待检查" : "—";
   }
+  const canActivate =
+    state?.initialized === true &&
+    !state.migrationRequired &&
+    activation.tone !== "ready";
+  elements.projectCurrentActivate.hidden = !canActivate;
+  elements.projectCurrentActivate.disabled = !canActivate || elements.activateButton.disabled;
+  elements.projectCurrentActivate.textContent = getInstalledState().length > 0
+    ? "重新激活 Skill"
+    : "激活 Skill";
+  const runAction = workspaceRunAction(latestRun);
+  elements.projectCurrentRunAction.hidden = runAction === null || state?.initialized !== true;
+  elements.projectCurrentRunAction.disabled = runAction === null;
+  elements.projectCurrentRunAction.textContent = runAction?.label ?? "查看运行";
+  elements.projectCurrentRunAction.dataset.action = runAction?.kind ?? "";
+  elements.projectCurrentIntegrations.disabled = !root || integrationsLoading;
+  elements.projectCurrentIntegrations.textContent = integrationsLoading ? "正在刷新…" : "刷新集成状态";
   renderRecentProjects();
 }
 
@@ -2530,13 +2587,13 @@ function renderRecentProjects() {
   const corrupt = recentProjectsData?.corruptEntries ?? 0;
   elements.recentProjectRefresh.disabled = recentProjectsLoading;
   elements.recentProjectStatus.textContent = recentProjectsLoading
-    ? "正在读取本机项目…"
+    ? "正在读取本机 workspace…"
     : recentProjectsData?.error
       ? `读取失败：${recentProjectsData.error}`
-      : `${projects.length} 个项目${corrupt > 0 ? ` · 忽略 ${corrupt} 条无效记录` : ""}`;
+      : `${projects.length} 个 workspace${corrupt > 0 ? ` · 忽略 ${corrupt} 条无效记录` : ""}`;
   if (projects.length === 0) {
     const empty = document.createElement("p");
-    empty.textContent = recentProjectsLoading ? "正在读取…" : "尚无最近项目。初始化或打开项目后会出现在这里。";
+    empty.textContent = recentProjectsLoading ? "正在读取…" : "尚无最近工作目录。打开目录后会出现在这里。";
     elements.recentProjectList.append(empty);
     return;
   }
@@ -2581,6 +2638,7 @@ async function loadRecentProjects() {
 function renderProjectConfig() {
   const state = projectConfigState;
   const initialized = state?.initialized === true;
+  const repositoryConfigEnabled = state?.repositoryConfigEnabled === true;
   const migrationRequired = initialized && state.migrationRequired === true;
   elements.projectConfigStatus.classList.toggle("error", state?.error !== undefined);
   elements.projectConfigStatus.textContent = projectConfigLoading
@@ -2589,9 +2647,9 @@ function renderProjectConfig() {
       ? "项目配置不可用"
       : migrationRequired
         ? "需要迁移本地状态"
-        : initialized ? "个人项目已载入" : state ? "项目尚未初始化" : "尚未检查";
-  elements.projectConfigId.textContent = initialized ? shortHash(state.projectId) : "—";
-  elements.projectConfigId.title = initialized ? state.projectId : "";
+        : initialized ? "Workspace 已载入" : state ? "目录尚未打开" : "尚未检查";
+  elements.projectConfigId.textContent = repositoryConfigEnabled ? shortHash(state.projectId) : "未启用";
+  elements.projectConfigId.title = repositoryConfigEnabled ? state.projectId : "";
   elements.projectConfigWorkspace.textContent = state?.workspaceId ? shortHash(state.workspaceId) : "—";
   elements.projectConfigWorkspace.title = state?.workspaceId ?? "";
   elements.projectConfigRevision.textContent = initialized ? `r${state.revision}` : "—";
@@ -2602,13 +2660,13 @@ function renderProjectConfig() {
   elements.projectConfigSource.textContent = localCount > 0
     ? `本机 ${localCount} 项 · 仓库 ${sharedCount} 项`
     : sharedCount > 0 ? `仓库 ${sharedCount} 项` : "全局 Profile";
-  elements.projectConfigInitialize.hidden = !state || initialized;
+  elements.projectConfigInitialize.hidden = !initialized || repositoryConfigEnabled || migrationRequired;
   elements.projectConfigMigrate.hidden = !migrationRequired;
   elements.projectConfigInitialize.disabled = projectConfigLoading;
   elements.projectConfigMigrate.disabled = projectConfigLoading;
   elements.projectConfigCheck.disabled = projectConfigLoading;
   elements.projectConfigSave.disabled = !initialized || migrationRequired || projectConfigLoading;
-  elements.projectConfigPublish.disabled = !initialized || migrationRequired || projectConfigLoading;
+  elements.projectConfigPublish.disabled = !initialized || !repositoryConfigEnabled || migrationRequired || projectConfigLoading;
   elements.projectConfigClear.disabled = !initialized || migrationRequired || projectConfigLoading || localCount === 0;
   elements.projectConfigRestore.disabled =
     !initialized || migrationRequired || projectConfigLoading || (state.history?.length ?? 0) === 0;
@@ -2665,7 +2723,7 @@ async function chooseProjectDirectory() {
       body: JSON.stringify({ initialDirectory: initialDirectory || undefined }),
     });
     if (!result.selected) {
-      showToast("已取消选择，当前项目目录未改变。");
+      showToast("已取消选择，当前工作目录未改变。");
       return;
     }
     elements.projectConfigRoot.value = result.projectRoot;
@@ -2674,9 +2732,9 @@ async function chooseProjectDirectory() {
     elements.integrationPlanPanel.hidden = true;
     await loadProjectConfig(result.projectRoot);
     await loadIntegrations();
-    showToast("已从文件管理器载入项目目录。");
+    showToast("已从文件管理器打开工作目录；仓库未被修改。");
   } catch (error) {
-    showToast(`无法选择项目目录：${error.message}`);
+    showToast(`无法选择工作目录：${error.message}`);
   } finally {
     directoryPickerLoading = false;
     renderDirectoryPickerState();
@@ -2943,7 +3001,7 @@ function renderStoreStatus() {
     elements.modeSwitchPolicy.textContent = "激活状态不可用";
   }
   elements.modeSwitchNoteCopy.textContent = projectConfigState?.initialized
-    ? "个人项目已载入；点击模式只更新草稿，保存项目配置后再显式激活当前 Harness Skill。"
+    ? "当前 workspace 已载入；点击模式只更新草稿，保存配置后再显式激活当前 Harness Skill。"
     : "文件写入启用后，点击模式会自动备份当前受管 Skill，并原子覆写或首次激活。";
   if (serverStatus.writeEnabled) {
     if (storeIsHealthy()) {
@@ -4352,7 +4410,10 @@ function renderActivityRuns(target, runs, options = {}) {
     const title = document.createElement("strong");
     title.textContent = run.runId;
     const subtitle = document.createElement("span");
-    subtitle.textContent = `${run.mode} · ${run.adapterId ?? "adapter 未知"} · ${run.state ?? "状态未知"} · ${run.projectBinding ? `project ${shortHash(run.projectBinding.projectId)} · workspace ${run.projectBinding.workspaceId ? shortHash(run.projectBinding.workspaceId) : "legacy"}@r${run.projectBinding.projectRevision}` : "global"}`;
+    const bindingLabel = run.projectBinding
+      ? `workspace ${shortHash(run.projectBinding.workspaceId)}${run.projectBinding.projectId ? ` · project ${shortHash(run.projectBinding.projectId)}` : ""}@r${run.projectBinding.projectRevision}`
+      : "global";
+    subtitle.textContent = `${run.mode} · ${run.adapterId ?? "adapter 未知"} · ${run.state ?? "状态未知"} · ${bindingLabel}`;
     const association = document.createElement("span");
     association.className = `coordination-association ${run.association?.confidence ?? "unknown"}`;
     association.textContent = associationText(run.association);
@@ -4581,6 +4642,31 @@ elements.skillPreview.addEventListener("input", () => {
 });
 elements.projectConfigCheck.addEventListener("click", () => loadProjectConfig());
 elements.projectConfigBrowse.addEventListener("click", chooseProjectDirectory);
+elements.projectCurrentActivate.addEventListener("click", () => {
+  if (!elements.activateButton.disabled) elements.activateButton.click();
+});
+elements.projectCurrentRunAction.addEventListener("click", async () => {
+  const run = currentWorkspaceRuns()[0];
+  if (elements.projectCurrentRunAction.dataset.action === "task-card" || !run) {
+    switchView("task-card");
+    return;
+  }
+  elements.projectCurrentRunAction.disabled = true;
+  try {
+    await openWorkspaceRun(run);
+  } catch (error) {
+    showToast(`运行记录打开失败：${error.message}`);
+  } finally {
+    renderProjectHub();
+  }
+});
+elements.projectCurrentIntegrations.addEventListener("click", async () => {
+  const root = projectConfigState?.projectRoot;
+  if (!root || integrationsLoading) return;
+  elements.integrationsProjectRoot.value = root;
+  await loadIntegrations();
+  showToast(integrationsData?.projectRoot === root ? "集成状态已刷新。" : "集成状态刷新失败，请查看工具与集成页面。");
+});
 elements.recentProjectRefresh.addEventListener("click", loadRecentProjects);
 elements.projectConfigRoot.addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadProjectConfig();
@@ -4588,6 +4674,9 @@ elements.projectConfigRoot.addEventListener("keydown", (event) => {
 elements.projectConfigInitialize.addEventListener("click", async () => {
   const projectRoot = elements.projectConfigRoot.value.trim();
   if (!projectRoot || projectConfigLoading) return;
+  if (!window.confirm(
+    "启用仓库级配置？\n\n这会创建 .agent-control-plane/project.json 和 workflow.json；不会自动提交 Git。",
+  )) return;
   projectConfigLoading = true;
   renderProjectConfig();
   try {
@@ -4599,11 +4688,11 @@ elements.projectConfigInitialize.addEventListener("click", async () => {
     elements.projectConfigRoot.value = projectConfigState.projectRoot;
     localStorage.setItem(INTEGRATION_PROJECT_KEY, projectConfigState.projectRoot);
     applyProjectOverrides(projectConfigState.overrides);
-    showToast("项目配置已初始化；尚未写入 Harness。");
+    showToast("已启用仓库级配置；尚未写入 Harness 或提交 Git。");
     void loadRecentProjects();
     void loadIntegrations();
   } catch (error) {
-    showToast(`项目初始化失败：${error.message}`);
+    showToast(`仓库级配置启用失败：${error.message}`);
   } finally {
     projectConfigLoading = false;
     renderProjectConfig();
@@ -4612,7 +4701,7 @@ elements.projectConfigInitialize.addEventListener("click", async () => {
 elements.projectConfigMigrate.addEventListener("click", async () => {
   if (!projectConfigState?.migrationRequired || projectConfigLoading) return;
   if (!window.confirm(
-    "迁移旧项目状态？\n\n仓库中的 history 与 lock 将在校验后迁入本机状态目录；project.json 和 workflow.json 将升级为可共享声明式配置。",
+    "迁移旧项目状态？\n\n仓库中的 history 会在校验后复制到本机 workspace；project.json 和 workflow.json 将升级为声明式配置，旧历史不会被删除。",
   )) return;
   projectConfigLoading = true;
   renderProjectConfig();
@@ -4623,7 +4712,7 @@ elements.projectConfigMigrate.addEventListener("click", async () => {
       body: JSON.stringify({ projectRoot: projectConfigState.projectRoot }),
     });
     applyProjectOverrides(projectConfigState.overrides);
-    showToast(`项目状态迁移完成；已迁移 ${projectConfigState.migration?.movedHistory ?? 0} 条本机历史。`);
+    showToast(`项目状态迁移完成；已复制 ${projectConfigState.migration?.movedHistory ?? 0} 条历史到本机 workspace。`);
     void loadRecentProjects();
   } catch (error) {
     showToast(`项目状态迁移失败：${error.message}`);
@@ -4633,10 +4722,10 @@ elements.projectConfigMigrate.addEventListener("click", async () => {
   }
 });
 elements.projectConfigSave.addEventListener("click", () =>
-  writeProjectOverrides(currentProjectOverrides(), "当前模式与 Skill 增量已保存为个人项目配置。", "local")
+  writeProjectOverrides(currentProjectOverrides(), "当前模式与 Skill 增量已保存到本机 workspace。", "local")
 );
 elements.projectConfigClear.addEventListener("click", () =>
-  writeProjectOverrides({}, "已清除个人项目配置；现在继承仓库配置与全局 Profile。", "local")
+  writeProjectOverrides({}, "已清除本机 workspace 覆盖；现在继承仓库配置与全局 Profile。", "local")
 );
 elements.projectConfigPublish.addEventListener("click", () => {
   if (!window.confirm(

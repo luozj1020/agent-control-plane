@@ -511,7 +511,7 @@ test("activation treats a different project revision as a distinct target", () =
   const desired = {
     ...resolved.value,
     projectBinding: {
-      projectId: "project-1",
+      projectId: null,
       workspaceId: "workspace-1",
       projectRevision: 2,
       projectConfigSha256: "b".repeat(64),

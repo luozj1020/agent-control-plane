@@ -17,7 +17,7 @@ function sameProjectBinding(
   right: ManagedSkillState["projectBinding"],
 ): boolean {
   if (left == null || right == null) return left == null && right == null;
-  return left.projectId === right.projectId &&
+  return (left.projectId ?? null) === (right.projectId ?? null) &&
     left.workspaceId === right.workspaceId &&
     left.projectRevision === right.projectRevision &&
     left.projectConfigSha256 === right.projectConfigSha256;

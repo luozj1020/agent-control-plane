@@ -14,7 +14,7 @@ function projectBindingMatches(run, activation) {
   const right = activation?.projectBinding ?? null;
   if (left === null || right === null) return left === right;
   return (
-    left.projectId === right.projectId &&
+    (left.projectId ?? null) === (right.projectId ?? null) &&
     left.workspaceId === right.workspaceId &&
     left.projectRevision === right.projectRevision &&
     left.projectConfigSha256 === right.projectConfigSha256

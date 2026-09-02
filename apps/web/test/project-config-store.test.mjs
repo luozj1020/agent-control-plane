@@ -21,7 +21,7 @@ async function withProject(run) {
   }
 }
 
-test("new projects keep declarative policy in the repository and mutable state locally", async () => {
+test("opening a new directory registers a local-only workspace without repository writes", async () => {
   await withProject(async ({ project, stateRoot }) => {
     let tick = 0;
     const store = createProjectConfigStore({
@@ -33,10 +33,12 @@ test("new projects keep declarative policy in the repository and mutable state l
     assert.equal(before.initialized, false);
     assert.equal(before.workspaceId, null);
 
-    const initialized = await store.initialize(project);
-    assert.equal(initialized.storageVersion, 2);
+    const initialized = await store.open(project);
+    assert.equal(initialized.storageVersion, 1);
+    assert.equal(initialized.workspaceRegistered, true);
+    assert.equal(initialized.repositoryConfigEnabled, false);
     assert.equal(initialized.revision, 0);
-    assert.match(initialized.projectId, /^project-/);
+    assert.equal(initialized.projectId, null);
     assert.match(initialized.workspaceId, /^workspace-/);
     assert.match(initialized.configSha256, /^[a-f0-9]{64}$/);
     assert.equal((await store.recent()).projects[0].projectRoot, project);
@@ -59,18 +61,15 @@ test("new projects keep declarative policy in the repository and mutable state l
     assert.equal(saved.localOverrides.modeId, "balanced");
     assert.deepEqual(saved.history.map((entry) => entry.revision), [0]);
 
-    const repositoryWorkflow = JSON.parse(
-      await readFile(join(project, ".agent-control-plane", "workflow.json"), "utf8"),
+    await assert.rejects(
+      readFile(join(project, ".agent-control-plane", "workflow.json"), "utf8"),
+      { code: "ENOENT" },
     );
-    assert.deepEqual(repositoryWorkflow, {
-      schemaVersion: 2,
-      owner: "agent-control-plane",
-      overrides: {},
-    });
     const localState = JSON.parse(
       await readFile(join(stateRoot, saved.workspaceId, "state.json"), "utf8"),
     );
     assert.equal(localState.revision, 1);
+    assert.equal(localState.projectId, null);
     assert.equal(localState.localOverrides.modeId, "balanced");
     const recent = await store.recent();
     assert.equal(recent.corruptEntries, 0);
@@ -80,6 +79,38 @@ test("new projects keep declarative policy in the repository and mutable state l
       revision: entry.revision,
       available: entry.available,
     })), [{ projectRoot: project, modeId: "balanced", revision: 1, available: true }]);
+  });
+});
+
+test("repository configuration is opt-in and preserves the existing workspace", async () => {
+  await withProject(async ({ project, stateRoot }) => {
+    let nonce = 0;
+    const store = createProjectConfigStore({ stateRoot, nonceFactory: () => `id-${++nonce}` });
+    const opened = await store.open(project);
+    const local = await store.save({
+      projectRoot: project,
+      expectedRevision: opened.revision,
+      expectedSharedConfigSha256: opened.sharedConfigSha256,
+      scope: "local",
+      overrides: { modeId: "balanced" },
+    });
+
+    const enabled = await store.initialize(project);
+    assert.equal(enabled.workspaceId, opened.workspaceId);
+    assert.equal(enabled.repositoryConfigEnabled, true);
+    assert.match(enabled.projectId, /^project-/);
+    assert.equal(enabled.revision, local.revision);
+    assert.equal(enabled.localOverrides.modeId, "balanced");
+    assert.equal(enabled.overrides.modeId, "balanced");
+
+    const identity = JSON.parse(
+      await readFile(join(project, ".agent-control-plane", "project.json"), "utf8"),
+    );
+    assert.equal(identity.projectId, enabled.projectId);
+    const binding = JSON.parse(
+      await readFile(join(stateRoot, enabled.workspaceId, "binding.json"), "utf8"),
+    );
+    assert.equal(binding.projectId, enabled.projectId);
   });
 });
 
@@ -94,8 +125,8 @@ test("opening projects records local recency and never writes recent metadata in
       clock: () => new Date(`2026-09-02T00:00:${String(tick++).padStart(2, "0")}.000Z`),
       nonceFactory: () => `id-${++nonce}`,
     });
-    const firstState = await store.initialize(project);
-    const secondState = await store.initialize(second);
+    const firstState = await store.open(project);
+    const secondState = await store.open(second);
     await rm(join(stateRoot, secondState.workspaceId, "recent.json"));
     await store.open(project);
 
@@ -212,14 +243,18 @@ test("legacy repository-local history migrates explicitly into workspace state",
 
     const legacy = await store.inspect(project);
     assert.equal(legacy.migrationRequired, true);
-    assert.equal(legacy.workspaceId, null);
+    assert.match(legacy.workspaceId, /^workspace-/);
 
     const migrated = await store.migrate(project);
     assert.equal(migrated.migrationRequired, false);
     assert.match(migrated.workspaceId, /^workspace-/);
     assert.equal(migrated.revision, 2);
     assert.equal(migrated.migration.movedHistory, 1);
-    await assert.rejects(readFile(join(control, "history", "revision-1.json")), { code: "ENOENT" });
+    assert.equal(migrated.migration.preservedLegacyHistory, true);
+    assert.equal(
+      JSON.parse(await readFile(join(control, "history", "revision-1.json"), "utf8")).revision,
+      1,
+    );
     const repositoryWorkflow = JSON.parse(await readFile(join(control, "workflow.json"), "utf8"));
     assert.equal(repositoryWorkflow.schemaVersion, 2);
     assert.equal(repositoryWorkflow.revision, undefined);

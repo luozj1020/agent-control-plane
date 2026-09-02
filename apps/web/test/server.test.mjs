@@ -116,11 +116,14 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /id="project-config-publish"/);
     assert.match(html, /id="project-current-name"/);
     assert.match(html, /id="project-current-active"/);
+    assert.match(html, /id="project-current-activate"/);
+    assert.match(html, /id="project-current-run-action"/);
+    assert.match(html, /id="project-current-integrations"/);
     assert.match(html, /id="recent-project-list"/);
     assert.match(html, /id="recent-project-refresh"/);
     assert.match(html, /id="history-scope-filter"/);
     assert.match(html, /id="project-skill-appendix"/);
-    assert.match(html, /保存项目配置/);
+    assert.match(html, /保存 Workspace 配置/);
     assert.match(html, /高级 · 仓库配置（实验性）/);
     assert.doesNotMatch(html, /总 Token 上限/);
     assert.match(html, /USAGE · ESTIMATED CONTEXT/);
@@ -291,7 +294,7 @@ test("integration APIs expose discovery, diagnostics, and non-executable plans",
   }, { integrationRegistry });
 });
 
-test("project APIs expose explicit initialization, optimistic saves, and revision restore", async () => {
+test("workspace APIs expose local open, explicit repository enablement, saves, and restore", async () => {
   const calls = [];
   const projectConfigStore = {
     async inspect(projectRoot) {
@@ -918,7 +921,8 @@ test("activation binds a server-verified project revision and rejects stale proj
   const project = {
     initialized: true,
     projectRoot,
-    projectId: "project-1",
+    projectId: null,
+    repositoryConfigEnabled: false,
     workspaceId: "workspace-1",
     migrationRequired: false,
     revision: 4,
@@ -985,7 +989,7 @@ test("activation binds a server-verified project revision and rejects stale proj
       assert.equal(response.status, 200);
       const body = await response.json();
       assert.deepEqual(body.status.active.projectBinding, {
-        projectId: "project-1",
+        projectId: null,
         workspaceId: "workspace-1",
         projectRevision: 4,
         projectConfigSha256: "c".repeat(64),

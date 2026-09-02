@@ -34,6 +34,18 @@ test("normalizes optional activation identity without inventing a link", () => {
     projectRevision: 2,
     projectConfigSha256: "c".repeat(64),
   });
+  assert.deepEqual(normalizeRuntimeActivation({
+    projectBinding: {
+      workspaceId: "workspace-local",
+      projectRevision: 0,
+      projectConfigSha256: "d".repeat(64),
+    },
+  }, BalancedRuntimeError).projectBinding, {
+    projectId: null,
+    workspaceId: "workspace-local",
+    projectRevision: 0,
+    projectConfigSha256: "d".repeat(64),
+  });
 });
 
 test("rejects malformed activation identifiers and hashes", () => {
