@@ -494,6 +494,7 @@ test("activation is a no-op for the identical sole active Skill", () => {
       variantId: resolved.value.id,
       relativeSkillPath: resolved.value.relativeSkillPath,
       contentFingerprint: resolved.value.contentFingerprint,
+      projectBinding: null,
       active: true,
     },
   ]);
@@ -501,6 +502,35 @@ test("activation is a no-op for the identical sole active Skill", () => {
   if (!plan.ok) return;
   assert.deepEqual(plan.value.operations, []);
   assert.equal(plan.value.restartRequired, false);
+});
+
+test("activation treats a different project revision as a distinct target", () => {
+  const resolved = resolve(CODEX_OVERNIGHT_CLAUDE_PROFILE);
+  assert.equal(resolved.ok, true);
+  if (!resolved.ok) return;
+  const desired = {
+    ...resolved.value,
+    projectBinding: {
+      projectId: "project-1",
+      projectRevision: 2,
+      projectConfigSha256: "b".repeat(64),
+    },
+  };
+  const plan = planSkillActivation(desired, [{
+    variantId: desired.id,
+    relativeSkillPath: desired.relativeSkillPath,
+    contentFingerprint: desired.contentFingerprint,
+    projectBinding: {
+      projectId: "project-1",
+      projectRevision: 1,
+      projectConfigSha256: "a".repeat(64),
+    },
+    active: true,
+  }]);
+  assert.equal(plan.ok, true);
+  if (!plan.ok) return;
+  assert.deepEqual(plan.value.operations.map((entry) => entry.kind), ["backup", "write", "activate"]);
+  assert.equal(plan.value.restartRequired, true);
 });
 
 test("activation rejects traversal paths", () => {

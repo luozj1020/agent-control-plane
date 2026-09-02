@@ -58,8 +58,9 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /AI Coding Workflow Control Plane/);
     assert.match(html, /Token 运行时用量/);
     assert.match(html, /RUNTIME ANALYTICS/);
+    assert.match(html, /id="runtime-load-status"/);
     assert.match(html, /id="nav-usage"/);
-    assert.match(html, /id="nav-coordination"/);
+    assert.doesNotMatch(html, /id="nav-coordination"/);
     assert.match(html, /id="nav-task-card"/);
     assert.match(html, /id="nav-integrations"/);
     assert.match(html, /class="integrations-view" id="integrations-view" hidden/);
@@ -106,10 +107,14 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /id="balanced-config"/);
     assert.match(html, /Balanced 运行控制/);
     assert.match(html, /id="balanced-first-progress-window"/);
+    assert.match(html, /id="project-config-root"/);
+    assert.match(html, /id="project-skill-appendix"/);
+    assert.match(html, /保存当前配置为项目覆盖/);
     assert.doesNotMatch(html, /总 Token 上限/);
     assert.match(html, /USAGE · ESTIMATED CONTEXT/);
-    assert.match(html, /ACTIVATION AUDIT LOG/);
-    assert.match(html, /激活记录/);
+    assert.match(html, /ACTIVATION &amp; RUNTIME ACTIVITY/);
+    assert.match(html, /活动记录/);
+    assert.match(html, /id="history-run-list"/);
     assert.match(html, /mode-switch-policy/);
     assert.match(html, /id="skill-preview"/);
     assert.match(html, /id="restore-skill-default"/);
@@ -233,6 +238,71 @@ test("integration APIs expose discovery, diagnostics, and non-executable plans",
       ["plan", "codegraph-mcp", { projectRoot, harnessId: "codex", scope: "global" }],
     ]);
   }, { integrationRegistry });
+});
+
+test("project APIs expose explicit initialization, optimistic saves, and revision restore", async () => {
+  const calls = [];
+  const projectConfigStore = {
+    async inspect(projectRoot) {
+      calls.push(["inspect", projectRoot]);
+      return { schemaVersion: 1, projectRoot, initialized: false, overrides: {}, history: [] };
+    },
+    async initialize(projectRoot) {
+      calls.push(["initialize", projectRoot]);
+      return { schemaVersion: 1, projectRoot, initialized: true, revision: 0, overrides: {}, history: [] };
+    },
+    async save(input) {
+      calls.push(["save", input]);
+      return { schemaVersion: 1, ...input, initialized: true, revision: 1, history: [{ revision: 0 }] };
+    },
+    async restore(input) {
+      calls.push(["restore", input]);
+      return { schemaVersion: 1, projectRoot: input.projectRoot, initialized: true, revision: 2, overrides: {}, history: [] };
+    },
+  };
+  await withServer(async (baseUrl) => {
+    const projectRoot = tmpdir();
+    const inspected = await fetch(
+      `${baseUrl}/api/projects/current?projectRoot=${encodeURIComponent(projectRoot)}`,
+    );
+    assert.equal(inspected.status, 200);
+    assert.equal((await inspected.json()).initialized, false);
+
+    const initialized = await fetch(`${baseUrl}/api/projects/initialize`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({ projectRoot }),
+    });
+    assert.equal(initialized.status, 200);
+
+    const saved = await fetch(`${baseUrl}/api/projects/current`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({ projectRoot, expectedRevision: 0, overrides: { modeId: "balanced" } }),
+    });
+    assert.equal(saved.status, 200);
+    assert.equal((await saved.json()).revision, 1);
+
+    const restored = await fetch(`${baseUrl}/api/projects/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({ projectRoot, expectedRevision: 1, revision: 0 }),
+    });
+    assert.equal(restored.status, 200);
+
+    const rejected = await fetch(`${baseUrl}/api/projects/initialize`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://attacker.example" },
+      body: JSON.stringify({ projectRoot }),
+    });
+    assert.equal(rejected.status, 403);
+    assert.deepEqual(calls, [
+      ["inspect", projectRoot],
+      ["initialize", projectRoot],
+      ["save", { projectRoot, expectedRevision: 0, overrides: { modeId: "balanced" } }],
+      ["restore", { projectRoot, expectedRevision: 1, revision: 0 }],
+    ]);
+  }, { projectConfigStore });
 });
 
 test("workflow core APIs expose compatibility and protect explicit diagnosis", async () => {
@@ -730,6 +800,72 @@ test("activation API validates and writes edited Skill content with server-deriv
   }
 });
 
+test("activation binds a server-verified project revision and rejects stale project context", async () => {
+  const skillsDir = await mkdtemp(join(tmpdir(), "agent-workflow-api-project-binding-"));
+  const projectRoot = tmpdir();
+  const project = {
+    initialized: true,
+    projectRoot,
+    projectId: "project-1",
+    revision: 4,
+    configSha256: "c".repeat(64),
+    overrides: { modeId: "overnight" },
+    history: [],
+  };
+  const projectConfigStore = {
+    async inspect(input) {
+      assert.equal(input, projectRoot);
+      return project;
+    },
+  };
+  try {
+    await withServer(async (baseUrl) => {
+      const activate = (configSha256) => fetch(`${baseUrl}/api/activate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          profile: CODEX_OVERNIGHT_CLAUDE_PROFILE,
+          projectContext: { projectRoot, expectedRevision: 4, configSha256 },
+        }),
+      });
+      const stale = await activate("d".repeat(64));
+      assert.equal(stale.status, 409);
+      assert.equal((await stale.json()).error, "project.binding_stale");
+
+      const mismatchedProfile = await fetch(`${baseUrl}/api/activate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          profile: {
+            ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
+            mode: { id: "balanced", version: "1.0.0" },
+          },
+          projectContext: {
+            projectRoot,
+            expectedRevision: 4,
+            configSha256: project.configSha256,
+          },
+        }),
+      });
+      assert.equal(mismatchedProfile.status, 409);
+      assert.equal((await mismatchedProfile.json()).error, "project.profile_mismatch");
+
+      const response = await activate(project.configSha256);
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.deepEqual(body.status.active.projectBinding, {
+        projectId: "project-1",
+        projectRevision: 4,
+        projectConfigSha256: "c".repeat(64),
+      });
+      const history = await (await fetch(`${baseUrl}/api/history`)).json();
+      assert.deepEqual(history.entries[0].projectBinding, body.status.active.projectBinding);
+    }, { skillsDir, projectConfigStore });
+  } finally {
+    await rm(skillsDir, { recursive: true, force: true });
+  }
+});
+
 test("Interactive API imports existing roles and still requires explicit overwrite for a replacement preset", async () => {
   const codexHome = await mkdtemp(join(tmpdir(), "agent-workflow-api-interactive-"));
   const skillsDir = join(codexHome, "skills");
@@ -1003,6 +1139,64 @@ test("history API exposes diffs and restores a selected immutable snapshot", asy
   } finally {
     await rm(skillsDir, { recursive: true, force: true });
   }
+});
+
+test("activity API groups runtime coordination under its activation snapshot", async () => {
+  const entry = {
+    historyId: "activation-1",
+    action: "activate",
+    recordedAt: "2026-09-01T00:00:00.000Z",
+    activatedAt: "2026-09-01T00:00:00.000Z",
+    variantId: "balanced-variant",
+    mode: { id: "balanced", version: "1.0.0" },
+    profileId: "balanced-profile",
+    mainAgentId: "codex",
+    targetAdapterId: "claude-code",
+    includedAgentIds: ["claude-code"],
+    contentSha256: "a".repeat(64),
+  };
+  const store = {
+    async history() {
+      return { available: true, active: null, entries: [entry], corruptEntries: 0 };
+    },
+    async historyDetail(historyId) {
+      assert.equal(historyId, entry.historyId);
+      return {
+        entry,
+        active: null,
+        fieldChanges: [],
+        diff: { available: true, summary: { added: 0, removed: 0 }, lines: [] },
+      };
+    },
+  };
+  const balancedRuntime = {
+    async listRuns() {
+      return [{
+        runId: "run-1",
+        activationId: entry.historyId,
+        createdAt: "2026-09-01T00:01:00.000Z",
+        state: "review_pending",
+        adapterId: "claude-code",
+        coordination: { eventCount: 3 },
+      }];
+    },
+  };
+  const overnightRuntime = { async listRuns() { return []; } };
+
+  await withServer(async (baseUrl) => {
+    const activityResponse = await fetch(`${baseUrl}/api/activity`);
+    assert.equal(activityResponse.status, 200);
+    const activity = await activityResponse.json();
+    assert.equal(activity.entries[0].runs[0].runId, "run-1");
+    assert.equal(activity.entries[0].runs[0].association.source, "explicit");
+    assert.equal(activity.activitySummary.linkedRuns, 1);
+
+    const detailResponse = await fetch(`${baseUrl}/api/activity/${entry.historyId}`);
+    assert.equal(detailResponse.status, 200);
+    const detail = await detailResponse.json();
+    assert.equal(detail.runs.length, 1);
+    assert.equal(detail.runs[0].association.activationId, entry.historyId);
+  }, { store, balancedRuntime, overnightRuntime });
 });
 
 test("history restore rejects cross-origin requests", async () => {

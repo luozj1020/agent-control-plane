@@ -12,6 +12,16 @@ function safeRelativePath(value: string): boolean {
   return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
+function sameProjectBinding(
+  left: EffectiveSkillVariant["projectBinding"],
+  right: ManagedSkillState["projectBinding"],
+): boolean {
+  if (left == null || right == null) return left == null && right == null;
+  return left.projectId === right.projectId &&
+    left.projectRevision === right.projectRevision &&
+    left.projectConfigSha256 === right.projectConfigSha256;
+}
+
 export function planSkillActivation(
   desired: EffectiveSkillVariant,
   installed: readonly ManagedSkillState[],
@@ -51,6 +61,7 @@ export function planSkillActivation(
   const unchanged =
     current?.active === true &&
     current.contentFingerprint === desired.contentFingerprint &&
+    sameProjectBinding(desired.projectBinding, current.projectBinding) &&
     activeOthers.length === 0;
   if (unchanged) {
     return {

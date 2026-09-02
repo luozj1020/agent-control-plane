@@ -31,7 +31,13 @@ const BUILTIN_MANIFESTS = Object.freeze([
     summary: "本地代码索引、符号检索与调用链分析。项目索引由用户明确初始化。",
     capabilities: Object.freeze(["code-search", "call-graph", "impact-analysis"]),
     discovery: Object.freeze({ command: "codegraph", versionArgs: Object.freeze(["--version"]) }),
-    projectMarker: ".codegraph",
+    project: Object.freeze({
+      marker: ".codegraph",
+      probe: Object.freeze({
+        args: Object.freeze(["status", "{projectRoot}", "-j"]),
+        parser: "codegraph-status-v1",
+      }),
+    }),
     permissions: Object.freeze({ filesystem: "repository-read", network: "install-only" }),
     harnessSupport: Object.freeze([
       Object.freeze({ id: "codex", displayName: "Codex", support: "cli-and-mcp" }),
@@ -49,7 +55,13 @@ const BUILTIN_MANIFESTS = Object.freeze([
     summary: "将已安装的 CodeGraph 投影到所选 Harness 的 MCP 配置。",
     capabilities: Object.freeze(["mcp-tools", "code-search", "call-graph"]),
     discovery: Object.freeze({ command: "codegraph", versionArgs: Object.freeze(["--version"]) }),
-    projectMarker: ".codegraph",
+    project: Object.freeze({
+      marker: ".codegraph",
+      probe: Object.freeze({
+        args: Object.freeze(["status", "{projectRoot}", "-j"]),
+        parser: "codegraph-status-v1",
+      }),
+    }),
     permissions: Object.freeze({ filesystem: "harness-config-write", network: "none" }),
     harnessSupport: Object.freeze([
       Object.freeze({ id: "codex", displayName: "Codex", support: "native-mcp-config" }),
@@ -67,7 +79,7 @@ const BUILTIN_MANIFESTS = Object.freeze([
     summary: "统一登记 MCP 命令、参数和环境变量名称，再由 Harness Adapter 生成配置。",
     capabilities: Object.freeze(["mcp-registration", "harness-projection"]),
     discovery: null,
-    projectMarker: null,
+    project: null,
     permissions: Object.freeze({ filesystem: "harness-config-write", network: "server-defined" }),
     harnessSupport: Object.freeze([
       Object.freeze({ id: "codex", displayName: "Codex", support: "projection-reserved" }),
@@ -127,6 +139,14 @@ function publicManifest(manifest) {
     displayName: manifest.displayName,
     summary: manifest.summary,
     capabilities: [...manifest.capabilities],
+    project: manifest.project
+      ? {
+          marker: manifest.project.marker,
+          probe: manifest.project.probe
+            ? { parser: manifest.project.probe.parser }
+            : null,
+        }
+      : null,
     permissions: { ...manifest.permissions },
     harnessSupport: manifest.harnessSupport.map((entry) => ({ ...entry })),
   };
@@ -181,13 +201,24 @@ function validateManifest(manifest, seenIds) {
       fail(`Integration Manifest '${manifest.id}' has invalid discovery metadata.`);
     }
   }
-  if (
-    manifest.projectMarker !== null &&
-    (typeof manifest.projectMarker !== "string" ||
-      !/^[A-Za-z0-9._-]+$/.test(manifest.projectMarker) ||
-      manifest.projectMarker === "..")
-  ) {
-    fail(`Integration Manifest '${manifest.id}' has an unsafe projectMarker.`);
+  if (manifest.project !== null) {
+    if (
+      !manifest.project ||
+      typeof manifest.project.marker !== "string" ||
+      !/^[A-Za-z0-9._-]+$/.test(manifest.project.marker) ||
+      manifest.project.marker === ".."
+    ) {
+      fail(`Integration Manifest '${manifest.id}' has unsafe project metadata.`);
+    }
+    const probe = manifest.project.probe;
+    if (
+      probe !== null &&
+      (!probe || probe.parser !== "codegraph-status-v1" || !Array.isArray(probe.args) ||
+        probe.args.some((value) => typeof value !== "string") ||
+        !probe.args.includes("{projectRoot}"))
+    ) {
+      fail(`Integration Manifest '${manifest.id}' has invalid project probe metadata.`);
+    }
   }
   if (!manifest.permissions || typeof manifest.permissions !== "object") {
     fail(`Integration Manifest '${manifest.id}' requires permissions metadata.`);
@@ -221,8 +252,9 @@ async function findExecutable(command, environment) {
   return null;
 }
 
-async function projectMarkerState(projectRoot, marker) {
-  if (!marker) return { configured: false, marker: null, markerState: "not-applicable" };
+async function projectMarkerState(projectRoot, project) {
+  const marker = project?.marker ?? null;
+  if (!marker) return { configured: null, marker: null, markerState: "not-applicable" };
   try {
     const metadata = await lstat(join(projectRoot, marker));
     if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
@@ -265,17 +297,147 @@ async function validateProjectRoot(value, fallback) {
   return projectRoot;
 }
 
-function healthFor(manifest, executable, marker) {
-  if (manifest.id === "custom-mcp-server") return "registration-required";
-  if (!executable) return "not-installed";
-  if (marker.markerState === "unsafe") return "blocked";
-  if (manifest.id === "codegraph-cli") return marker.configured ? "ready" : "project-setup-required";
-  if (manifest.id === "codegraph-mcp") return marker.configured ? "ready-to-activate" : "project-setup-required";
-  return "available";
+function pendingChangeCount(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const counts = ["added", "modified", "removed"].map((key) => value[key]);
+  if (counts.some((entry) => !Number.isSafeInteger(entry) || entry < 0)) return null;
+  return counts.reduce((sum, entry) => sum + entry, 0);
 }
 
-function check(id, label, status, detail) {
-  return { id, label, status, detail };
+function codegraphProjectStatus(result, projectRoot, marker) {
+  if (result.exitCode !== 0) {
+    return {
+      health: "unhealthy",
+      initialized: null,
+      verified: false,
+      identityMatches: null,
+      pendingChanges: null,
+      reindexRecommended: null,
+      reason: result.timedOut ? "probe-timeout" : "probe-failed",
+    };
+  }
+  let value;
+  try {
+    value = JSON.parse(result.stdout);
+  } catch {
+    return {
+      health: "unhealthy",
+      initialized: null,
+      verified: false,
+      identityMatches: null,
+      pendingChanges: null,
+      reindexRecommended: null,
+      reason: "invalid-status-json",
+    };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      health: "unhealthy",
+      initialized: null,
+      verified: false,
+      identityMatches: null,
+      pendingChanges: null,
+      reindexRecommended: null,
+      reason: "invalid-status-shape",
+    };
+  }
+  if (value.initialized !== true) {
+    return {
+      health: "not-initialized",
+      initialized: false,
+      verified: true,
+      identityMatches: null,
+      pendingChanges: pendingChangeCount(value.pendingChanges),
+      reindexRecommended: value.index?.reindexRecommended === true,
+      reason: "probe-reports-uninitialized",
+    };
+  }
+  const observedPath = typeof value.projectPath === "string" && isAbsolute(value.projectPath)
+    ? resolve(value.projectPath)
+    : null;
+  const identityMatches = observedPath === null ? null : observedPath === projectRoot;
+  const pendingChanges = pendingChangeCount(value.pendingChanges);
+  const reindexRecommended = typeof value.index?.reindexRecommended === "boolean"
+    ? value.index.reindexRecommended
+    : null;
+  if (identityMatches !== true || value.worktreeMismatch === true) {
+    return {
+      health: identityMatches === false || value.worktreeMismatch === true
+        ? "identity-mismatch"
+        : "identity-unverified",
+      initialized: true,
+      verified: false,
+      identityMatches,
+      pendingChanges,
+      reindexRecommended,
+      reason: value.worktreeMismatch === true ? "worktree-mismatch" : "project-identity-unavailable",
+    };
+  }
+  return {
+    health: pendingChanges === null && reindexRecommended === null
+      ? "ready-with-unknown-drift"
+      : pendingChanges > 0 || reindexRecommended === true ? "sync-required" : "ready",
+    initialized: true,
+    verified: true,
+    identityMatches: true,
+    pendingChanges,
+    reindexRecommended,
+    reason: reindexRecommended === true
+      ? "reindex-recommended"
+      : pendingChanges === null
+      ? "pending-changes-unavailable"
+      : pendingChanges > 0 ? "pending-changes" : null,
+    marker,
+  };
+}
+
+async function inspectProject(manifest, projectRoot, executable, commandRunner, environment, runProbe) {
+  const marker = await projectMarkerState(projectRoot, manifest.project);
+  const base = {
+    applicable: Boolean(manifest.project),
+    marker: marker.marker,
+    markerState: marker.markerState,
+    initialized: marker.markerState === "missing" || marker.markerState === "unsafe" ? false : null,
+    verified: false,
+    identityMatches: null,
+    pendingChanges: null,
+    reindexRecommended: null,
+    reason: null,
+  };
+  if (!manifest.project) return { ...base, health: "not-applicable" };
+  if (marker.markerState === "unsafe") return { ...base, health: "blocked", reason: "unsafe-marker" };
+  if (marker.markerState === "missing") return { ...base, health: "not-initialized", reason: "marker-missing" };
+  if (marker.markerState !== "directory") return { ...base, health: "unavailable", reason: "marker-unavailable" };
+  if (!executable) return { ...base, health: "verification-unavailable", reason: "global-tool-missing" };
+  if (!runProbe || !manifest.project.probe) return { ...base, health: "marker-present", reason: "probe-not-run" };
+  const args = manifest.project.probe.args.map((value) =>
+    value === "{projectRoot}" ? projectRoot : value
+  );
+  const result = await commandRunner(executable, args, { cwd: projectRoot, environment });
+  if (manifest.project.probe.parser === "codegraph-status-v1") {
+    return {
+      ...base,
+      ...codegraphProjectStatus(result, projectRoot, marker.marker),
+    };
+  }
+  return { ...base, health: "unsupported", reason: "probe-parser-unsupported" };
+}
+
+function healthFor(manifest, global, project) {
+  if (manifest.id === "custom-mcp-server") return "registration-required";
+  if (global.health === "not-installed") return "not-installed";
+  if (global.health !== "available") return "unhealthy";
+  if (!project.applicable) return "available";
+  if (["blocked", "identity-mismatch"].includes(project.health)) return "blocked";
+  if (project.health === "not-initialized") return "project-setup-required";
+  if (project.health === "sync-required") return "project-sync-required";
+  if (project.health !== "ready") return "project-unhealthy";
+  if (manifest.id === "codegraph-mcp") return "ready-to-activate";
+  return "ready";
+}
+
+function check(id, label, status, detail, layer = "system") {
+  return { id, label, status, detail, layer };
 }
 
 function requireHarness(value) {
@@ -317,7 +479,6 @@ export function createIntegrationRegistry(options = {}) {
     const executable = manifest.discovery
       ? await findExecutable(manifest.discovery.command, environment)
       : null;
-    const marker = await projectMarkerState(projectRoot, manifest.projectMarker);
     let version = null;
     let commandHealthy = false;
     let timedOut = false;
@@ -332,20 +493,51 @@ export function createIntegrationRegistry(options = {}) {
     } else if (executable) {
       commandHealthy = true;
     }
-    const health = healthFor(manifest, executable, marker);
+    const global = {
+      applicable: Boolean(manifest.discovery),
+      health: manifest.id === "custom-mcp-server"
+        ? "registration-required"
+        : !executable ? "not-installed" : commandHealthy ? "available" : "unhealthy",
+      available: manifest.id === "custom-mcp-server" ? null : Boolean(executable && commandHealthy),
+      command: manifest.discovery?.command ?? null,
+      commandHealthy: manifest.discovery ? commandHealthy : null,
+      version,
+      timedOut,
+      reason: manifest.id === "custom-mcp-server"
+        ? "definition-required"
+        : !executable ? "command-not-found" : commandHealthy ? null : timedOut ? "version-timeout" : "version-failed",
+    };
+    const project = await inspectProject(
+      manifest,
+      projectRoot,
+      executable,
+      commandRunner,
+      commandEnvironment,
+      runVersion,
+    );
+    const health = healthFor(manifest, global, project);
     return {
       manifest: publicManifest(manifest),
       status: {
-        health:
-          health === "blocked"
-            ? health
-            : executable && runVersion && !commandHealthy ? "unhealthy" : health,
+        health,
+        global,
+        project,
+        effective: {
+          health,
+          ready: health === "ready" || health === "available",
+          blockingLayer: ["not-installed", "unhealthy", "registration-required"].includes(health)
+            ? "global"
+            : ["project-setup-required", "project-sync-required", "project-unhealthy", "blocked"].includes(health)
+              ? "project"
+              : health === "ready-to-activate" ? "harness" : null,
+        },
+        // Compatibility aliases for clients written against Manifest schema v1.
         installed: Boolean(executable),
         commandHealthy,
         version,
-        projectConfigured: marker.configured,
-        projectMarker: marker.marker,
-        projectMarkerState: marker.markerState,
+        projectConfigured: project.markerState === "directory",
+        projectMarker: project.marker,
+        projectMarkerState: project.markerState,
         timedOut,
       },
     };
@@ -369,10 +561,28 @@ export function createIntegrationRegistry(options = {}) {
       const projectRoot = await validateProjectRoot(input.projectRoot, defaultProjectRoot);
       const integrations = [];
       for (const manifest of manifests) integrations.push(await inspect(manifest, projectRoot));
+      const summary = {
+        total: integrations.length,
+        globalAvailable: integrations.filter((entry) => entry.status.global.available === true).length,
+        globalUnavailable: integrations.filter((entry) => entry.status.global.available === false).length,
+        globalUnknown: integrations.filter((entry) => entry.status.global.available === null).length,
+        projectInitialized: new Set(integrations.filter((entry) =>
+          entry.status.project.applicable && entry.status.project.initialized === true &&
+          entry.status.project.verified === true
+        ).map((entry) => entry.status.project.marker)).size,
+        projectNotInitialized: new Set(integrations.filter((entry) =>
+          entry.status.project.applicable && entry.status.project.initialized === false
+        ).map((entry) => entry.status.project.marker)).size,
+        projectUnknown: new Set(integrations.filter((entry) =>
+          entry.status.project.applicable && entry.status.project.initialized === null
+        ).map((entry) => entry.status.project.marker)).size,
+        ready: integrations.filter((entry) => entry.status.effective.ready).length,
+      };
       return {
         schemaVersion: MANIFEST_SCHEMA_VERSION,
         projectRoot,
         integrations,
+        summary,
         safety: {
           installExecutionEnabled: false,
           plansRequireConfirmation: true,
@@ -391,6 +601,7 @@ export function createIntegrationRegistry(options = {}) {
           "Integration Manifest",
           "passed",
           `${manifest.id}@${manifest.manifestVersion}`,
+          "system",
         ),
       ];
       if (manifest.discovery) {
@@ -399,6 +610,7 @@ export function createIntegrationRegistry(options = {}) {
           "本地命令",
           inspected.status.installed ? "passed" : "failed",
           inspected.status.installed ? `${manifest.discovery.command} 可执行` : `${manifest.discovery.command} 未找到`,
+          "global",
         ));
         checks.push(check(
           "version",
@@ -407,20 +619,47 @@ export function createIntegrationRegistry(options = {}) {
             ? "passed"
             : inspected.status.commandHealthy ? "warning" : inspected.status.installed ? "failed" : "skipped",
           inspected.status.version ?? (inspected.status.timedOut ? "诊断超时" : "版本不可见"),
+          "global",
         ));
       } else {
-        checks.push(check("definition", "Server 定义", "pending", "等待登记命令、argv 与环境变量名称"));
+        checks.push(check("definition", "Server 定义", "pending", "等待登记命令、argv 与环境变量名称", "global"));
       }
-      if (manifest.projectMarker) {
+      if (manifest.project) {
+        const project = inspected.status.project;
         checks.push(check(
           "project-marker",
-          "项目配置",
-          inspected.status.projectConfigured ? "passed" : inspected.status.projectMarkerState === "unsafe" ? "failed" : "pending",
-          inspected.status.projectConfigured
-            ? `${manifest.projectMarker}/ 已存在`
-            : inspected.status.projectMarkerState === "unsafe"
-              ? `${manifest.projectMarker} 不是安全目录`
-              : `尚未初始化 ${manifest.projectMarker}/`,
+          "项目标记",
+          project.markerState === "directory" ? "passed" : project.markerState === "unsafe" ? "failed" : "pending",
+          project.markerState === "directory"
+            ? `${project.marker}/ 已存在`
+            : project.markerState === "unsafe"
+              ? `${project.marker} 不是安全目录`
+              : `尚未创建 ${project.marker}/`,
+          "project",
+        ));
+        const projectCheckStatus = project.health === "ready"
+          ? "passed"
+          : project.health === "sync-required" || project.health === "ready-with-unknown-drift"
+            ? "warning"
+            : project.health === "not-initialized"
+              ? "pending"
+              : project.health === "verification-unavailable" ? "skipped" : "failed";
+        checks.push(check(
+          "project-probe",
+          "项目初始化与身份",
+          projectCheckStatus,
+          project.health === "ready"
+            ? "初始化完成，索引身份与当前项目一致"
+            : project.health === "sync-required"
+              ? project.reindexRecommended === true
+                ? "索引身份有效，当前工具建议重建索引"
+                : `索引身份有效，存在 ${project.pendingChanges} 项待同步变更`
+              : project.health === "not-initialized"
+                ? "当前项目尚未初始化"
+                : project.health === "verification-unavailable"
+                  ? "全局工具不可用，无法验证项目初始化状态"
+                : `项目探针：${project.health}${project.reason ? ` (${project.reason})` : ""}`,
+          "project",
         ));
       }
       return {
@@ -428,6 +667,9 @@ export function createIntegrationRegistry(options = {}) {
         integrationId: id,
         projectRoot,
         health: inspected.status.health,
+        global: inspected.status.global,
+        project: inspected.status.project,
+        effective: inspected.status.effective,
         checks,
         testedAt: new Date().toISOString(),
         contentCaptured: false,
@@ -439,20 +681,20 @@ export function createIntegrationRegistry(options = {}) {
       const projectRoot = await validateProjectRoot(input.projectRoot, defaultProjectRoot);
       const harnessId = requireHarness(input.harnessId);
       const scope = requireScope(input.scope);
-      const inspected = await inspect(manifest, projectRoot, false);
+      const inspected = await inspect(manifest, projectRoot);
       const steps = [];
       if (inspected.status.projectMarkerState === "unsafe") {
         steps.push({
           id: "unsafe-project-marker",
           kind: "blocked",
-          summary: `${manifest.projectMarker} 不是安全目录；拒绝生成任何写入命令。`,
+          summary: `${manifest.project?.marker ?? "项目标记"} 不是安全目录；拒绝生成任何写入命令。`,
           cwd: projectRoot,
           argv: null,
           mutates: [],
           requiresNetwork: false,
         });
       } else if (id === "codegraph-cli") {
-        if (!inspected.status.installed) {
+        if (inspected.status.global.available !== true) {
           steps.push({
             id: "install-cli",
             kind: "manual",
@@ -462,7 +704,7 @@ export function createIntegrationRegistry(options = {}) {
             mutates: ["system-toolchain"],
             requiresNetwork: true,
           });
-        } else if (!inspected.status.projectConfigured) {
+        } else if (inspected.status.project.health === "not-initialized") {
           steps.push({
             id: "initialize-index",
             kind: "argv",
@@ -470,6 +712,16 @@ export function createIntegrationRegistry(options = {}) {
             cwd: projectRoot,
             argv: [manifest.discovery.command, "init", projectRoot],
             mutates: [join(projectRoot, ".codegraph")],
+            requiresNetwork: false,
+          });
+        } else if (inspected.status.project.health !== "ready" && inspected.status.project.health !== "sync-required") {
+          steps.push({
+            id: "project-status-blocked",
+            kind: "blocked",
+            summary: "当前项目索引存在，但初始化或项目身份未通过验证。请先运行只读诊断。",
+            cwd: projectRoot,
+            argv: null,
+            mutates: [],
             requiresNetwork: false,
           });
         } else {
@@ -484,11 +736,33 @@ export function createIntegrationRegistry(options = {}) {
           });
         }
       } else if (id === "codegraph-mcp") {
-        if (!inspected.status.installed) {
+        if (inspected.status.global.available !== true) {
           steps.push({
             id: "dependency",
             kind: "blocked",
             summary: "需要先安装 CodeGraph CLI。",
+            cwd: projectRoot,
+            argv: null,
+            mutates: [],
+            requiresNetwork: false,
+          });
+        } else if (inspected.status.project.health === "not-initialized") {
+          steps.push({
+            id: "project-dependency",
+            kind: "blocked",
+            summary: "需要先在当前项目初始化 CodeGraph 索引。",
+            cwd: projectRoot,
+            argv: null,
+            mutates: [],
+            requiresNetwork: false,
+          });
+        } else if (inspected.status.project.health !== "ready") {
+          steps.push({
+            id: "project-not-ready",
+            kind: "blocked",
+            summary: inspected.status.project.health === "sync-required"
+              ? "当前项目索引待同步或重建；完成后再激活 CodeGraph MCP。"
+              : "当前项目索引状态无法验证；请先运行只读诊断。",
             cwd: projectRoot,
             argv: null,
             mutates: [],
@@ -551,6 +825,11 @@ export function createIntegrationRegistry(options = {}) {
         projectRoot,
         harnessId,
         scope,
+        currentStatus: {
+          global: inspected.status.global,
+          project: inspected.status.project,
+          effective: inspected.status.effective,
+        },
         executable: false,
         requiresConfirmation: true,
         rollbackRequired: steps.some((step) => step.mutates.length > 0),

@@ -154,6 +154,40 @@ test("activating the identical mode is unchanged and creates no duplicate histor
   });
 });
 
+test("project binding changes create a distinct activation and survive rollback", async () => {
+  await withTempDirectory(async (skillsDir) => {
+    const store = testStore(skillsDir);
+    const variant = resolveMode("overnight");
+    const firstBinding = {
+      projectId: "project-1",
+      projectRevision: 1,
+      projectConfigSha256: "a".repeat(64),
+    };
+    const secondBinding = {
+      ...firstBinding,
+      projectRevision: 2,
+      projectConfigSha256: "b".repeat(64),
+    };
+    await store.activate({ ...variant, projectBinding: firstBinding });
+    const changed = await store.activate({ ...variant, projectBinding: secondBinding });
+    assert.equal(changed.changed, true);
+    assert.deepEqual(changed.status.active.projectBinding, secondBinding);
+    const history = await store.history();
+    assert.equal(history.entries.length, 2);
+    assert.ok(history.entries.some((entry) =>
+      entry.projectBinding?.projectRevision === secondBinding.projectRevision &&
+      entry.projectBinding?.projectConfigSha256 === secondBinding.projectConfigSha256
+    ));
+    assert.ok(history.entries.some((entry) =>
+      entry.projectBinding?.projectRevision === firstBinding.projectRevision &&
+      entry.projectBinding?.projectConfigSha256 === firstBinding.projectConfigSha256
+    ));
+
+    const restored = await store.rollback(changed.backupId);
+    assert.deepEqual(restored.status.active.projectBinding, firstBinding);
+  });
+});
+
 test("switching creates a recoverable backup and rollback preserves both versions", async () => {
   await withTempDirectory(async (skillsDir) => {
     const store = testStore(skillsDir);

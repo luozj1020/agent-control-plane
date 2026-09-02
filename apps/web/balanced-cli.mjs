@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { BalancedRuntimeError, createBalancedRuntime } from "./balanced-runtime.mjs";
 import { OvernightRuntimeError, createOvernightRuntime } from "./overnight-runtime.mjs";
 import { createWorkflowCoreAdapter } from "./workflow-core-adapter.mjs";
+import { discoverRuntimeActivation } from "./runtime-activation.mjs";
 import {
   TaskCardError,
   createTaskCardTemplate,
@@ -93,11 +94,11 @@ function usage() {
     "Agent Control Plane Runtime",
     "",
     "Commands:",
-    "  agent-control-plane balanced run --task TASK.json --worktree PATH --adapter ID [budget/environment options]",
+    "  agent-control-plane balanced run --task TASK.json --worktree PATH --adapter ID [budget/environment/activation options]",
     "  agent-control-plane balanced review --run RUN_DIR --decision accept|revise|stop [--revision TASK.json]",
     "  agent-control-plane balanced status --run RUN_DIR",
     "  agent-control-plane balanced list",
-    "  agent-control-plane overnight submit --task TASK.json --worktree PATH --adapter ID --strategy convergent|continuous-improvement [--wake-adapter ID] [--execution-env auto|host|sandbox --proxy-mode direct|inherit]",
+    "  agent-control-plane overnight submit --task TASK.json --worktree PATH --adapter ID --strategy convergent|continuous-improvement [--wake-adapter ID] [--activation-id ID --skill-sha256 HASH] [--execution-env auto|host|sandbox --proxy-mode direct|inherit]",
     "  agent-control-plane overnight review --run RUN_DIR --decision accept|revise|continue|stop [--revision TASK.json] [--next NEXT.json]",
     "  agent-control-plane overnight interrupt --run RUN_DIR",
     "  agent-control-plane overnight status --run RUN_DIR",
@@ -213,15 +214,20 @@ async function runOvernightCommand(command, options) {
   if (command === "submit") {
     requireAllowedOptions(options, new Set([
       "task", "worktree", "adapter", "strategy", "wake-adapter",
+      "activation-id", "skill-sha256",
       "execution-env", "proxy-mode", "environment-isolation", "network-diagnostics",
     ]));
     if (!options.worktree || !options.adapter || !options.strategy) {
       throw cliError("cli.missing_argument", "--worktree, --adapter, and --strategy are required.");
     }
+    const active = await discoverRuntimeActivation("overnight");
     const created = await runtime.createRun({
       task: await readTask(options.task, "Task"),
       worktree: options.worktree,
       adapterId: options.adapter,
+      activationId: options["activation-id"] ?? active.activationId,
+      effectiveSkillSha256: options["skill-sha256"] ?? active.effectiveSkillSha256,
+      projectBinding: active.projectBinding,
       strategy: options.strategy,
       wakeAdapterId: options["wake-adapter"] ?? "durable-file",
       runtimeEnvironment: {
@@ -336,6 +342,8 @@ async function main(argv) {
       "proxy-mode",
       "environment-isolation",
       "network-diagnostics",
+      "activation-id",
+      "skill-sha256",
       // Accepted but ignored so previously activated Skills do not regain a Token cap.
       "max-total-tokens",
     ]));
@@ -348,10 +356,14 @@ async function main(argv) {
     if (options["max-total-tokens"] !== undefined) {
       integerOption(options, "max-total-tokens");
     }
+    const active = await discoverRuntimeActivation("balanced");
     result = await runtime.run({
       task: await readTask(options.task, "Task"),
       worktree: options.worktree,
       adapterId: options.adapter,
+      activationId: options["activation-id"] ?? active.activationId,
+      effectiveSkillSha256: options["skill-sha256"] ?? active.effectiveSkillSha256,
+      projectBinding: active.projectBinding,
       policyRef: options.policy ?? "balanced-default@1.0.0",
       budget: {
         mainReviewCalls: integerOption(options, "main-review-calls"),

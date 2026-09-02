@@ -39,7 +39,19 @@ test("registry discovers CodeGraph and reports a safe project marker without exp
           cwd: options.cwd,
           privateValue: options.environment.PRIVATE_VALUE,
         });
-        return { exitCode: 0, stdout: "1.2.0\nraw-output-must-not-return", stderr: "", timedOut: false };
+        return {
+          exitCode: 0,
+          stdout: args[0] === "--version"
+            ? "1.2.0\nraw-output-must-not-return"
+            : JSON.stringify({
+                initialized: true,
+                projectPath: project,
+                worktreeMismatch: false,
+                pendingChanges: { added: 0, modified: 0, removed: 0 },
+              }),
+          stderr: "",
+          timedOut: false,
+        };
       },
     });
 
@@ -51,6 +63,13 @@ test("registry discovers CodeGraph and reports a safe project marker without exp
     assert.equal(codegraph.status.installed, true);
     assert.equal(codegraph.status.version, "1.2.0");
     assert.equal(codegraph.status.projectConfigured, true);
+    assert.equal(codegraph.status.global.health, "available");
+    assert.equal(codegraph.status.project.health, "ready");
+    assert.equal(codegraph.status.project.initialized, true);
+    assert.equal(codegraph.status.project.verified, true);
+    assert.equal(codegraph.status.effective.ready, true);
+    assert.equal(result.summary.globalAvailable, 2);
+    assert.equal(result.summary.projectInitialized, 1);
     assert.deepEqual(calls[0], {
       executable: command,
       args: ["--version"],
@@ -63,6 +82,58 @@ test("registry discovers CodeGraph and reports a safe project marker without exp
     assert.equal(diagnostic.health, "ready");
     assert.equal(diagnostic.contentCaptured, false);
     assert.ok(diagnostic.checks.every((entry) => entry.status === "passed"));
+    assert.ok(diagnostic.checks.some((entry) => entry.layer === "global"));
+    assert.ok(diagnostic.checks.some((entry) => entry.layer === "project"));
+  });
+});
+
+test("registry distinguishes project drift, missing initialization, and unavailable global tools", async () => {
+  await withFixture(async ({ bin, project }) => {
+    await mkdir(join(project, ".codegraph"));
+    const registry = createIntegrationRegistry({
+      defaultProjectRoot: project,
+      environment: { PATH: bin },
+      async commandRunner(_executable, args) {
+        return {
+          exitCode: 0,
+          stdout: args[0] === "--version"
+            ? "1.2.0\n"
+            : JSON.stringify({
+                initialized: true,
+                projectPath: project,
+                worktreeMismatch: false,
+                pendingChanges: { added: 1, modified: 2, removed: 0 },
+              }),
+          stderr: "",
+          timedOut: false,
+        };
+      },
+    });
+    const result = await registry.list();
+    const codegraph = result.integrations.find((entry) => entry.manifest.id === "codegraph-cli");
+    assert.equal(codegraph.status.health, "project-sync-required");
+    assert.equal(codegraph.status.project.health, "sync-required");
+    assert.equal(codegraph.status.project.pendingChanges, 3);
+    assert.equal(codegraph.status.effective.blockingLayer, "project");
+    assert.equal(result.summary.projectInitialized, 1);
+    assert.equal(result.summary.ready, 0);
+    const blockedMcpPlan = await registry.plan("codegraph-mcp", { projectRoot: project });
+    assert.equal(blockedMcpPlan.steps[0].id, "project-not-ready");
+    assert.equal(blockedMcpPlan.steps[0].kind, "blocked");
+    assert.equal(blockedMcpPlan.steps[0].argv, null);
+
+    const unavailable = createIntegrationRegistry({
+      defaultProjectRoot: project,
+      environment: { PATH: join(project, "missing-bin") },
+    });
+    const unavailableResult = await unavailable.list();
+    const unavailableCodegraph = unavailableResult.integrations.find(
+      (entry) => entry.manifest.id === "codegraph-cli",
+    );
+    assert.equal(unavailableCodegraph.status.global.health, "not-installed");
+    assert.equal(unavailableCodegraph.status.project.health, "verification-unavailable");
+    assert.equal(unavailableCodegraph.status.project.initialized, null);
+    assert.equal(unavailableCodegraph.status.effective.blockingLayer, "global");
   });
 });
 
@@ -71,8 +142,21 @@ test("plans use argv arrays and remain non-executable for CodeGraph project and 
     const registry = createIntegrationRegistry({
       defaultProjectRoot: project,
       environment: { PATH: bin },
-      async commandRunner() {
-        return { exitCode: 0, stdout: "1.2.0\n", stderr: "", timedOut: false };
+      async commandRunner(_executable, args) {
+        return {
+          exitCode: 0,
+          stdout: args[0] === "--version"
+            ? "1.2.0\n"
+            : JSON.stringify({
+                initialized: true,
+                projectPath: project,
+                worktreeMismatch: false,
+                pendingChanges: { added: 0, modified: 0, removed: 0 },
+                index: { reindexRecommended: false },
+              }),
+          stderr: "",
+          timedOut: false,
+        };
       },
     });
 
@@ -87,6 +171,7 @@ test("plans use argv arrays and remain non-executable for CodeGraph project and 
     assert.deepEqual(projectPlan.steps[0].argv, ["codegraph", "init", project]);
     assert.deepEqual(projectPlan.steps[0].mutates, [join(project, ".codegraph")]);
 
+    await mkdir(join(project, ".codegraph"));
     const mcpPlan = await registry.plan("codegraph-mcp", {
       projectRoot: project,
       harnessId: "claude-code",
@@ -145,12 +230,14 @@ test("registry rejects malformed or duplicate Integration Manifests at startup",
     summary: "Valid manifest.",
     capabilities: [],
     discovery: null,
-    projectMarker: null,
+    project: null,
     permissions: {},
     harnessSupport: [],
   };
   assert.throws(
-    () => createIntegrationRegistry({ manifests: [{ ...base, projectMarker: "../unsafe" }] }),
+    () => createIntegrationRegistry({
+      manifests: [{ ...base, project: { marker: "../unsafe", probe: null } }],
+    }),
     (error) => error instanceof IntegrationRegistryError && error.code === "integration.manifest_invalid",
   );
   assert.throws(

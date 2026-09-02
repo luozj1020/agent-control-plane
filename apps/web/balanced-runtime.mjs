@@ -33,6 +33,7 @@ import {
   normalizeAdapterContainment,
 } from "./adapter-containment.mjs";
 import { normalizeRuntimeEnvironment } from "./runtime-environment.mjs";
+import { normalizeRuntimeActivation } from "./runtime-activation.mjs";
 import { resolveRuntimeProtocol } from "./workflow-runtime-protocol.mjs";
 import {
   TaskCardError,
@@ -603,6 +604,7 @@ export function createBalancedRuntime(options = {}) {
     );
     const budget = resolveBudget(catalog, input.budget);
     const runtimeEnvironment = normalizeRuntimeEnvironment(input.runtimeEnvironment);
+    const activation = normalizeRuntimeActivation(input, BalancedRuntimeError);
     const containment = normalizeAdapterContainment({
       filesystemIsolation: "post-run-only",
       ...adapter,
@@ -621,6 +623,7 @@ export function createBalancedRuntime(options = {}) {
       taskSha256: sha256(contractText),
       worktree,
       adapterId: adapter.id,
+      ...activation,
       runtimeEnvironment,
       containment,
       policyRef: policyReference(policy),

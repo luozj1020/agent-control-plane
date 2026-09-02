@@ -116,6 +116,8 @@ const elements = {
   historyMeta: document.querySelector("#history-meta"),
   historyPlaceholder: document.querySelector("#history-placeholder"),
   historyRefresh: document.querySelector("#history-refresh"),
+  historyRunList: document.querySelector("#history-run-list"),
+  historyRunSummary: document.querySelector("#history-run-summary"),
   historyRestore: document.querySelector("#history-restore"),
   historyRestoreNote: document.querySelector("#history-restore-note"),
   historySkillDiff: document.querySelector("#history-skill-diff"),
@@ -167,6 +169,7 @@ const elements = {
   issueList: document.querySelector("#issue-list"),
   mainAgent: document.querySelector("#main-agent"),
   modeGrid: document.querySelector("#mode-grid"),
+  modeSwitchNoteCopy: document.querySelector("#mode-switch-note-copy"),
   modeSwitchPolicy: document.querySelector("#mode-switch-policy"),
   overnightCompletionRule: document.querySelector("#overnight-completion-rule"),
   overnightConfig: document.querySelector("#overnight-config"),
@@ -175,9 +178,20 @@ const elements = {
   overnightPolicyVersion: document.querySelector("#overnight-policy-version"),
   overnightRunList: document.querySelector("#overnight-run-list"),
   overnightRuntimeSummary: document.querySelector("#overnight-runtime-summary"),
+  projectConfigCheck: document.querySelector("#project-config-check"),
+  projectConfigClear: document.querySelector("#project-config-clear"),
+  projectConfigHash: document.querySelector("#project-config-hash"),
+  projectConfigId: document.querySelector("#project-config-id"),
+  projectConfigInitialize: document.querySelector("#project-config-initialize"),
+  projectConfigRestore: document.querySelector("#project-config-restore"),
+  projectConfigRevision: document.querySelector("#project-config-revision"),
+  projectConfigRoot: document.querySelector("#project-config-root"),
+  projectConfigSave: document.querySelector("#project-config-save"),
+  projectConfigSource: document.querySelector("#project-config-source"),
+  projectConfigStatus: document.querySelector("#project-config-status"),
+  projectSkillAppendix: document.querySelector("#project-skill-appendix"),
   overnightScopeRule: document.querySelector("#overnight-scope-rule"),
   navConfiguration: document.querySelector("#nav-configuration"),
-  navCoordination: document.querySelector("#nav-coordination"),
   navHistory: document.querySelector("#nav-history"),
   navIntegrations: document.querySelector("#nav-integrations"),
   navTaskCard: document.querySelector("#nav-task-card"),
@@ -192,6 +206,8 @@ const elements = {
   runtimeDownstreamTokens: document.querySelector("#runtime-downstream-tokens"),
   runtimeEmpty: document.querySelector("#runtime-empty"),
   runtimeInput: document.querySelector("#runtime-input"),
+  runtimeLoadStatus: document.querySelector("#runtime-load-status"),
+  runtimeLoadStatusText: document.querySelector("#runtime-load-status-text"),
   runtimeLive: document.querySelector("#runtime-live"),
   runtimeLiveText: document.querySelector("#runtime-live-text"),
   runtimeLegendLane: document.querySelector("#runtime-legend-lane"),
@@ -255,6 +271,10 @@ const elements = {
   variantName: document.querySelector("#variant-name"),
 };
 
+// The temporal detail belongs to the unified activity page even though its
+// markup is shared with the coordination summary above the activation list.
+elements.historyView.append(elements.coordinationDetailPanel);
+
 let selectedModeId = "overnight";
 let currentResolution = null;
 let currentDefaultResolution = null;
@@ -295,6 +315,8 @@ let runtimeModel = "";
 let latestRuntimeUsage = null;
 let usageLoading = false;
 let usageRefreshQueued = false;
+let runtimeLoadStatusTimer = null;
+let runtimeLoadStatusHideTimer = null;
 let activeView = "configuration";
 let historyData = null;
 let selectedHistoryId = null;
@@ -321,10 +343,11 @@ let taskCardPreflightOptions = { workflowModes: [], overnightStrategies: [], ada
 let taskCardConnectivityRunning = false;
 let integrationsData = null;
 let integrationsLoading = false;
+let projectConfigState = null;
+let projectConfigLoading = false;
 let workflowSourceData = null;
 let selectedCoordinationRun = null;
 let coordinationDetailRequest = 0;
-let coordinationRunsCache = [];
 const integrationDiagnostics = new Map();
 const taskCardUndoStack = [];
 const taskCardRedoStack = [];
@@ -780,6 +803,36 @@ function renderRuntimeError(message) {
   });
 }
 
+function clearRuntimeLoadStatusTimers() {
+  clearTimeout(runtimeLoadStatusTimer);
+  clearTimeout(runtimeLoadStatusHideTimer);
+  runtimeLoadStatusTimer = null;
+  runtimeLoadStatusHideTimer = null;
+}
+
+function showRuntimeLoadStatus(state) {
+  clearRuntimeLoadStatusTimers();
+  elements.runtimeLoadStatus.hidden = false;
+  elements.runtimeLoadStatus.className = `runtime-load-status ${state}`;
+  elements.runtimeLoadStatusText.textContent = state === "loading"
+    ? "正在载入用量数据…"
+    : "加载完成";
+  if (state !== "complete") return;
+  runtimeLoadStatusTimer = setTimeout(() => {
+    elements.runtimeLoadStatus.classList.add("fading");
+    runtimeLoadStatusHideTimer = setTimeout(() => {
+      elements.runtimeLoadStatus.hidden = true;
+      elements.runtimeLoadStatus.className = "runtime-load-status";
+    }, 260);
+  }, 1000);
+}
+
+function hideRuntimeLoadStatus() {
+  clearRuntimeLoadStatusTimers();
+  elements.runtimeLoadStatus.hidden = true;
+  elements.runtimeLoadStatus.className = "runtime-load-status";
+}
+
 function formatHistoryDate(value) {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return "时间未知";
@@ -811,20 +864,18 @@ function switchView(view) {
   const taskCard = view === "task-card";
   const integrations = view === "integrations";
   const usage = view === "usage";
-  const coordination = view === "coordination";
   const history = view === "history";
   elements.configurationTopbar.hidden = !configuration;
   elements.configurationWorkspace.hidden = !configuration;
   elements.taskCardView.hidden = !taskCard;
   elements.integrationsView.hidden = !integrations;
   elements.usageView.hidden = !usage;
-  elements.coordinationView.hidden = !coordination;
+  elements.coordinationView.hidden = !history;
   elements.historyView.hidden = !history;
   elements.navConfiguration.classList.toggle("active", configuration);
   elements.navTaskCard.classList.toggle("active", taskCard);
   elements.navIntegrations.classList.toggle("active", integrations);
   elements.navUsage.classList.toggle("active", usage);
-  elements.navCoordination.classList.toggle("active", coordination);
   elements.navHistory.classList.toggle("active", history);
   if (taskCard && ["overnight", "balanced"].includes(selectedModeId)) {
     elements.taskCardWorkflowMode.value = selectedModeId;
@@ -832,8 +883,10 @@ function switchView(view) {
   }
   if (integrations && !integrationsData) loadIntegrations();
   if (usage) loadRuntimeUsage();
-  if (coordination) loadCoordination();
-  if (history) loadHistory({ selectEntry: true });
+  if (history) {
+    loadCoordination();
+    loadHistory({ selectEntry: true });
+  }
 }
 
 function setTaskCardState(state, message) {
@@ -1621,8 +1674,10 @@ async function runTaskCardPreflight() {
 function renderHistoryList() {
   elements.historyList.replaceChildren();
   const entries = historyData?.entries ?? [];
-  elements.historyCount.hidden = entries.length === 0;
-  elements.historyCount.textContent = String(entries.length);
+  const activityCount = (historyData?.activitySummary?.activations ?? entries.length)
+    + (historyData?.activitySummary?.runs ?? 0);
+  elements.historyCount.hidden = activityCount === 0;
+  elements.historyCount.textContent = String(activityCount);
 
   if (!historyData?.available) {
     elements.historyEmpty.hidden = false;
@@ -1636,13 +1691,15 @@ function renderHistoryList() {
     return;
   }
 
-  elements.historyStatus.textContent = `${entries.length} 条不可变快照`;
+  elements.historyStatus.textContent = `${entries.length} 条激活 · ${historyData.activitySummary?.runs ?? 0} 条运行 · ${historyData.activitySummary?.projects ?? 0} 个项目`;
   const corrupt = historyData.corruptEntries ?? 0;
   elements.historyIntegrity.textContent = corrupt === 0 ? "完整性通过" : `${corrupt} 条损坏记录`;
   elements.historyIntegrity.classList.toggle("error", corrupt > 0);
   elements.historyEmpty.hidden = entries.length > 0;
   if (entries.length === 0) {
-    elements.historyEmpty.textContent = "尚无真实激活记录。完成一次文件系统激活后将在这里建立首个快照。";
+    elements.historyEmpty.textContent = historyData.activitySummary?.runs
+      ? "存在运行记录，但尚无可关联的真实激活快照；这些运行保留在上方未关联区域。"
+      : "尚无真实激活记录。完成一次文件系统激活后将在这里建立首个快照。";
     return;
   }
 
@@ -1662,11 +1719,13 @@ function renderHistoryList() {
     const time = document.createElement("span");
     time.textContent = `${historyActionLabel(entry.action)} · ${formatHistoryDate(entry.recordedAt)}`;
     const mode = document.createElement("code");
-    mode.textContent = `${entry.mode.id}@${entry.mode.version}`;
+    mode.textContent = entry.projectBinding
+      ? `${entry.mode.id}@${entry.mode.version} · project ${shortHash(entry.projectBinding.projectId)}`
+      : `${entry.mode.id}@${entry.mode.version} · global`;
     main.append(title, time, mode);
     const state = document.createElement("span");
     state.className = `history-entry-state${entry.isActive ? " active" : ""}`;
-    state.textContent = entry.isActive ? "当前" : "快照";
+    state.textContent = entry.isActive ? `当前 · ${entry.runs?.length ?? 0}` : `${entry.runs?.length ?? 0} 运行`;
     button.append(icon, main, state);
     button.addEventListener("click", () => selectHistoryEntry(entry.historyId));
     elements.historyList.append(button);
@@ -1676,10 +1735,15 @@ function renderHistoryList() {
 function renderHistoryMeta(entry) {
   elements.historyMeta.replaceChildren();
   const values = [
+    ["Activation ID", entry.historyId],
     ["Mode", `${entry.mode.id}@${entry.mode.version}`],
     ["Main agent", entry.mainAgentId],
     ["Profile", entry.profileId],
     ["Activated", formatHistoryDate(entry.activatedAt)],
+    ["Skill hash", entry.contentSha256 ? entry.contentSha256.slice(0, 12) : "—"],
+    ["Project", entry.projectBinding?.projectId ?? "global"],
+    ["Project revision", entry.projectBinding ? `r${entry.projectBinding.projectRevision}` : "—"],
+    ["Project config", entry.projectBinding?.projectConfigSha256?.slice(0, 12) ?? "—"],
   ];
   for (const [label, value] of values) {
     const item = document.createElement("div");
@@ -1758,6 +1822,10 @@ function renderHistoryDetail(detail) {
   elements.historyActiveBadge.hidden = !detail.entry.matchesActive;
   elements.historyActiveBadge.textContent = detail.entry.isActive ? "当前激活" : "内容已激活";
   renderHistoryMeta(detail.entry);
+  renderActivityRuns(elements.historyRunList, detail.runs ?? [], {
+    empty: "该激活快照尚无关联运行。",
+  });
+  elements.historyRunSummary.textContent = `${detail.runs?.length ?? 0} 条运行`;
   renderFieldChanges(detail.fieldChanges);
   renderSkillDiff(detail.diff);
   elements.historyRestore.disabled = detail.entry.matchesActive;
@@ -1775,7 +1843,7 @@ async function selectHistoryEntry(historyId) {
   elements.historyPlaceholder.querySelector("p").textContent = "校验快照完整性并与当前 SKILL.md 对比。";
   elements.historyDetail.hidden = true;
   try {
-    const detail = await requestJson(`/api/history/${encodeURIComponent(historyId)}`);
+    const detail = await requestJson(`/api/activity/${encodeURIComponent(historyId)}`);
     if (request !== historyRequest || selectedHistoryId !== historyId) return;
     renderHistoryDetail(detail);
   } catch (error) {
@@ -1790,13 +1858,14 @@ async function loadHistory(options = {}) {
   const request = ++historyRequest;
   elements.historyRefresh.disabled = true;
   try {
-    const data = await requestJson("/api/history");
+    const data = await requestJson("/api/activity");
     if (request !== historyRequest) return;
     historyData = data;
     if (!data.entries.some((entry) => entry.historyId === selectedHistoryId)) {
       selectedHistoryId = data.entries.find((entry) => entry.isActive)?.historyId ?? data.entries[0]?.historyId ?? null;
     }
     renderHistoryList();
+    refreshActivityRunSelections();
     if (options.selectEntry && selectedHistoryId) await selectHistoryEntry(selectedHistoryId);
     if (!selectedHistoryId) {
       elements.historyDetail.hidden = true;
@@ -2160,6 +2229,10 @@ function renderModeCards() {
       selectedModeId = mode.id;
       renderModeCards();
       refresh();
+      if (projectConfigState?.initialized) {
+        showToast("已更新项目配置草稿；保存项目覆盖后再显式激活。");
+        return;
+      }
       modeSwitchCoordinator.request(mode.id);
     });
     elements.modeGrid.append(button);
@@ -2216,8 +2289,18 @@ function createProfile(modeId = selectedModeId) {
   return profile;
 }
 
+function projectSkillContent(content) {
+  if (!projectConfigState?.initialized) return content;
+  const appendix = elements.projectSkillAppendix.value.trim();
+  if (!appendix) return content;
+  return `${content.trimEnd()}\n\n## Project policy\n\n${appendix}\n`;
+}
+
 function draftKeyFor(variant) {
-  return `${variant.id}:${variant.contentFingerprint}`;
+  const project = variant.projectBinding
+    ? `${variant.projectBinding.projectId}:r${variant.projectBinding.projectRevision}:${variant.projectBinding.projectConfigSha256}`
+    : "global";
+  return `${variant.id}:${variant.contentFingerprint}:${project}`;
 }
 
 function resolveSkillDraft(modeId = selectedModeId) {
@@ -2227,15 +2310,162 @@ function resolveSkillDraft(modeId = selectedModeId) {
     catalog: BUILTIN_MODE_CATALOG,
   });
   if (!resolved.ok) return { ok: false, issues: resolved.issues };
-  const key = draftKeyFor(resolved.value);
-  const content = skillDrafts.get(key) ?? resolved.value.content;
+  const projected = customizeEffectiveSkill(resolved.value, projectSkillContent(resolved.value.content));
+  if (!projected.ok) return { ok: false, issues: projected.issues };
+  const projectBound = projectConfigState?.initialized
+    ? {
+        ...projected.value,
+        projectBinding: {
+          projectId: projectConfigState.projectId,
+          projectRevision: projectConfigState.revision,
+          projectConfigSha256: projectConfigState.configSha256,
+        },
+      }
+    : projected.value;
+  const key = draftKeyFor(projectBound);
+  const content = skillDrafts.get(key) ?? projectBound.content;
   return {
     ok: true,
-    base: resolved.value,
+    base: projectBound,
     key,
     content,
-    customized: customizeEffectiveSkill(resolved.value, content),
+    customized: customizeEffectiveSkill(projectBound, content),
   };
+}
+
+function resetControlsToGlobalProfile() {
+  selectedModeId = "overnight";
+  const defaultMain = CODEX_OVERNIGHT_CLAUDE_PROFILE.mainAgentId;
+  const defaultBuilder = CODEX_OVERNIGHT_CLAUDE_PROFILE.roleBindings.find(
+    (binding) => binding.role === "builder" && binding.target.kind === "agent",
+  )?.target.agentId;
+  if ([...elements.mainAgent.options].some((entry) => entry.value === defaultMain)) {
+    elements.mainAgent.value = defaultMain;
+  }
+  if (defaultBuilder && [...elements.builderAgent.options].some((entry) => entry.value === defaultBuilder)) {
+    elements.builderAgent.value = defaultBuilder;
+  }
+  applyOvernightLoopPolicyToControls(DEFAULT_OVERNIGHT_LOOP_POLICY);
+  initializeBalancedControls();
+  synchronizeControlsWithActiveSkill();
+  elements.projectSkillAppendix.value = "";
+}
+
+function applyProjectOverrides(overrides = {}) {
+  resetControlsToGlobalProfile();
+  if (BUILTIN_MODE_CATALOG.modes.some((mode) => mode.id === overrides.modeId)) {
+    selectedModeId = overrides.modeId;
+  }
+  if ([...elements.mainAgent.options].some((entry) => entry.value === overrides.mainAgentId)) {
+    elements.mainAgent.value = overrides.mainAgentId;
+  }
+  if ([...elements.builderAgent.options].some((entry) => entry.value === overrides.builderAgentId)) {
+    elements.builderAgent.value = overrides.builderAgentId;
+  }
+  const overnightPolicy = OVERNIGHT_LOOP_POLICIES.find(
+    (policy) => policy.id === overrides.overnightLoopPolicyId,
+  );
+  if (overnightPolicy) applyOvernightLoopPolicyToControls(overnightPolicy);
+  applyBalancedBudgetToControls(overrides.balancedBudget);
+  applyBalancedTimingToControls(overrides.balancedTiming);
+  elements.projectSkillAppendix.value = overrides.skillAppendix ?? "";
+  renderModeCards();
+  refresh();
+}
+
+function renderProjectConfig() {
+  const state = projectConfigState;
+  const initialized = state?.initialized === true;
+  elements.projectConfigStatus.classList.toggle("error", state?.error !== undefined);
+  elements.projectConfigStatus.textContent = projectConfigLoading
+    ? "正在读取"
+    : state?.error
+      ? "项目配置不可用"
+      : initialized ? "项目覆盖已启用" : state ? "项目尚未初始化" : "尚未检查";
+  elements.projectConfigId.textContent = initialized ? shortHash(state.projectId) : "—";
+  elements.projectConfigId.title = initialized ? state.projectId : "";
+  elements.projectConfigRevision.textContent = initialized ? `r${state.revision}` : "—";
+  elements.projectConfigHash.textContent = initialized ? shortHash(state.configSha256) : "—";
+  elements.projectConfigHash.title = initialized ? state.configSha256 : "";
+  const overrideCount = initialized ? Object.keys(state.overrides ?? {}).length : 0;
+  elements.projectConfigSource.textContent = overrideCount > 0
+    ? `${overrideCount} 项项目覆盖`
+    : "全局 Profile";
+  elements.projectConfigInitialize.hidden = !state || initialized;
+  elements.projectConfigInitialize.disabled = projectConfigLoading;
+  elements.projectConfigCheck.disabled = projectConfigLoading;
+  elements.projectConfigSave.disabled = !initialized || projectConfigLoading;
+  elements.projectConfigClear.disabled = !initialized || projectConfigLoading || overrideCount === 0;
+  elements.projectConfigRestore.disabled =
+    !initialized || projectConfigLoading || (state.history?.length ?? 0) === 0;
+  elements.projectSkillAppendix.disabled = !initialized || projectConfigLoading;
+}
+
+async function loadProjectConfig(projectRoot = elements.projectConfigRoot.value.trim()) {
+  if (!projectRoot || projectConfigLoading) return;
+  projectConfigLoading = true;
+  renderProjectConfig();
+  try {
+    const result = await requestJson(
+      `/api/projects/current?projectRoot=${encodeURIComponent(projectRoot)}`,
+    );
+    projectConfigState = result;
+    elements.projectConfigRoot.value = result.projectRoot;
+    elements.integrationsProjectRoot.value = result.projectRoot;
+    localStorage.setItem(INTEGRATION_PROJECT_KEY, result.projectRoot);
+    applyProjectOverrides(result.initialized ? result.overrides : {});
+  } catch (error) {
+    projectConfigState = { initialized: false, error: error.message };
+    resetControlsToGlobalProfile();
+    renderModeCards();
+    refresh();
+  } finally {
+    projectConfigLoading = false;
+    renderProjectConfig();
+  }
+}
+
+function currentProjectOverrides() {
+  const profile = createProfile();
+  const overrides = {
+    modeId: selectedModeId,
+    mainAgentId: profile.mainAgentId,
+  };
+  if (selectedModeId !== "interactive") overrides.builderAgentId = elements.builderAgent.value;
+  if (selectedModeId === "overnight") {
+    overrides.overnightLoopPolicyId = selectedOvernightPolicy()?.id;
+  }
+  if (selectedModeId === "balanced") {
+    overrides.balancedBudget = balancedBudgetFromControls();
+    overrides.balancedTiming = balancedTimingFromControls();
+  }
+  const appendix = elements.projectSkillAppendix.value.trim();
+  if (appendix) overrides.skillAppendix = appendix;
+  return overrides;
+}
+
+async function writeProjectOverrides(overrides, successMessage) {
+  if (!projectConfigState?.initialized || projectConfigLoading) return;
+  projectConfigLoading = true;
+  renderProjectConfig();
+  try {
+    projectConfigState = await requestJson("/api/projects/current", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectRoot: projectConfigState.projectRoot,
+        expectedRevision: projectConfigState.revision,
+        overrides,
+      }),
+    });
+    applyProjectOverrides(projectConfigState.overrides);
+    showToast(successMessage);
+  } catch (error) {
+    showToast(`项目覆盖保存失败：${error.message}`);
+  } finally {
+    projectConfigLoading = false;
+    renderProjectConfig();
+  }
 }
 
 function seedStoredSkillDraft(stored) {
@@ -2440,6 +2670,8 @@ function storeIsHealthy() {
 function renderStoreStatus() {
   if (!serverStatusLoaded) {
     elements.modeSwitchPolicy.textContent = "正在读取激活策略";
+  } else if (projectConfigState?.initialized) {
+    elements.modeSwitchPolicy.textContent = "项目草稿 · 显式保存与激活";
   } else if (serverStatus.writeEnabled && storeIsHealthy()) {
     elements.modeSwitchPolicy.textContent = "选择即备份并激活";
   } else if (serverStatus.writeEnabled) {
@@ -2449,6 +2681,9 @@ function renderStoreStatus() {
   } else {
     elements.modeSwitchPolicy.textContent = "激活状态不可用";
   }
+  elements.modeSwitchNoteCopy.textContent = projectConfigState?.initialized
+    ? "项目覆盖中，点击模式只更新草稿；先保存项目覆盖，再使用激活按钮写入当前 Harness Skill。"
+    : "文件写入启用后，点击模式会自动备份当前受管 Skill，并原子覆写或首次激活。";
   if (serverStatus.writeEnabled) {
     if (storeIsHealthy()) {
       elements.storeStatusTitle.textContent = "文件写入已启用";
@@ -3180,11 +3415,22 @@ function integrationHealthCopy(health) {
     ready: "已就绪",
     "ready-to-activate": "可激活",
     "project-setup-required": "待初始化项目",
+    "project-sync-required": "项目待同步",
+    "project-unhealthy": "项目检查异常",
     "not-installed": "未安装",
     unhealthy: "诊断异常",
     blocked: "已阻断",
     "registration-required": "待登记 Server",
     available: "可用",
+    "not-applicable": "不适用",
+    "not-initialized": "未初始化",
+    "sync-required": "待同步",
+    "verification-unavailable": "无法验证",
+    "ready-with-unknown-drift": "漂移未知",
+    "identity-mismatch": "项目不匹配",
+    "identity-unverified": "身份未知",
+    "marker-present": "标记已存在",
+    unknown: "未知",
     compatible: "契约兼容",
     "drift-detected": "检测到漂移",
     incompatible: "协议不兼容",
@@ -3251,6 +3497,43 @@ function integrationStatusMetric(label, value) {
   return item;
 }
 
+function integrationLayer(titleText, layer, metrics) {
+  const panel = document.createElement("section");
+  panel.className = `integration-layer health-${layer?.health ?? "unknown"}`;
+  const heading = document.createElement("div");
+  heading.className = "integration-layer-heading";
+  const title = document.createElement("strong");
+  title.textContent = titleText;
+  const badge = document.createElement("span");
+  badge.className = "integration-layer-badge";
+  badge.textContent = integrationHealthCopy(layer?.health ?? "unknown");
+  heading.append(title, badge);
+  const details = document.createElement("div");
+  details.className = "integration-layer-details";
+  for (const [label, value] of metrics) details.append(integrationStatusMetric(label, value));
+  panel.append(heading, details);
+  return panel;
+}
+
+function projectInitializationCopy(project) {
+  if (!project?.applicable) return "不适用";
+  if (project.health === "blocked") return "项目标记不安全";
+  if (project.health === "identity-mismatch") return "项目身份不匹配";
+  if (project.health === "unavailable") return "无法读取";
+  if (project.initialized === false) return "未初始化";
+  if (project.initialized === true && project.verified) return "已验证";
+  if (project.initialized === true) return "已存在，未通过验证";
+  return "未知";
+}
+
+function integrationPlanCopy(status) {
+  if (status.global?.available === false) return "查看全局安装计划";
+  if (status.project?.health === "not-initialized") return "查看项目初始化计划";
+  if (status.project?.health === "sync-required") return "查看项目同步计划";
+  if (status.health === "ready-to-activate") return "查看 Harness 激活计划";
+  return "查看维护计划";
+}
+
 function renderIntegrationDiagnostic(target, diagnostic) {
   const receipt = document.createElement("div");
   receipt.className = "integration-diagnostic";
@@ -3269,7 +3552,8 @@ function renderIntegrationDiagnostic(target, diagnostic) {
     const marker = document.createElement("i");
     marker.textContent = entry.status === "passed" ? "✓" : entry.status === "failed" ? "×" : "·";
     const copy = document.createElement("span");
-    copy.textContent = `${entry.label}：${entry.detail}`;
+    const layer = entry.layer === "global" ? "全局" : entry.layer === "project" ? "项目" : "系统";
+    copy.textContent = `${layer} · ${entry.label}：${entry.detail}`;
     row.append(marker, copy);
     receipt.append(row);
   }
@@ -3281,10 +3565,12 @@ function renderIntegrations() {
   const integrations = integrationsData?.integrations ?? [];
   elements.integrationsTotal.textContent = String(integrations.length);
   elements.integrationsInstalled.textContent = String(
-    integrations.filter((entry) => entry.status.installed).length,
+    integrationsData?.summary?.globalAvailable ??
+      integrations.filter((entry) => entry.status.global?.available === true).length,
   );
   elements.integrationsConfigured.textContent = String(
-    integrations.filter((entry) => entry.status.projectConfigured).length,
+    integrationsData?.summary?.projectInitialized ??
+      integrations.filter((entry) => entry.status.project?.initialized === true && entry.status.project?.verified).length,
   );
   elements.integrationsStatus.textContent = integrationsData
     ? `${integrationsData.projectRoot} · 安装执行关闭`
@@ -3323,22 +3609,22 @@ function renderIntegrations() {
     summary.className = "integration-summary-copy";
     summary.textContent = manifest.summary;
 
-    const metrics = document.createElement("div");
-    metrics.className = "integration-status-grid";
-    metrics.append(
-      integrationStatusMetric(
-        "本地命令",
-        status.installed
-          ? "已检测"
-          : manifest.id === "custom-mcp-server" ? "无需固定命令" : "未找到",
-      ),
-      integrationStatusMetric("版本", status.version ?? "不可见"),
-      integrationStatusMetric(
-        "项目配置",
-        status.projectConfigured
-          ? `${status.projectMarker}/`
-          : status.projectMarker ? "未初始化" : "等待登记",
-      ),
+    const layers = document.createElement("div");
+    layers.className = "integration-layer-grid";
+    layers.append(
+      integrationLayer("全局环境", status.global, [
+        ["命令", status.global?.command ?? "等待登记"],
+        ["版本", status.global?.version ?? (status.global?.available === true ? "未知" : "不可见")],
+      ]),
+      integrationLayer("当前项目", status.project, [
+        ["项目标记", status.project?.marker ? `${status.project.marker}/` : "不适用"],
+        ["初始化", projectInitializationCopy(status.project)],
+        ["索引状态", status.project?.reindexRecommended === true
+          ? "建议重建"
+          : Number.isSafeInteger(status.project?.pendingChanges)
+            ? `${status.project.pendingChanges} 项待同步`
+          : status.project?.applicable ? "未知" : "不适用"],
+      ]),
     );
 
     const capabilityList = document.createElement("div");
@@ -3368,10 +3654,10 @@ function renderIntegrations() {
     plan.type = "button";
     plan.dataset.integrationId = manifest.id;
     plan.dataset.integrationAction = "plan";
-    plan.textContent = "查看安装计划";
+    plan.textContent = integrationPlanCopy(status);
     actions.append(diagnose, plan);
 
-    card.append(heading, summary, metrics, capabilityList, support, actions);
+    card.append(heading, summary, layers, capabilityList, support, actions);
     const diagnostic = integrationDiagnostics.get(manifest.id);
     if (diagnostic) renderIntegrationDiagnostic(card, diagnostic);
     elements.integrationList.append(card);
@@ -3530,6 +3816,7 @@ async function loadRuntimeUsage() {
     return;
   }
   usageLoading = true;
+  showRuntimeLoadStatus("loading");
   const requested = {
     range: runtimeRange,
     lane: runtimeLane,
@@ -3554,8 +3841,12 @@ async function loadRuntimeUsage() {
       return;
     }
     renderRuntimeUsage(usage);
+    showRuntimeLoadStatus("complete");
   } catch (error) {
-    if (stillCurrent()) renderRuntimeError(error.message);
+    if (stillCurrent()) {
+      hideRuntimeLoadStatus();
+      renderRuntimeError(error.message);
+    }
   } finally {
     usageLoading = false;
     if (usageRefreshQueued) {
@@ -3707,15 +3998,17 @@ function renderCoordinationEventTimeline(detail) {
   }
 }
 
-async function loadCoordinationDetail(run) {
+async function loadCoordinationDetail(run, options = {}) {
   const requestId = ++coordinationDetailRequest;
   selectedCoordinationRun = `${run.mode}:${run.runId}`;
   elements.coordinationDetailPanel.hidden = false;
   elements.coordinationDetailTitle.textContent = run.runId;
-  elements.coordinationDetailStatus.textContent = "正在读取经过脱敏投影的协调事件…";
-  elements.coordinationGraphShell.replaceChildren();
-  elements.coordinationEventList.replaceChildren();
-  renderCoordinationRuns(coordinationRunsCache);
+  if (!options.background) {
+    elements.coordinationDetailStatus.textContent = "正在读取经过脱敏投影的协调事件…";
+    elements.coordinationGraphShell.replaceChildren();
+    elements.coordinationEventList.replaceChildren();
+  }
+  refreshActivityRunSelections();
   try {
     const detail = await requestJson(
       `/api/coordination/${encodeURIComponent(run.mode)}/${encodeURIComponent(run.runId)}?limit=200`,
@@ -3725,7 +4018,9 @@ async function loadCoordinationDetail(run) {
     elements.coordinationDetailStatus.textContent = `显示 ${detail.timeline.returnedEvents} / ${detail.timeline.totalEvents} 条事件${detail.timeline.truncated ? " · 已截取最近事件" : ""}${rejected > 0 ? ` · 拒绝 ${rejected} 条无效记录` : ""}`;
     renderCoordinationGraph(detail);
     renderCoordinationEventTimeline(detail);
-    elements.coordinationDetailPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!options.background) {
+      elements.coordinationDetailPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   } catch (error) {
     if (requestId !== coordinationDetailRequest) return;
     elements.coordinationDetailStatus.textContent = `详情加载失败：${error.message}`;
@@ -3733,30 +4028,57 @@ async function loadCoordinationDetail(run) {
   }
 }
 
-function renderCoordinationRuns(runs) {
-  elements.coordinationRunList.replaceChildren();
+function coordinationRunView(run) {
+  return run.coordination
+    ? {
+        ...run.coordination,
+        runId: run.runId,
+        mode: run.mode,
+        adapterId: run.adapterId ?? run.coordination.adapterId,
+        state: run.state ?? run.coordination.state,
+        association: run.association,
+        projectBinding: run.projectBinding ?? null,
+      }
+    : run;
+}
+
+function associationText(association) {
+  if (association?.status !== "linked") {
+    return `未关联 · ${association?.reason ?? "缺少激活上下文"}`;
+  }
+  if (association.source === "explicit") return "精确关联 · Activation ID";
+  if (association.source === "skill-hash") return "精确关联 · Skill Hash";
+  return "推断关联 · 时间与模式";
+}
+
+function renderActivityRuns(target, runs, options = {}) {
+  target.replaceChildren();
   if (runs.length === 0) {
     const empty = document.createElement("p");
     empty.className = "coordination-empty";
-    empty.textContent = "尚无带协调遥测的 Balanced 或 Overnight 运行。新运行会自动写入追加式事件流。";
-    elements.coordinationRunList.append(empty);
+    empty.textContent = options.empty ?? "尚无运行记录。";
+    target.append(empty);
     return;
   }
-  for (const run of runs) {
+  for (const source of runs) {
+    const run = coordinationRunView(source);
     const article = document.createElement("article");
     article.classList.toggle("selected", selectedCoordinationRun === `${run.mode}:${run.runId}`);
     const identity = document.createElement("div");
     const title = document.createElement("strong");
     title.textContent = run.runId;
     const subtitle = document.createElement("span");
-    subtitle.textContent = `${run.mode} · ${run.adapterId ?? "adapter 未知"} · ${run.state ?? "状态未知"}`;
+    subtitle.textContent = `${run.mode} · ${run.adapterId ?? "adapter 未知"} · ${run.state ?? "状态未知"} · ${run.projectBinding ? `project ${shortHash(run.projectBinding.projectId)}@r${run.projectBinding.projectRevision}` : "global"}`;
+    const association = document.createElement("span");
+    association.className = `coordination-association ${run.association?.confidence ?? "unknown"}`;
+    association.textContent = associationText(run.association);
     identity.append(title, subtitle);
     const open = document.createElement("button");
     open.type = "button";
     open.className = "coordination-run-open";
     open.textContent = "查看时序";
     open.addEventListener("click", () => loadCoordinationDetail(run));
-    identity.append(open);
+    identity.append(association, open);
     const metrics = document.createElement("div");
     metrics.className = "coordination-run-metrics";
     for (const [label, value] of [
@@ -3776,15 +4098,40 @@ function renderCoordinationRuns(runs) {
     const coverage = document.createElement("small");
     coverage.textContent = `读取 ${COORDINATION_COVERAGE_LABELS[run.coverage?.read] ?? "未知"} (${run.containment?.read ?? "能力未知"}) · 分类 允许 ${run.readClassifications?.allowed ?? 0} / 越界 ${run.readClassifications?.outOfScope ?? 0} / 禁止 ${run.readClassifications?.forbidden ?? 0} / 未知 ${run.readClassifications?.unknown ?? 0} · 拓扑 ${run.topology?.nodeCount ?? 0} 节点 / ${run.topology?.relationshipCount ?? 0} 边`;
     article.append(identity, metrics, coverage);
-    elements.coordinationRunList.append(article);
+    target.append(article);
   }
+}
+
+function renderCoordinationRuns(runs) {
+  renderActivityRuns(elements.coordinationRunList, runs, {
+    empty: "没有未关联运行。所有可识别运行都已归入对应激活快照。",
+  });
+}
+
+function refreshActivityRunSelections() {
+  renderCoordinationRuns(historyData?.unlinkedRuns ?? []);
+  const selected = historyData?.entries?.find((entry) => entry.historyId === selectedHistoryId);
+  if (selected && !elements.historyDetail.hidden) {
+    renderActivityRuns(elements.historyRunList, selected.runs ?? [], {
+      empty: "该激活快照尚无关联运行。",
+    });
+  }
+}
+
+function refreshSelectedCoordinationDetail() {
+  if (!selectedCoordinationRun) return;
+  const runs = [
+    ...(historyData?.entries ?? []).flatMap((entry) => entry.runs ?? []),
+    ...(historyData?.unlinkedRuns ?? []),
+  ];
+  const run = runs.find((candidate) => `${candidate.mode}:${candidate.runId}` === selectedCoordinationRun);
+  if (run) loadCoordinationDetail(run, { background: true });
 }
 
 async function loadCoordination() {
   elements.coordinationRefresh.disabled = true;
   try {
     const result = await requestJson("/api/coordination?limit=50");
-    coordinationRunsCache = result.runs;
     elements.coordinationRuns.textContent = exactNumber.format(result.aggregate.runs);
     elements.coordinationEvents.textContent = exactNumber.format(result.aggregate.events);
     elements.coordinationInvocations.textContent = exactNumber.format(result.aggregate.agentInvocations);
@@ -3808,11 +4155,10 @@ async function loadCoordination() {
     renderCoordinationCoverage(elements.coordinationCoverageWrite, "写入", result.coverage.write);
     renderCoordinationCoverage(elements.coordinationCoverageRead, "读取", result.coverage.read);
     renderCoordinationCoverage(elements.coordinationCoverageMessage, "消息", result.coverage.message);
-    renderCoordinationRuns(result.runs);
+    renderCoordinationRuns(historyData?.unlinkedRuns ?? []);
   } catch (error) {
     elements.coordinationUpdated.textContent = `采集失败：${error.message}`;
-    coordinationRunsCache = [];
-    renderCoordinationRuns([]);
+    renderCoordinationRuns(historyData?.unlinkedRuns ?? []);
   } finally {
     elements.coordinationRefresh.disabled = false;
   }
@@ -3898,6 +4244,13 @@ elements.activateButton.addEventListener("click", async () => {
             selectedModeId === "interactive" && elements.interactiveAgentOverwrite.checked,
           interactiveAgents:
             selectedModeId === "interactive" ? interactiveAgentConfiguration : undefined,
+          projectContext: projectConfigState?.initialized
+            ? {
+                projectRoot: projectConfigState.projectRoot,
+                expectedRevision: projectConfigState.revision,
+                configSha256: projectConfigState.configSha256,
+              }
+            : undefined,
         }),
       });
       serverStatus = result.status;
@@ -3940,6 +4293,63 @@ elements.skillPreview.addEventListener("input", () => {
   }
   refresh({ preserveEditor: true });
 });
+elements.projectConfigCheck.addEventListener("click", () => loadProjectConfig());
+elements.projectConfigRoot.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") loadProjectConfig();
+});
+elements.projectConfigInitialize.addEventListener("click", async () => {
+  const projectRoot = elements.projectConfigRoot.value.trim();
+  if (!projectRoot || projectConfigLoading) return;
+  projectConfigLoading = true;
+  renderProjectConfig();
+  try {
+    projectConfigState = await requestJson("/api/projects/initialize", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectRoot }),
+    });
+    elements.projectConfigRoot.value = projectConfigState.projectRoot;
+    localStorage.setItem(INTEGRATION_PROJECT_KEY, projectConfigState.projectRoot);
+    applyProjectOverrides(projectConfigState.overrides);
+    showToast("项目配置已初始化；尚未写入 Harness。");
+  } catch (error) {
+    showToast(`项目初始化失败：${error.message}`);
+  } finally {
+    projectConfigLoading = false;
+    renderProjectConfig();
+  }
+});
+elements.projectConfigSave.addEventListener("click", () =>
+  writeProjectOverrides(currentProjectOverrides(), "当前模式与 Skill 增量已保存为项目覆盖。")
+);
+elements.projectConfigClear.addEventListener("click", () =>
+  writeProjectOverrides({}, "已恢复全局 Profile 继承；项目历史仍可回退。")
+);
+elements.projectConfigRestore.addEventListener("click", async () => {
+  const revision = projectConfigState?.history?.[0]?.revision;
+  if (!Number.isSafeInteger(revision) || projectConfigLoading) return;
+  projectConfigLoading = true;
+  renderProjectConfig();
+  try {
+    projectConfigState = await requestJson("/api/projects/restore", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectRoot: projectConfigState.projectRoot,
+        expectedRevision: projectConfigState.revision,
+        revision,
+      }),
+    });
+    applyProjectOverrides(projectConfigState.overrides);
+    showToast(`已将项目配置恢复到 r${revision} 的内容。`);
+  } catch (error) {
+    showToast(`项目配置恢复失败：${error.message}`);
+  } finally {
+    projectConfigLoading = false;
+    renderProjectConfig();
+  }
+});
+elements.projectSkillAppendix.addEventListener("input", () => refresh());
 elements.restoreSkillDefault.addEventListener("click", () => {
   if (!currentDefaultResolution || !currentDraftKey) return;
   skillDrafts.delete(currentDraftKey);
@@ -4115,14 +4525,16 @@ elements.navConfiguration.addEventListener("click", () => switchView("configurat
 elements.navTaskCard.addEventListener("click", () => switchView("task-card"));
 elements.navIntegrations.addEventListener("click", () => switchView("integrations"));
 elements.navUsage.addEventListener("click", () => switchView("usage"));
-elements.navCoordination.addEventListener("click", () => switchView("coordination"));
 elements.navHistory.addEventListener("click", () => switchView("history"));
-elements.coordinationRefresh.addEventListener("click", loadCoordination);
+elements.coordinationRefresh.addEventListener("click", () => {
+  Promise.all([loadCoordination(), loadHistory({ selectEntry: true })])
+    .then(refreshSelectedCoordinationDetail);
+});
 elements.coordinationDetailClose.addEventListener("click", () => {
   coordinationDetailRequest += 1;
   selectedCoordinationRun = null;
   elements.coordinationDetailPanel.hidden = true;
-  renderCoordinationRuns(coordinationRunsCache);
+  refreshActivityRunSelections();
 });
 elements.integrationsRefresh.addEventListener("click", loadIntegrations);
 elements.workflowSourceDiagnose.addEventListener("click", diagnoseWorkflowSource);
@@ -4293,9 +4705,12 @@ elements.taskCardWorktree.addEventListener("change", savePreflightConfiguration)
 elements.taskCardStrategy.addEventListener("change", savePreflightConfiguration);
 elements.taskCardPreflightRun.addEventListener("click", runTaskCardPreflight);
 elements.taskCardConnectivityRun.addEventListener("click", runTaskCardConnectivityProbe);
-elements.historyRefresh.addEventListener("click", () =>
-  loadHistory({ selectEntry: activeView === "history" }),
-);
+elements.historyRefresh.addEventListener("click", () => {
+  Promise.all([
+    loadCoordination(),
+    loadHistory({ selectEntry: activeView === "history" }),
+  ]).then(refreshSelectedCoordinationDetail);
+});
 elements.historyRestore.addEventListener("click", async () => {
   if (!selectedHistoryId || !historyData) return;
   const entry = historyData.entries.find(
@@ -4333,14 +4748,23 @@ elements.historyRestore.addEventListener("click", async () => {
 
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && activeView === "usage") loadRuntimeUsage();
+  if (!document.hidden && activeView === "history") {
+    Promise.all([loadCoordination(), loadHistory()]).then(refreshSelectedCoordinationDetail);
+  }
 });
 
 initializeAgentSelectors();
 initializeOvernightControls();
 initializeBalancedControls();
+const storedProjectRoot = localStorage.getItem(INTEGRATION_PROJECT_KEY);
+if (storedProjectRoot) elements.projectConfigRoot.value = storedProjectRoot;
 renderModeCards();
+renderProjectConfig();
 refresh();
 loadServerStatus();
+serverStatusReady.then(() => {
+  if (elements.projectConfigRoot.value.trim()) loadProjectConfig();
+});
 loadInteractiveAgentStatus();
 loadHistory();
 loadBalancedRuns();
@@ -4348,6 +4772,9 @@ loadOvernightRuns();
 loadTaskCard();
 window.setInterval(() => {
   if (!document.hidden && activeView === "usage") loadRuntimeUsage();
+  if (!document.hidden && activeView === "history") {
+    Promise.all([loadCoordination(), loadHistory()]).then(refreshSelectedCoordinationDetail);
+  }
   if (!document.hidden && activeView === "configuration" && selectedModeId === "balanced") {
     loadBalancedRuns();
   }

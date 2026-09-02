@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   BALANCED_BUDGET_LIMITS,
@@ -16,10 +17,12 @@ import {
 import { createCcSwitchUsageSource } from "./cc-switch-usage-source.mjs";
 import { createClaudeUsageSource } from "./claude-usage-source.mjs";
 import { createPreferredUsageSource } from "./preferred-usage-source.mjs";
+import { activityDetail, buildActivityLog } from "./activity-log.mjs";
 import { createBalancedRuntime } from "./balanced-runtime.mjs";
 import { createOvernightRuntime } from "./overnight-runtime.mjs";
 import { createEditableCodexAgentStore } from "./codex-agent-role-store.mjs";
 import { createIntegrationRegistry } from "./integration-registry.mjs";
+import { createProjectConfigStore, ProjectConfigError } from "./project-config-store.mjs";
 import { createWorkflowCoreAdapter } from "./workflow-core-adapter.mjs";
 import { createSkillStore, SkillStoreError } from "./skill-store.mjs";
 import {
@@ -155,6 +158,14 @@ export function createAppServer(options = {}) {
     runtimeRoot: options.overnightRuntimeRoot,
     protocolProvider: (mode) => workflowCoreAdapter.runtimeProtocol(mode),
   });
+  async function collectActivity() {
+    const [history, balancedRuns, overnightRuns] = await Promise.all([
+      store.history(),
+      balancedRuntime.listRuns(),
+      overnightRuntime.listRuns(),
+    ]);
+    return buildActivityLog(history, balancedRuns, overnightRuns);
+  }
   const preflightAdapters = options.preflightAdapters ?? EXAMPLE_AGENTS
     .filter((agent) => agent.capabilities.includes("bounded-execution"))
     .map((agent) => ({
@@ -188,6 +199,69 @@ export function createAppServer(options = {}) {
     defaultProjectRoot: options.integrationProjectRoot ?? process.cwd(),
     environment: options.integrationEnvironment ?? process.env,
   });
+  const projectConfigStore = options.projectConfigStore ?? createProjectConfigStore();
+  async function verifiedProjectBinding(input) {
+    if (input === undefined || input === null) return null;
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new ProjectConfigError("project.binding_invalid", "Project activation context is invalid.", 422);
+    }
+    const project = await projectConfigStore.inspect(input.projectRoot);
+    if (!project.initialized) {
+      throw new ProjectConfigError("project.not_initialized", "Project activation requires initialization.", 409);
+    }
+    if (
+      input.expectedRevision !== project.revision ||
+      input.configSha256 !== project.configSha256
+    ) {
+      throw new ProjectConfigError(
+        "project.binding_stale",
+        "Project configuration changed after the Effective Skill was resolved.",
+        409,
+      );
+    }
+    return {
+      binding: {
+        projectId: project.projectId,
+        projectRevision: project.revision,
+        projectConfigSha256: project.configSha256,
+      },
+      overrides: project.overrides ?? {},
+    };
+  }
+  function assertProjectProfile(profile, overrides) {
+    const builderId = profile?.roleBindings?.find(
+      (entry) => entry?.role === "builder" && entry?.target?.kind === "agent",
+    )?.target?.agentId;
+    const checks = [
+      ["modeId", profile?.mode?.id],
+      ["mainAgentId", profile?.mainAgentId],
+      ["builderAgentId", builderId],
+      ["overnightLoopPolicyId", profile?.overnightLoopPolicy?.id],
+    ];
+    for (const [key, actual] of checks) {
+      if (overrides[key] !== undefined && overrides[key] !== actual) {
+        throw new ProjectConfigError(
+          "project.profile_mismatch",
+          `Effective profile does not match project override '${key}'.`,
+          409,
+          key,
+        );
+      }
+    }
+    for (const key of ["balancedBudget", "balancedTiming"]) {
+      if (
+        overrides[key] !== undefined &&
+        !isDeepStrictEqual(overrides[key], profile?.[key])
+      ) {
+        throw new ProjectConfigError(
+          "project.profile_mismatch",
+          `Effective profile does not match project override '${key}'.`,
+          409,
+          key,
+        );
+      }
+    }
+  }
   let usageMonitor = options.usageMonitor;
   if (!usageMonitor) {
     let usageSources = options.usageSources;
@@ -265,6 +339,54 @@ export function createAppServer(options = {}) {
           }),
           request.method === "HEAD",
         );
+        return;
+      }
+
+      if (pathname === "/api/projects/current" && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(
+          response,
+          200,
+          await projectConfigStore.inspect(requestUrl.searchParams.get("projectRoot")),
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      if (pathname === "/api/projects/initialize" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await projectConfigStore.initialize(body?.projectRoot));
+        return;
+      }
+
+      if (pathname === "/api/projects/current" && request.method === "PUT") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await projectConfigStore.save({
+          projectRoot: body?.projectRoot,
+          expectedRevision: body?.expectedRevision,
+          overrides: body?.overrides,
+        }));
+        return;
+      }
+
+      if (pathname === "/api/projects/restore" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await projectConfigStore.restore({
+          projectRoot: body?.projectRoot,
+          expectedRevision: body?.expectedRevision,
+          revision: body?.revision,
+        }));
         return;
       }
 
@@ -583,6 +705,26 @@ export function createAppServer(options = {}) {
         return;
       }
 
+      if (pathname === "/api/activity" && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(response, 200, await collectActivity(), request.method === "HEAD");
+        return;
+      }
+
+      const activityEntry = pathname.match(/^\/api\/activity\/([^/]+)$/);
+      if (activityEntry && (request.method === "GET" || request.method === "HEAD")) {
+        const [detail, activity] = await Promise.all([
+          store.historyDetail(activityEntry[1]),
+          collectActivity(),
+        ]);
+        sendJson(
+          response,
+          200,
+          activityDetail(detail, activity),
+          request.method === "HEAD",
+        );
+        return;
+      }
+
       const historyDetail = pathname.match(/^\/api\/history\/([^/]+)$/);
       if (historyDetail && (request.method === "GET" || request.method === "HEAD")) {
         sendJson(
@@ -627,8 +769,24 @@ export function createAppServer(options = {}) {
           sendJson(response, 422, { error: "skill.invalid", issues: customized.issues });
           return;
         }
+        const projectContext = await verifiedProjectBinding(body?.projectContext);
+        if (projectContext) {
+          assertProjectProfile(body?.profile, projectContext.overrides);
+          const appendix = projectContext.overrides.skillAppendix?.trim();
+          if (appendix && !customized.value.content.includes(appendix)) {
+            throw new ProjectConfigError(
+              "project.skill_mismatch",
+              "Effective Skill is missing the bound project appendix.",
+              409,
+              "content",
+            );
+          }
+        }
+        const activationVariant = projectContext
+          ? { ...customized.value, projectBinding: projectContext.binding }
+          : customized.value;
         const interactiveAgentInstall =
-          customized.value.mode.id === "interactive"
+          activationVariant.mode.id === "interactive"
             ? await codexAgentStore.install({
                 allowOverwrite: body?.allowAgentOverwrite === true,
                 configuration: body?.interactiveAgents,
@@ -636,7 +794,7 @@ export function createAppServer(options = {}) {
             : null;
         let activation;
         try {
-          activation = await store.activate(customized.value);
+          activation = await store.activate(activationVariant);
         } catch (error) {
           if (interactiveAgentInstall?.rollback) await interactiveAgentInstall.rollback();
           throw error;

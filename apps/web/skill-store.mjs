@@ -61,6 +61,20 @@ function validVersionedRef(value) {
   );
 }
 
+function validProjectBinding(value) {
+  return (
+    value === undefined || value === null ||
+    (value && safeIdentifier(value.projectId) &&
+      Number.isSafeInteger(value.projectRevision) && value.projectRevision >= 0 &&
+      typeof value.projectConfigSha256 === "string" &&
+      /^[a-f0-9]{64}$/.test(value.projectConfigSha256))
+  );
+}
+
+function sameProjectBinding(left, right) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
 function sha256(content) {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
@@ -107,6 +121,7 @@ function assertVariant(variant) {
     !validVersionedRef(variant.overnightLoopPolicy) ||
     !validBalancedBudget(variant.balancedBudget) ||
     !validBalancedTiming(variant.balancedTiming) ||
+    !validProjectBinding(variant.projectBinding) ||
     !Array.isArray(variant.includedModeIds) ||
     variant.includedModeIds.length !== 1
   ) {
@@ -154,6 +169,7 @@ function manifestFor(variant, now, restoredFrom) {
     overnightLoopPolicy: variant.overnightLoopPolicy ?? null,
     balancedBudget: variant.balancedBudget ?? null,
     balancedTiming: variant.balancedTiming ?? null,
+    projectBinding: variant.projectBinding ?? null,
     contentFingerprint: variant.contentFingerprint,
     contentSha256: sha256(variant.content),
     activatedAt: now,
@@ -177,6 +193,13 @@ async function readOwnedDirectory(directory) {
     throw new SkillStoreError(
       "store.ownership_conflict",
       "Existing active Skill is not owned by Agent Workflow Switch.",
+      409,
+    );
+  }
+  if (!validProjectBinding(manifest.projectBinding)) {
+    throw new SkillStoreError(
+      "store.corrupt_active",
+      "Managed Skill has an invalid project binding.",
       409,
     );
   }
@@ -420,6 +443,7 @@ export function createSkillStore(options = {}) {
       overnightLoopPolicy: variant.overnightLoopPolicy ?? null,
       balancedBudget: variant.balancedBudget ?? null,
       balancedTiming: variant.balancedTiming ?? null,
+      projectBinding: variant.projectBinding ?? null,
       contentFingerprint: variant.contentFingerprint,
       contentSha256: sha256(variant.content),
       previous: details.previous
@@ -501,6 +525,7 @@ export function createSkillStore(options = {}) {
       !Array.isArray(metadata.includedAgentIds) ||
       !metadata.includedAgentIds.every(safeIdentifier) ||
       !validVersionedRef(metadata.overnightLoopPolicy) ||
+      !validProjectBinding(metadata.projectBinding) ||
       typeof metadata.recordedAt !== "string" ||
       !Number.isFinite(Date.parse(metadata.recordedAt)) ||
       typeof metadata.activatedAt !== "string" ||
@@ -582,7 +607,8 @@ export function createSkillStore(options = {}) {
   function publicHistoryEntry(metadata, active, activeHistoryId) {
     const matchesActive =
       active?.variantId === metadata.variantId &&
-      active?.contentFingerprint === metadata.contentFingerprint;
+      active?.contentFingerprint === metadata.contentFingerprint &&
+      sameProjectBinding(active?.projectBinding, metadata.projectBinding);
     return {
       historyId: metadata.historyId,
       action: metadata.action,
@@ -595,7 +621,9 @@ export function createSkillStore(options = {}) {
       targetAdapterId: metadata.targetAdapterId,
       includedAgentIds: metadata.includedAgentIds,
       overnightLoopPolicy: metadata.overnightLoopPolicy ?? null,
+      projectBinding: metadata.projectBinding ?? null,
       contentFingerprint: metadata.contentFingerprint,
+      contentSha256: metadata.contentSha256,
       previous: metadata.previous,
       sourceHistoryId: metadata.sourceHistoryId,
       sourceBackupId: metadata.sourceBackupId,
@@ -618,7 +646,9 @@ export function createSkillStore(options = {}) {
           overnightLoopPolicy: manifest.overnightLoopPolicy ?? null,
           balancedBudget: manifest.balancedBudget ?? null,
           balancedTiming: manifest.balancedTiming ?? null,
+          projectBinding: manifest.projectBinding ?? null,
           contentFingerprint: manifest.contentFingerprint,
+          contentSha256: manifest.contentSha256,
           activatedAt: manifest.activatedAt,
         }
       : null;
@@ -686,6 +716,11 @@ export function createSkillStore(options = {}) {
         JSON.stringify(active?.balancedTiming ?? null),
         JSON.stringify(snapshot.metadata.balancedTiming ?? null),
       ],
+      [
+        "projectBinding",
+        JSON.stringify(active?.projectBinding ?? null),
+        JSON.stringify(snapshot.metadata.projectBinding ?? null),
+      ],
     ];
     return {
       entry: publicHistoryEntry(snapshot.metadata, active, state?.historyId),
@@ -722,6 +757,7 @@ export function createSkillStore(options = {}) {
               variantId: manifest.variantId,
               relativeSkillPath: `${ACTIVE_DIRECTORY}/${SKILL_FILE}`,
               contentFingerprint: manifest.contentFingerprint,
+              contentSha256: manifest.contentSha256,
               content: activeContent,
               activatedAt: manifest.activatedAt,
               mode: manifest.mode,
@@ -732,6 +768,7 @@ export function createSkillStore(options = {}) {
               overnightLoopPolicy: manifest.overnightLoopPolicy ?? null,
               balancedBudget: manifest.balancedBudget ?? null,
               balancedTiming: manifest.balancedTiming ?? null,
+              projectBinding: manifest.projectBinding ?? null,
             }
           : null,
         backups: await listBackups(),
@@ -757,7 +794,8 @@ export function createSkillStore(options = {}) {
       const current = await readOwnedDirectory(enabled.paths.active);
       if (
         current?.variantId === variant.id &&
-        current.contentFingerprint === variant.contentFingerprint
+        current.contentFingerprint === variant.contentFingerprint &&
+        sameProjectBinding(current.projectBinding, variant.projectBinding)
       ) {
         return {
           changed: false,
@@ -834,6 +872,7 @@ export function createSkillStore(options = {}) {
         overnightLoopPolicy: backupManifest.overnightLoopPolicy ?? undefined,
         balancedBudget: backupManifest.balancedBudget ?? undefined,
         balancedTiming: backupManifest.balancedTiming ?? undefined,
+        projectBinding: backupManifest.projectBinding ?? undefined,
         contentFingerprint: backupManifest.contentFingerprint,
         includedModeIds: [backupManifest.mode.id],
         content,
@@ -904,6 +943,7 @@ export function createSkillStore(options = {}) {
         overnightLoopPolicy: snapshot.metadata.overnightLoopPolicy ?? undefined,
         balancedBudget: snapshot.metadata.balancedBudget ?? undefined,
         balancedTiming: snapshot.metadata.balancedTiming ?? undefined,
+        projectBinding: snapshot.metadata.projectBinding ?? undefined,
         contentFingerprint: snapshot.metadata.contentFingerprint,
         includedModeIds: [snapshot.metadata.mode.id],
         content: snapshot.content,

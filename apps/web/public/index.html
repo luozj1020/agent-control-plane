@@ -30,10 +30,6 @@
             <span class="nav-icon">▥</span>
             用量监测
           </button>
-          <button class="nav-item" id="nav-coordination" type="button">
-            <span class="nav-icon">⌁</span>
-            协调观测
-          </button>
           <button class="nav-item" id="nav-task-card" type="button">
             <span class="nav-icon">◎</span>
             Task Card
@@ -44,7 +40,7 @@
           </button>
           <button class="nav-item" id="nav-history" type="button">
             <span class="nav-icon">↺</span>
-            激活记录
+            活动记录
             <span class="nav-count" id="history-count" hidden>0</span>
           </button>
         </nav>
@@ -74,6 +70,42 @@
 
         <section class="workspace-grid" id="configuration-workspace">
           <div class="configuration-column">
+            <section class="panel project-override-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="step">P</span>
+                  <h2>项目覆盖</h2>
+                </div>
+                <span class="compatibility" id="project-config-status">尚未检查</span>
+              </div>
+              <p class="project-override-description">全局 Profile 继续提供默认值；这里只保存当前项目的模式、Agent、运行参数和精简 Skill 增量。</p>
+              <div class="project-root-row">
+                <label class="field">
+                  <span>项目目录</span>
+                  <input id="project-config-root" type="text" placeholder="/mnt/e/project" autocomplete="off" spellcheck="false">
+                  <small>初始化会创建受管的 <code>.agent-control-plane/</code>，不会改写 Harness。</small>
+                </label>
+                <button class="button ghost" id="project-config-check" type="button">检查项目</button>
+                <button class="button ghost" id="project-config-initialize" type="button" hidden>初始化项目</button>
+              </div>
+              <div class="project-config-meta">
+                <div><span>项目 ID</span><strong id="project-config-id">—</strong></div>
+                <div><span>配置版本</span><strong id="project-config-revision">—</strong></div>
+                <div><span>配置 Hash</span><strong id="project-config-hash">—</strong></div>
+                <div><span>覆盖来源</span><strong id="project-config-source">全局 Profile</strong></div>
+              </div>
+              <label class="project-skill-appendix">
+                <span>项目 Skill 增量</span>
+                <textarea id="project-skill-appendix" rows="6" placeholder="仅填写项目稳定的协作、验证或边界规则；不要复制完整 SKILL.md。" disabled></textarea>
+                <small>项目原有 AGENTS.md 不会被复制或覆盖；模式、版本和模型绑定保留在控制面元数据中。</small>
+              </label>
+              <div class="project-config-actions">
+                <button class="button ghost" id="project-config-restore" type="button" disabled>撤回上次项目修改</button>
+                <button class="button ghost" id="project-config-clear" type="button" disabled>恢复全局继承</button>
+                <button class="button primary" id="project-config-save" type="button" disabled>保存当前配置为项目覆盖</button>
+              </div>
+            </section>
+
             <section class="panel">
               <div class="panel-heading">
                 <div>
@@ -83,7 +115,7 @@
                 <span class="panel-hint" id="mode-switch-policy">正在读取激活策略</span>
               </div>
               <div class="mode-grid" id="mode-grid" role="radiogroup" aria-label="工作流模式"></div>
-              <p class="mode-switch-note"><span>↯</span>文件写入启用后，点击模式会自动备份当前受管 Skill，并原子覆写或首次激活。</p>
+              <p class="mode-switch-note"><span>↯</span><span class="mode-switch-note-copy" id="mode-switch-note-copy">文件写入启用后，点击模式会自动备份当前受管 Skill，并原子覆写或首次激活。</span></p>
             </section>
 
             <section class="panel">
@@ -518,8 +550,8 @@
             </div>
             <div class="integrations-summary">
               <div><span>Manifest</span><strong id="integrations-total">—</strong></div>
-              <div><span>已检测</span><strong id="integrations-installed">—</strong></div>
-              <div><span>项目已配置</span><strong id="integrations-configured">—</strong></div>
+              <div><span>全局可用</span><strong id="integrations-installed">—</strong></div>
+              <div><span>项目已初始化</span><strong id="integrations-configured">—</strong></div>
               <p id="integrations-status">等待首次发现</p>
             </div>
           </section>
@@ -567,7 +599,13 @@
                 <h2 id="runtime-title">Token 运行时用量</h2>
                 <p>Codex 与 Claude 均优先读取本地会话；CC Switch 作为 Claude 下游回退，缓存输入不会重复计算。</p>
               </div>
-              <span id="runtime-updated">等待首次采集</span>
+              <div class="runtime-heading-status">
+                <span class="runtime-load-status" id="runtime-load-status" role="status" aria-live="polite" hidden>
+                  <i aria-hidden="true"></i>
+                  <span id="runtime-load-status-text"></span>
+                </span>
+                <span id="runtime-updated">等待首次采集</span>
+              </div>
             </div>
 
             <div class="runtime-filters" aria-label="用量筛选">
@@ -694,11 +732,11 @@
         <section class="coordination-view" id="coordination-view" hidden>
           <header class="coordination-topbar">
             <div>
-              <p class="eyebrow">COORDINATION OBSERVABILITY</p>
-              <h1>协调观测</h1>
-              <p class="subtitle">比较 Balanced 与 Overnight 的调用、制品、状态和审阅边界；只记录元数据。</p>
+              <p class="eyebrow">ACTIVATION &amp; RUNTIME ACTIVITY</p>
+              <h1>活动记录</h1>
+              <p class="subtitle">在同一条审计链中查看 Skill 激活、关联运行与协调事件；运行内容只投影安全元数据。</p>
             </div>
-            <button class="button ghost" id="coordination-refresh" type="button">刷新数据</button>
+            <button class="button ghost" id="coordination-refresh" type="button">刷新活动</button>
           </header>
 
           <section class="coordination-panel" aria-labelledby="coordination-title">
@@ -748,8 +786,9 @@
             <div class="coordination-heading">
               <div>
                 <p class="token-kicker">RUNS</p>
-                <h2 id="coordination-runs-title">最近运行</h2>
+                <h2 id="coordination-runs-title">未关联运行</h2>
               </div>
+              <span>旧运行或无法可靠绑定激活快照的运行单独保留</span>
             </div>
             <div class="coordination-run-list" id="coordination-run-list"></div>
           </section>
@@ -775,9 +814,9 @@
         <section class="history-view" id="history-view" hidden>
           <header class="history-topbar">
             <div>
-              <p class="eyebrow">ACTIVATION AUDIT LOG</p>
-              <h1>激活记录</h1>
-              <p class="subtitle">查看每次真实文件激活的不可变快照，并安全恢复任意历史版本。</p>
+              <p class="eyebrow">IMMUTABLE ACTIVATION TIMELINE</p>
+              <h1>激活与运行关联</h1>
+              <p class="subtitle">选择不可变激活快照，查看由该配置产生的运行，并安全恢复历史版本。</p>
             </div>
             <button class="button ghost" id="history-refresh" type="button">刷新记录</button>
           </header>
@@ -786,7 +825,7 @@
             <section class="history-list-panel">
               <div class="history-panel-heading">
                 <div>
-                  <h2>配置时间线</h2>
+                  <h2>激活时间线</h2>
                   <span id="history-status">正在读取本地记录</span>
                 </div>
                 <span class="history-integrity" id="history-integrity">完整性检查中</span>
@@ -810,6 +849,12 @@
                   <span class="compatibility" id="history-active-badge" hidden>当前激活</span>
                 </div>
                 <div class="history-meta" id="history-meta"></div>
+
+                <div class="history-section-heading">
+                  <h3>关联运行</h3>
+                  <span id="history-run-summary">0 条运行</span>
+                </div>
+                <div class="history-run-list coordination-run-list" id="history-run-list"></div>
 
                 <div class="history-section-heading">
                   <h3>配置字段变化</h3>

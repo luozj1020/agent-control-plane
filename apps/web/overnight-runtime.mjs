@@ -27,6 +27,7 @@ import {
   normalizeAdapterContainment,
 } from "./adapter-containment.mjs";
 import { normalizeRuntimeEnvironment } from "./runtime-environment.mjs";
+import { normalizeRuntimeActivation } from "./runtime-activation.mjs";
 import {
   createNextCycleTemplate,
   taskAllowsNoChanges,
@@ -394,6 +395,7 @@ export function createOvernightRuntime(options = {}) {
       throw new OvernightRuntimeError("runtime.wake_adapter_unknown", `Unknown wake adapter '${input.wakeAdapterId}'.`);
     }
     const runtimeEnvironment = normalizeRuntimeEnvironment(input.runtimeEnvironment);
+    const activation = normalizeRuntimeActivation(input, OvernightRuntimeError);
     const containment = normalizeAdapterContainment({
       filesystemIsolation: "post-run-only",
       ...adapter,
@@ -415,6 +417,7 @@ export function createOvernightRuntime(options = {}) {
       currentTaskSha256: sha256(taskText),
       worktree,
       adapterId: adapter.id,
+      ...activation,
       runtimeEnvironment,
       containment,
       wakeAdapterId: wakeAdapter.id,

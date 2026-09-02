@@ -212,6 +212,12 @@ export interface SkillResolutionInput {
   readonly catalog?: ModeSkillCatalog;
 }
 
+export interface ProjectBinding {
+  readonly projectId: string;
+  readonly projectRevision: number;
+  readonly projectConfigSha256: string;
+}
+
 export interface EffectiveSkillVariant {
   readonly schemaVersion: typeof SCHEMA_VERSION;
   readonly id: string;
@@ -229,12 +235,14 @@ export interface EffectiveSkillVariant {
   readonly overnightLoopPolicy?: VersionedRef;
   readonly balancedBudget?: BalancedBudgetOverride;
   readonly balancedTiming?: BalancedTimingOverride;
+  readonly projectBinding?: ProjectBinding | null;
 }
 
 export interface ManagedSkillState {
   readonly variantId: string;
   readonly relativeSkillPath: string;
   readonly contentFingerprint: string;
+  readonly projectBinding?: ProjectBinding | null;
   readonly active: boolean;
 }
 

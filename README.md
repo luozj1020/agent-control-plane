@@ -147,7 +147,20 @@ Balanced and Overnight run appends comparable control-plane boundary events to
 `events.jsonl` and `monitor-events.jsonl` remain available for deeper runtime
 diagnosis.
 
-The Coordination page and `GET /api/coordination` aggregate only recorded
+The Activity page combines immutable activation snapshots with their Balanced
+and Overnight runs. `GET /api/activity` links a run by an explicit activation
+id first, then by the effective Skill SHA-256. Legacy runs without either field
+are visibly marked as an inferred time/mode association; stale explicit links
+and incompatible runs remain in the unlinked section. Activation rollback never
+deletes runtime history.
+
+The product CLI automatically reads the active, same-mode managed Skill and
+stores its activation id and SHA-256 in each new run. External launchers can
+override that context with `--activation-id` and `--skill-sha256`. Both fields
+remain optional so older launchers stay compatible; missing history never
+blocks execution and produces a visibly inferred or unlinked run instead.
+
+The same page and `GET /api/coordination` aggregate only recorded
 facts: downstream invocation boundaries and reported token totals, explicit
 artifact reads, artifact writes, lifecycle transitions, validation, wake
 delivery, review decisions, and interrupts. Event details are metadata-only
@@ -339,6 +352,36 @@ switching routes and probing again consumes another explicitly confirmed call.
 `packages/workflow-core`. There is no second Web-owned schema copy: an absent
 core, incompatible Contract, or hash mismatch fails closed.
 
+## Project overrides
+
+The Skill configuration page can explicitly initialize a repository-owned
+`.agent-control-plane/` directory. `project.json` contains only the durable
+project identity; `workflow.json` stores a versioned delta over the current
+global Profile. The delta may select the mode and Agent bindings, retain the
+relevant Overnight or Balanced controls, and add a bounded project Skill
+appendix. It never copies the complete mode Skill, embeds secrets, or rewrites
+an existing `AGENTS.md`.
+
+Project writes use optimistic revision checks, a project-local single-writer
+lock, atomic replacement, immutable revision snapshots, and explicit restore.
+Unknown fields, unsafe control paths, stale revisions, malformed timing or call
+budgets, and Skill appendices above 32 KiB fail closed. Initialization and
+project-override saves do not activate a Harness. Every initialized revision has
+a deterministic configuration SHA-256. The explicit activation request sends
+the project id, revision, and hash back to the server, which reloads the project
+configuration and rejects stale context, profile mismatches, or a missing Skill
+appendix before any managed Skill write.
+
+The verified project binding is stored in the active manifest and immutable
+activation history. Balanced and Overnight runtime discovery propagates the
+same binding into run metadata. Activity association requires project identity,
+revision, and configuration hash to match; a run without that evidence remains
+global or unlinked instead of being inferred into the current project. This
+keeps activation, rollback, runtime evidence, and coordination telemetry on one
+auditable project identity chain. Native writes into Harness-specific project
+configuration remain a separate adapter capability and are not implied by
+initializing project overrides.
+
 ## Tools and integrations
 
 The **工具与集成** page begins with the embedded Workflow Core panel. It reads
@@ -352,10 +395,14 @@ markers, and Harness compatibility separate from workflow Skills. The initial
 catalog contains CodeGraph CLI, CodeGraph MCP, and a generic custom MCP Server
 registration entry.
 
-Discovery is read-only: it validates an absolute project directory, resolves
-commands directly from `PATH` without a shell, runs a five-second bounded version
-handshake with a minimal non-secret process environment, and treats a symlinked
-or non-directory `.codegraph` marker as unsafe.
+Discovery is read-only and reports two independent layers. **Global environment**
+discovery resolves commands directly from `PATH` without a shell and runs a
+five-second bounded version handshake with a minimal non-secret process
+environment. **Current project** discovery validates an absolute project
+directory, treats a symlinked or non-directory `.codegraph` marker as unsafe,
+and uses a bounded status probe to verify initialization, project identity, and
+pending index drift. Marker presence alone is not reported as a healthy project;
+unobservable initialization or drift remains explicitly unknown.
 Diagnostics return only checks, version metadata, and health categories; command
 output, environment values, repository content, and credentials are not returned.
 
