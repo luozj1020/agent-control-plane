@@ -39,6 +39,7 @@ test("new projects keep declarative policy in the repository and mutable state l
     assert.match(initialized.projectId, /^project-/);
     assert.match(initialized.workspaceId, /^workspace-/);
     assert.match(initialized.configSha256, /^[a-f0-9]{64}$/);
+    assert.equal((await store.recent()).projects[0].projectRoot, project);
 
     const saved = await store.save({
       projectRoot: project,
@@ -71,6 +72,40 @@ test("new projects keep declarative policy in the repository and mutable state l
     );
     assert.equal(localState.revision, 1);
     assert.equal(localState.localOverrides.modeId, "balanced");
+    const recent = await store.recent();
+    assert.equal(recent.corruptEntries, 0);
+    assert.deepEqual(recent.projects.map((entry) => ({
+      projectRoot: entry.projectRoot,
+      modeId: entry.modeId,
+      revision: entry.revision,
+      available: entry.available,
+    })), [{ projectRoot: project, modeId: "balanced", revision: 1, available: true }]);
+  });
+});
+
+test("opening projects records local recency and never writes recent metadata into the repository", async () => {
+  await withProject(async ({ project, root, stateRoot }) => {
+    const second = join(root, "second-project");
+    await mkdir(second);
+    let tick = 0;
+    let nonce = 0;
+    const store = createProjectConfigStore({
+      stateRoot,
+      clock: () => new Date(`2026-09-02T00:00:${String(tick++).padStart(2, "0")}.000Z`),
+      nonceFactory: () => `id-${++nonce}`,
+    });
+    const firstState = await store.initialize(project);
+    const secondState = await store.initialize(second);
+    await rm(join(stateRoot, secondState.workspaceId, "recent.json"));
+    await store.open(project);
+
+    const recent = await store.recent();
+    assert.deepEqual(recent.projects.map((entry) => entry.projectRoot), [project, second]);
+    assert.equal(recent.projects[0].workspaceId, firstState.workspaceId);
+    await assert.rejects(
+      readFile(join(project, ".agent-control-plane", "recent.json")),
+      { code: "ENOENT" },
+    );
   });
 });
 
@@ -199,6 +234,10 @@ test("project configuration rejects unsafe roots, control paths, and local locks
       store.inspect("relative/project"),
       (error) => error instanceof ProjectConfigError && error.code === "project.root_invalid",
     );
+    await assert.rejects(
+      store.inspect("/"),
+      (error) => error instanceof ProjectConfigError && error.code === "project.root_invalid",
+    );
     const target = join(root, "target");
     await mkdir(target);
     await symlink(target, join(project, ".agent-control-plane"), "dir");
@@ -227,5 +266,12 @@ test("project configuration rejects unsafe roots, control paths, and local locks
       }),
       (error) => error instanceof ProjectConfigError && error.code === "project.locked",
     );
+    const unsafeRecentTarget = join(root, "unsafe-recent.json");
+    await writeFile(unsafeRecentTarget, "{}\n");
+    await rm(join(stateRoot, initialized.workspaceId, "recent.json"));
+    await symlink(unsafeRecentTarget, join(stateRoot, initialized.workspaceId, "recent.json"));
+    const recent = await store.recent();
+    assert.equal(recent.projects.length, 0);
+    assert.equal(recent.corruptEntries, 1);
   });
 });

@@ -552,6 +552,9 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 42px); line-height: 1.08; letter-spa
 
 .history-view { max-width: 1420px; margin: 0 auto; }
 .history-topbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; margin-bottom: 30px; }
+.history-topbar-actions { display: flex; align-items: flex-end; gap: 10px; }
+.history-topbar-actions label { display: grid; gap: 5px; color: var(--muted); font-size: 9px; }
+.history-topbar-actions select { min-width: 140px; padding: 9px 30px 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: #111419; color: var(--text); font-size: 10px; }
 .history-layout { display: grid; grid-template-columns: minmax(320px, 0.72fr) minmax(520px, 1.28fr); gap: 20px; align-items: start; }
 .history-list-panel, .history-detail-panel { overflow: hidden; border: 1px solid var(--line-soft); border-radius: var(--radius); background: linear-gradient(145deg, rgba(24, 28, 34, 0.88), rgba(16, 19, 23, 0.96)); box-shadow: 0 20px 50px rgba(0, 0, 0, 0.13); }
 .history-list-panel { min-height: 570px; }
@@ -626,6 +629,34 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 42px); line-height: 1.08; letter-spa
 .project-override-description { margin: 14px 0 0; color: var(--muted); font-size: 10px; line-height: 1.65; }
 .project-root-row { display: grid; grid-template-columns: minmax(0, 1fr) repeat(4, auto); gap: 10px; align-items: end; margin-top: 16px; }
 .project-root-row .button { min-width: 98px; }
+.project-current-card { margin-top: 16px; overflow: hidden; border: 1px solid rgba(126, 167, 255, .24); border-radius: 13px; background: linear-gradient(135deg, rgba(126, 167, 255, .08), rgba(216, 255, 79, .025)); }
+.project-current-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 16px; }
+.project-current-heading > div { min-width: 0; }
+.project-current-heading span:first-child { display: block; color: var(--blue); font: 750 9px ui-monospace, monospace; letter-spacing: .1em; }
+.project-current-heading strong { display: block; margin-top: 6px; overflow: hidden; color: var(--text); font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.project-current-heading small { display: block; margin-top: 5px; overflow: hidden; color: var(--muted); font: 10px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.project-current-status { flex: 0 0 auto; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font: 750 9px ui-monospace, monospace; }
+.project-current-status.ready { border-color: rgba(216, 255, 79, .3); background: rgba(216, 255, 79, .06); color: var(--accent); }
+.project-current-status.stale { border-color: rgba(255, 207, 102, .32); background: rgba(255, 207, 102, .06); color: #ffcf66; }
+.project-current-status.error { border-color: rgba(255, 107, 107, .32); background: rgba(255, 107, 107, .06); color: var(--danger); }
+.project-current-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; border-top: 1px solid var(--line-soft); background: var(--line-soft); }
+.project-current-grid > div { min-width: 0; padding: 11px 13px; background: rgba(13, 16, 20, .88); }
+.project-current-grid span, .project-current-grid strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-current-grid span { color: var(--muted); font-size: 9px; }
+.project-current-grid strong { margin-top: 5px; color: #dce3ec; font-size: 11px; }
+.recent-project-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; }
+.recent-project-heading > div { display: flex; align-items: baseline; gap: 10px; }
+.recent-project-heading strong { font-size: 12px; }
+.recent-project-heading span { color: var(--muted); font-size: 9px; }
+.recent-project-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.recent-project-list > p { grid-column: 1 / -1; margin: 0; padding: 14px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); font-size: 10px; text-align: center; }
+.recent-project { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 10px; padding: 12px 13px; border: 1px solid var(--line); border-radius: 10px; background: #0f1216; color: var(--text); text-align: left; cursor: pointer; }
+.recent-project:hover:not(:disabled), .recent-project.current { border-color: rgba(216, 255, 79, .48); background: rgba(216, 255, 79, .035); }
+.recent-project:disabled { cursor: not-allowed; opacity: .48; }
+.recent-project strong, .recent-project small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-project strong { font-size: 11px; }
+.recent-project code { color: var(--blue); font-size: 9px; }
+.recent-project small { grid-column: 1 / -1; color: var(--muted); font: 9px ui-monospace, monospace; }
 .project-config-meta { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; margin-top: 14px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--line-soft); }
 .project-config-meta > div { min-width: 0; padding: 11px 12px; background: #111419; }
 .project-config-meta span, .project-config-meta strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -638,6 +669,10 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 42px); line-height: 1.08; letter-spa
 .project-skill-appendix textarea:disabled { opacity: .55; }
 .project-skill-appendix small { color: var(--muted); font-size: 9px; line-height: 1.55; }
 .project-config-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.project-repository-policy { margin-top: 14px; border-top: 1px solid var(--line-soft); }
+.project-repository-policy summary { padding-top: 13px; color: var(--muted); font-size: 9px; cursor: pointer; }
+.project-repository-policy > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 10px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: #0d1014; }
+.project-repository-policy p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.55; }
 
 .mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 20px; }
 .mode-card {
@@ -983,6 +1018,7 @@ body { font-size: 14px; line-height: 1.45; }
   .preview-column { position: static; }
   .runtime-metrics { grid-template-columns: repeat(3, 1fr); }
   .history-layout { grid-template-columns: 1fr; }
+  .project-current-grid { grid-template-columns: repeat(3, 1fr); }
   .task-card-layout { grid-template-columns: 1fr; }
   .task-card-preflight-body { grid-template-columns: 1fr; }
   .integration-list { grid-template-columns: 1fr 1fr; }
@@ -1004,7 +1040,8 @@ body { font-size: 14px; line-height: 1.45; }
   .topbar { align-items: flex-start; flex-direction: column; }
   .top-actions { width: 100%; }
   .top-actions .button { flex: 1; }
-  .mode-grid, .field-grid, .overnight-policy-rules, .project-root-row, .project-config-meta { grid-template-columns: 1fr; }
+  .mode-grid, .field-grid, .overnight-policy-rules, .project-root-row, .project-config-meta, .project-current-grid, .recent-project-list { grid-template-columns: 1fr; }
+  .project-current-heading, .project-repository-policy > div { align-items: stretch; flex-direction: column; }
   .directory-input-row { grid-template-columns: 1fr; }
   .project-config-actions { align-items: stretch; flex-direction: column; }
   .balanced-window-grid, .balanced-budget-grid { grid-template-columns: 1fr 1fr; }
@@ -1027,6 +1064,8 @@ body { font-size: 14px; line-height: 1.45; }
   .runtime-footer, .runtime-chart-toolbar { align-items: flex-start; flex-direction: column; }
   .runtime-chart-shell { padding-inline: 7px; }
   .history-topbar { align-items: flex-start; flex-direction: column; }
+  .history-topbar-actions { align-items: stretch; flex-direction: column; width: 100%; }
+  .history-topbar-actions select { width: 100%; }
   .task-card-topbar { align-items: flex-start; flex-direction: column; }
   .task-card-topbar .top-actions { width: 100%; flex-wrap: wrap; }
   .task-card-topbar .button { flex: 1; }

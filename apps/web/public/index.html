@@ -74,11 +74,11 @@
               <div class="panel-heading">
                 <div>
                   <span class="step">P</span>
-                  <h2>项目覆盖</h2>
+                  <h2>个人项目</h2>
                 </div>
                 <span class="compatibility" id="project-config-status">尚未检查</span>
               </div>
-              <p class="project-override-description">全局 Profile 继续提供默认值；这里只保存当前项目的模式、Agent、运行参数和精简 Skill 增量。</p>
+              <p class="project-override-description">选择项目后自动恢复你在该 checkout 中使用的模式、Agent、运行参数和 Skill 增量。</p>
               <div class="project-root-row">
                 <label class="field">
                   <span>项目目录</span>
@@ -89,6 +89,30 @@
                 <button class="button ghost" id="project-config-check" type="button">检查项目</button>
                 <button class="button ghost" id="project-config-initialize" type="button" hidden>初始化项目</button>
                 <button class="button ghost" id="project-config-migrate" type="button" hidden>迁移本地状态</button>
+              </div>
+              <section class="project-current-card" aria-labelledby="project-current-name">
+                <div class="project-current-heading">
+                  <div>
+                    <span>CURRENT PROJECT</span>
+                    <strong id="project-current-name">尚未选择项目</strong>
+                    <small id="project-current-path">从文件管理器选择或输入项目目录</small>
+                  </div>
+                  <span class="project-current-status" id="project-current-active">等待检查</span>
+                </div>
+                <div class="project-current-grid">
+                  <div><span>模式</span><strong id="project-current-mode">—</strong></div>
+                  <div><span>主 Agent</span><strong id="project-current-main">—</strong></div>
+                  <div><span>下游</span><strong id="project-current-builder">—</strong></div>
+                  <div><span>最近运行</span><strong id="project-current-run">—</strong></div>
+                  <div><span>项目工具</span><strong id="project-current-tools">等待检查</strong></div>
+                </div>
+              </section>
+              <div class="recent-project-heading">
+                <div><strong>最近项目</strong><span id="recent-project-status">正在读取本机项目…</span></div>
+                <button class="preview-reset" id="recent-project-refresh" type="button">刷新</button>
+              </div>
+              <div class="recent-project-list" id="recent-project-list">
+                <p>尚无最近项目。</p>
               </div>
               <div class="project-config-meta">
                 <div><span>项目 ID</span><strong id="project-config-id">—</strong></div>
@@ -105,9 +129,15 @@
               <div class="project-config-actions">
                 <button class="button ghost" id="project-config-restore" type="button" disabled>撤回上次项目修改</button>
                 <button class="button ghost" id="project-config-clear" type="button" disabled>清除本机覆盖</button>
-                <button class="button ghost" id="project-config-publish" type="button" disabled>发布团队策略</button>
-                <button class="button primary" id="project-config-save" type="button" disabled>保存为本机覆盖</button>
+                <button class="button primary" id="project-config-save" type="button" disabled>保存项目配置</button>
               </div>
+              <details class="project-repository-policy">
+                <summary>高级 · 仓库配置（实验性）</summary>
+                <div>
+                  <p>可选地把当前配置写入仓库的 <code>.agent-control-plane/workflow.json</code>。个人本地使用不需要此操作，也不会自动提交 Git。</p>
+                  <button class="button ghost" id="project-config-publish" type="button" disabled>写入仓库配置</button>
+                </div>
+              </details>
             </section>
 
             <section class="panel">
@@ -825,7 +855,16 @@
               <h1>激活与运行关联</h1>
               <p class="subtitle">选择不可变激活快照，查看由该配置产生的运行，并安全恢复历史版本。</p>
             </div>
-            <button class="button ghost" id="history-refresh" type="button">刷新记录</button>
+            <div class="history-topbar-actions">
+              <label>
+                <span>显示范围</span>
+                <select id="history-scope-filter">
+                  <option value="current">当前项目</option>
+                  <option value="all">全部项目</option>
+                </select>
+              </label>
+              <button class="button ghost" id="history-refresh" type="button">刷新记录</button>
+            </div>
           </header>
 
           <div class="history-layout">

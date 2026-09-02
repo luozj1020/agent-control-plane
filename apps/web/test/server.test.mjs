@@ -114,9 +114,14 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /id="project-config-migrate"/);
     assert.match(html, /id="project-config-workspace"/);
     assert.match(html, /id="project-config-publish"/);
+    assert.match(html, /id="project-current-name"/);
+    assert.match(html, /id="project-current-active"/);
+    assert.match(html, /id="recent-project-list"/);
+    assert.match(html, /id="recent-project-refresh"/);
+    assert.match(html, /id="history-scope-filter"/);
     assert.match(html, /id="project-skill-appendix"/);
-    assert.match(html, /保存为本机覆盖/);
-    assert.match(html, /发布团队策略/);
+    assert.match(html, /保存项目配置/);
+    assert.match(html, /高级 · 仓库配置（实验性）/);
     assert.doesNotMatch(html, /总 Token 上限/);
     assert.match(html, /USAGE · ESTIMATED CONTEXT/);
     assert.match(html, /ACTIVATION &amp; RUNTIME ACTIVITY/);
@@ -297,6 +302,14 @@ test("project APIs expose explicit initialization, optimistic saves, and revisio
       calls.push(["initialize", projectRoot]);
       return { schemaVersion: 1, projectRoot, initialized: true, revision: 0, overrides: {}, history: [] };
     },
+    async open(projectRoot) {
+      calls.push(["open", projectRoot]);
+      return { schemaVersion: 2, projectRoot, initialized: true, revision: 0, overrides: {}, history: [] };
+    },
+    async recent() {
+      calls.push(["recent"]);
+      return { schemaVersion: 1, projects: [{ projectRoot: "/tmp/project", displayName: "project" }], corruptEntries: 0 };
+    },
     async migrate(projectRoot) {
       calls.push(["migrate", projectRoot]);
       return { schemaVersion: 2, projectRoot, initialized: true, migrationRequired: false, revision: 0 };
@@ -317,6 +330,17 @@ test("project APIs expose explicit initialization, optimistic saves, and revisio
     );
     assert.equal(inspected.status, 200);
     assert.equal((await inspected.json()).initialized, false);
+
+    const recent = await fetch(`${baseUrl}/api/projects/recent`);
+    assert.equal(recent.status, 200);
+    assert.equal((await recent.json()).projects.length, 1);
+
+    const opened = await fetch(`${baseUrl}/api/projects/open`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({ projectRoot }),
+    });
+    assert.equal(opened.status, 200);
 
     const initialized = await fetch(`${baseUrl}/api/projects/initialize`, {
       method: "POST",
@@ -364,8 +388,16 @@ test("project APIs expose explicit initialization, optimistic saves, and revisio
       body: JSON.stringify({ projectRoot }),
     });
     assert.equal(rejected.status, 403);
+    const rejectedOpen = await fetch(`${baseUrl}/api/projects/open`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://attacker.example" },
+      body: JSON.stringify({ projectRoot }),
+    });
+    assert.equal(rejectedOpen.status, 403);
     assert.deepEqual(calls, [
       ["inspect", projectRoot],
+      ["recent"],
+      ["open", projectRoot],
       ["initialize", projectRoot],
       ["migrate", projectRoot],
       ["save", {

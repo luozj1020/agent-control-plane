@@ -352,11 +352,17 @@ switching routes and probing again consumes another explicitly confirmed call.
 `packages/workflow-core`. There is no second Web-owned schema copy: an absent
 core, incompatible Contract, or hash mismatch fails closed.
 
-## Project overrides
+## Personal project scopes
 
-The Skill configuration page can explicitly initialize a repository-owned
-`.agent-control-plane/` directory. Repository files are declarative and safe to
-share through version control:
+The configuration page is a personal project hub. Opening a project restores
+that checkout's mode, Agent bindings, runtime controls, and Skill appendix. It
+also shows whether the resolved Skill is active or stale, the latest bound run,
+current integration health, and up to eight recent projects. Activity defaults
+to the current workspace and can be expanded to all local projects explicitly.
+
+Each initialized project may contain a minimal repository-owned
+`.agent-control-plane/` directory. These files are declarative; personal use
+does not require committing or sharing them:
 
 ```text
 repo/.agent-control-plane/
@@ -370,22 +376,24 @@ Mutable state is deliberately kept outside the repository:
 ~/.agent-control-plane/workspaces/<workspaceId>/
 ├── binding.json       # this physical checkout
 ├── state.json         # local revision and local overrides
+├── recent.json        # validated personal project summary
 ├── history/           # immutable local snapshots
 └── project.lock       # local single-writer lock
 ```
 
 `AGENT_CONTROL_PROJECT_STATE_DIR` may select another absolute local state root.
-`projectId` identifies the logical repository configuration; `workspaceId`
+`projectId` identifies the logical project configuration; `workspaceId`
 identifies one physical checkout on one control-plane installation. Two clones
-therefore share policy without sharing locks, revision history, or runtime
-identity.
+therefore keep independent personal overrides, locks, revision history, and
+runtime identity.
 
-The UI exposes two explicit write scopes. **保存为本机覆盖** writes only local
-state and masks matching shared fields. **发布团队策略** writes the current
-effective delta to `workflow.json` and clears the masking local delta. The
-delta may select the mode and Agent bindings, retain the relevant Overnight or
-Balanced controls, and add a bounded project Skill appendix. It never copies
-the complete mode Skill, embeds secrets, or rewrites an existing `AGENTS.md`.
+The primary **保存项目配置** action writes only local state and masks matching
+repository fields. Writing the current effective delta to `workflow.json` is an
+advanced experimental action hidden behind **高级 · 仓库配置**; it is not part
+of the normal personal workflow and never commits or pushes Git. The delta may
+select the mode and Agent bindings, retain the relevant Overnight or Balanced
+controls, and add a bounded project Skill appendix. It never copies the
+complete mode Skill, embeds secrets, or rewrites an existing `AGENTS.md`.
 
 Project paths can be typed or selected through an explicit host directory
 dialog. WSL/Windows uses the Windows folder browser and maps the result back to
@@ -393,6 +401,12 @@ the WSL path; macOS uses Finder, while Linux tries Zenity and then KDialog. The
 browser never invents a filesystem path: the local server canonicalizes the
 selected existing directory, cancellation preserves the current value, and an
 unavailable desktop picker is reported without changing project state.
+
+Recent-project metadata is stored as `recent.json` beside local workspace
+state. Opening, initializing, migrating, saving, or restoring a project updates
+its validated local summary. Older workspace state without this file is
+projected from its binding and last update time, so upgrading does not hide
+existing personal projects. Missing paths remain visible but cannot be opened.
 
 Project writes use optimistic local-revision and shared-policy-hash checks, a
 workspace-local single-writer lock, atomic replacement, immutable local

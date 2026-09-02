@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, parse, resolve } from "node:path";
 
 import {
   BALANCED_BUDGET_LIMITS,
@@ -33,6 +33,8 @@ const LOCK_FILE = "project.lock";
 const INSTALLATION_FILE = "installation.json";
 const BINDING_FILE = "binding.json";
 const STATE_FILE = "state.json";
+const RECENT_FILE = "recent.json";
+const MAX_RECENT_PROJECTS = 20;
 const MAX_APPENDIX_BYTES = 32 * 1024;
 const OVERRIDE_KEYS = new Set([
   "modeId",
@@ -312,6 +314,24 @@ function validateSnapshot(value, expected) {
   };
 }
 
+function validateRecent(value, expected) {
+  if (
+    !value || value.schemaVersion !== LOCAL_SCHEMA_VERSION || value.owner !== OWNER ||
+    value.workspaceId !== expected.workspaceId || value.projectId !== expected.projectId ||
+    value.projectRoot !== expected.projectRoot ||
+    typeof value.displayName !== "string" || value.displayName.length === 0 || value.displayName.length > 255 ||
+    typeof value.lastOpenedAt !== "string" || !Number.isFinite(Date.parse(value.lastOpenedAt)) ||
+    !Number.isSafeInteger(value.revision) || value.revision < 0 ||
+    typeof value.configSha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.configSha256) ||
+    (value.modeId !== null && !MODE_IDS.has(value.modeId)) ||
+    (value.mainAgentId !== null && !AGENT_IDS.has(value.mainAgentId)) ||
+    (value.builderAgentId !== null && !AGENT_IDS.has(value.builderAgentId))
+  ) {
+    throw new ProjectConfigError("project.recent_invalid", "Recent project metadata is invalid.", 409);
+  }
+  return value;
+}
+
 export function createProjectConfigStore(options = {}) {
   const clock = options.clock ?? (() => new Date());
   const nonceFactory = options.nonceFactory ?? randomUUID;
@@ -322,6 +342,9 @@ export function createProjectConfigStore(options = {}) {
     throw new ProjectConfigError("project.state_root_invalid", "Project state root must be absolute.", 500);
   }
   const stateRoot = resolve(configuredStateRoot);
+  if (stateRoot === parse(stateRoot).root) {
+    throw new ProjectConfigError("project.state_root_invalid", "Filesystem root cannot store project state.", 500);
+  }
 
   async function requireProjectRoot(input) {
     if (typeof input !== "string" || !isAbsolute(input)) {
@@ -338,6 +361,9 @@ export function createProjectConfigStore(options = {}) {
       );
     }
     const canonical = await realpath(requested);
+    if (canonical === parse(canonical).root) {
+      throw new ProjectConfigError("project.root_invalid", "Filesystem root cannot be initialized as a project.", 400, "projectRoot");
+    }
     const metadata = await stat(canonical);
     if (!metadata.isDirectory()) {
       throw new ProjectConfigError("project.root_unavailable", "projectRoot must be a directory.", 400, "projectRoot");
@@ -419,6 +445,7 @@ export function createProjectConfigStore(options = {}) {
       projectId,
       projectRoot,
       root,
+      recent: join(root, RECENT_FILE),
       state: join(root, STATE_FILE),
       workspaceId,
     };
@@ -543,6 +570,122 @@ export function createProjectConfigStore(options = {}) {
     };
   }
 
+  async function touchRecent(state) {
+    if (!state?.initialized || state.migrationRequired || !state.workspaceId) return state;
+    const descriptor = await workspaceDescriptor(state.projectRoot, state.projectId);
+    const lastOpenedAt = clock().toISOString();
+    const recent = {
+      schemaVersion: LOCAL_SCHEMA_VERSION,
+      owner: OWNER,
+      projectId: state.projectId,
+      workspaceId: state.workspaceId,
+      projectRoot: state.projectRoot,
+      displayName: basename(state.projectRoot),
+      lastOpenedAt,
+      revision: state.revision,
+      configSha256: state.configSha256,
+      modeId: state.overrides.modeId ?? null,
+      mainAgentId: state.overrides.mainAgentId ?? null,
+      builderAgentId: state.overrides.builderAgentId ?? null,
+    };
+    await writeJsonAtomic(descriptor.recent, recent, nonceFactory());
+    return { ...state, lastOpenedAt };
+  }
+
+  async function openProject(input) {
+    return touchRecent(await inspect(input));
+  }
+
+  async function recent() {
+    await ensureStateRoot();
+    const entries = await readdir(stateRoot, { withFileTypes: true });
+    const projects = [];
+    let corruptEntries = 0;
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^workspace-[a-f0-9]{32}$/.test(entry.name)) continue;
+      const root = join(stateRoot, entry.name);
+      try {
+        const bindingPath = join(root, BINDING_FILE);
+        const statePath = join(root, STATE_FILE);
+        const recentPath = join(root, RECENT_FILE);
+        if ((await pathType(bindingPath)) !== "file" || (await pathType(statePath)) !== "file") {
+          throw new ProjectConfigError("project.workspace_invalid", "Recent workspace state is incomplete.", 409);
+        }
+        const recentType = await pathType(recentPath);
+        if (!new Set(["missing", "file"]).has(recentType)) {
+          throw new ProjectConfigError("project.recent_invalid", "Recent project metadata is unsafe.", 409);
+        }
+        const binding = await readJson(bindingPath);
+        if (!binding || binding.workspaceId !== entry.name) {
+          throw new ProjectConfigError("project.binding_invalid", "Recent workspace binding is invalid.", 409);
+        }
+        const expected = {
+          projectId: binding.projectId,
+          projectRoot: binding.projectRoot,
+          workspaceId: binding.workspaceId,
+        };
+        validateBinding(binding, expected);
+        const state = validateState(await readJson(statePath), expected);
+        const rawRecent = recentType === "file" ? await readJson(recentPath) : null;
+        let metadata;
+        if (rawRecent) {
+          metadata = validateRecent(rawRecent, expected);
+        } else {
+          let overrides = state.localOverrides;
+          let configSha256 = null;
+          if ((await pathType(binding.projectRoot)) === "directory") {
+            const repository = await readRepository(binding.projectRoot);
+            if (
+              repository && !repository.legacy &&
+              repository.identity.projectId === binding.projectId
+            ) {
+              overrides = effectiveOverrides(repository.workflow.overrides, state.localOverrides);
+              configSha256 = effectiveConfigSha256(
+                binding.projectId,
+                repository.workflow.overrides,
+                state.localOverrides,
+              );
+            }
+          }
+          metadata = {
+            projectId: binding.projectId,
+            workspaceId: binding.workspaceId,
+            projectRoot: binding.projectRoot,
+            displayName: basename(binding.projectRoot),
+            lastOpenedAt: state.updatedAt,
+            revision: state.revision,
+            configSha256,
+            modeId: overrides.modeId ?? null,
+            mainAgentId: overrides.mainAgentId ?? null,
+            builderAgentId: overrides.builderAgentId ?? null,
+          };
+        }
+        projects.push({
+          projectId: metadata.projectId,
+          workspaceId: metadata.workspaceId,
+          projectRoot: metadata.projectRoot,
+          displayName: metadata.displayName,
+          lastOpenedAt: metadata.lastOpenedAt,
+          revision: metadata.revision,
+          configSha256: metadata.configSha256,
+          modeId: metadata.modeId,
+          mainAgentId: metadata.mainAgentId,
+          builderAgentId: metadata.builderAgentId,
+          available: (await pathType(metadata.projectRoot)) === "directory",
+        });
+      } catch (error) {
+        if (!(error instanceof ProjectConfigError) && error?.code !== "ENOENT") throw error;
+        corruptEntries += 1;
+      }
+    }
+    projects.sort((left, right) => right.lastOpenedAt.localeCompare(left.lastOpenedAt));
+    return {
+      schemaVersion: LOCAL_SCHEMA_VERSION,
+      projects: projects.slice(0, MAX_RECENT_PROJECTS),
+      corruptEntries,
+    };
+  }
+
   async function inspect(input) {
     const projectRoot = await requireProjectRoot(input);
     const repository = await readRepository(projectRoot);
@@ -572,7 +715,7 @@ export function createProjectConfigStore(options = {}) {
   async function initialize(input) {
     const projectRoot = await requireProjectRoot(input);
     const existing = await readRepository(projectRoot);
-    if (existing) return inspect(projectRoot);
+    if (existing) return openProject(projectRoot);
     const paths = repositoryPaths(projectRoot);
     const temporary = join(projectRoot, `${CONTROL_DIRECTORY}.tmp-${nonceFactory()}`);
     await mkdir(temporary, { mode: 0o700 });
@@ -594,7 +737,7 @@ export function createProjectConfigStore(options = {}) {
       throw error;
     }
     await readWorkspace(projectRoot, projectId);
-    return inspect(projectRoot);
+    return openProject(projectRoot);
   }
 
   async function withLock(descriptor, operation) {
@@ -656,7 +799,7 @@ export function createProjectConfigStore(options = {}) {
     nextLocalOverrides,
     action,
   }) {
-    return withLock(workspace.descriptor, async () => {
+    const state = await withLock(workspace.descriptor, async () => {
       const currentRepository = await readRepository(projectRoot);
       if (!currentRepository || currentRepository.legacy) {
         throw new ProjectConfigError("project.migration_required", "Migrate the project before changing configuration.", 409);
@@ -694,6 +837,7 @@ export function createProjectConfigStore(options = {}) {
       }, nonceFactory());
       return inspect(projectRoot);
     });
+    return touchRecent(state);
   }
 
   async function save({
@@ -766,7 +910,7 @@ export function createProjectConfigStore(options = {}) {
     if (!repository) {
       throw new ProjectConfigError("project.not_initialized", "Project is not initialized.", 409);
     }
-    if (!repository.legacy) return { ...(await inspect(projectRoot)), migration: null };
+    if (!repository.legacy) return { ...(await openProject(projectRoot)), migration: null };
     if ((await pathType(repository.paths.legacyLock)) !== "missing") {
       throw new ProjectConfigError("project.legacy_locked", "Legacy project state has an active or stale lock; verify the writer before migration.", 409);
     }
@@ -818,7 +962,7 @@ export function createProjectConfigStore(options = {}) {
       await rm(repository.paths.legacyHistory, { recursive: true });
     }
     return {
-      ...(await inspect(projectRoot)),
+      ...(await openProject(projectRoot)),
       migration: {
         movedHistory,
         localStateRoot: workspace.descriptor.root,
@@ -826,5 +970,5 @@ export function createProjectConfigStore(options = {}) {
     };
   }
 
-  return Object.freeze({ initialize, inspect, migrate, restore, save });
+  return Object.freeze({ initialize, inspect, migrate, open: openProject, recent, restore, save });
 }

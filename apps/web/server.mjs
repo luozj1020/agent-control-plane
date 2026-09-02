@@ -373,6 +373,21 @@ export function createAppServer(options = {}) {
         return;
       }
 
+      if (pathname === "/api/projects/recent" && (request.method === "GET" || request.method === "HEAD")) {
+        sendJson(response, 200, await projectConfigStore.recent(), request.method === "HEAD");
+        return;
+      }
+
+      if (pathname === "/api/projects/open" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await projectConfigStore.open(body?.projectRoot));
+        return;
+      }
+
       if (pathname === "/api/projects/initialize" && request.method === "POST") {
         if (!trustedMutationOrigin(request)) {
           sendJson(response, 403, { error: "request.untrusted_origin" });
