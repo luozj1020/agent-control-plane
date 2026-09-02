@@ -85,11 +85,14 @@
                   <input id="project-config-root" type="text" placeholder="/mnt/e/project" autocomplete="off" spellcheck="false">
                   <small>初始化会创建受管的 <code>.agent-control-plane/</code>，不会改写 Harness。</small>
                 </label>
+                <button class="button ghost" id="project-config-browse" type="button">选择文件夹</button>
                 <button class="button ghost" id="project-config-check" type="button">检查项目</button>
                 <button class="button ghost" id="project-config-initialize" type="button" hidden>初始化项目</button>
+                <button class="button ghost" id="project-config-migrate" type="button" hidden>迁移本地状态</button>
               </div>
               <div class="project-config-meta">
                 <div><span>项目 ID</span><strong id="project-config-id">—</strong></div>
+                <div><span>工作区 ID</span><strong id="project-config-workspace">—</strong></div>
                 <div><span>配置版本</span><strong id="project-config-revision">—</strong></div>
                 <div><span>配置 Hash</span><strong id="project-config-hash">—</strong></div>
                 <div><span>覆盖来源</span><strong id="project-config-source">全局 Profile</strong></div>
@@ -101,8 +104,9 @@
               </label>
               <div class="project-config-actions">
                 <button class="button ghost" id="project-config-restore" type="button" disabled>撤回上次项目修改</button>
-                <button class="button ghost" id="project-config-clear" type="button" disabled>恢复全局继承</button>
-                <button class="button primary" id="project-config-save" type="button" disabled>保存当前配置为项目覆盖</button>
+                <button class="button ghost" id="project-config-clear" type="button" disabled>清除本机覆盖</button>
+                <button class="button ghost" id="project-config-publish" type="button" disabled>发布团队策略</button>
+                <button class="button primary" id="project-config-save" type="button" disabled>保存为本机覆盖</button>
               </div>
             </section>
 
@@ -527,10 +531,13 @@
               <span class="integration-safety-badge">计划预览 · 不直接安装</span>
             </div>
             <div class="integrations-controls">
-              <label class="integration-project-field">
-                <span>绝对项目路径</span>
-                <input id="integrations-project-root" type="text" placeholder="/mnt/e/project" autocomplete="off" spellcheck="false">
-              </label>
+              <div class="integration-project-field">
+                <label for="integrations-project-root">绝对项目路径</label>
+                <div class="directory-input-row">
+                  <input id="integrations-project-root" type="text" placeholder="/mnt/e/project" autocomplete="off" spellcheck="false">
+                  <button class="button ghost" id="integrations-project-browse" type="button">选择文件夹</button>
+                </div>
+              </div>
               <label>
                 <span>目标 Harness</span>
                 <select id="integrations-harness">

@@ -21,6 +21,7 @@ import { activityDetail, buildActivityLog } from "./activity-log.mjs";
 import { createBalancedRuntime } from "./balanced-runtime.mjs";
 import { createOvernightRuntime } from "./overnight-runtime.mjs";
 import { createEditableCodexAgentStore } from "./codex-agent-role-store.mjs";
+import { createDirectoryPicker } from "./directory-picker.mjs";
 import { createIntegrationRegistry } from "./integration-registry.mjs";
 import { createProjectConfigStore, ProjectConfigError } from "./project-config-store.mjs";
 import { createWorkflowCoreAdapter } from "./workflow-core-adapter.mjs";
@@ -199,7 +200,10 @@ export function createAppServer(options = {}) {
     defaultProjectRoot: options.integrationProjectRoot ?? process.cwd(),
     environment: options.integrationEnvironment ?? process.env,
   });
-  const projectConfigStore = options.projectConfigStore ?? createProjectConfigStore();
+  const projectConfigStore = options.projectConfigStore ?? createProjectConfigStore({
+    stateRoot: options.projectStateRoot,
+  });
+  const directoryPicker = options.directoryPicker ?? createDirectoryPicker();
   async function verifiedProjectBinding(input) {
     if (input === undefined || input === null) return null;
     if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -209,7 +213,11 @@ export function createAppServer(options = {}) {
     if (!project.initialized) {
       throw new ProjectConfigError("project.not_initialized", "Project activation requires initialization.", 409);
     }
+    if (project.migrationRequired || !project.workspaceId) {
+      throw new ProjectConfigError("project.migration_required", "Migrate project-local state before activation.", 409);
+    }
     if (
+      input.workspaceId !== project.workspaceId ||
       input.expectedRevision !== project.revision ||
       input.configSha256 !== project.configSha256
     ) {
@@ -222,6 +230,7 @@ export function createAppServer(options = {}) {
     return {
       binding: {
         projectId: project.projectId,
+        workspaceId: project.workspaceId,
         projectRevision: project.revision,
         projectConfigSha256: project.configSha256,
       },
@@ -320,6 +329,18 @@ export function createAppServer(options = {}) {
         return;
       }
 
+      if (pathname === "/api/system/select-directory" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await directoryPicker.choose({
+          initialDirectory: body?.initialDirectory,
+        }));
+        return;
+      }
+
       if (pathname === "/api/workflow-core/diagnose" && request.method === "POST") {
         if (!trustedMutationOrigin(request)) {
           sendJson(response, 403, { error: "request.untrusted_origin" });
@@ -362,6 +383,16 @@ export function createAppServer(options = {}) {
         return;
       }
 
+      if (pathname === "/api/projects/migrate" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await projectConfigStore.migrate(body?.projectRoot));
+        return;
+      }
+
       if (pathname === "/api/projects/current" && request.method === "PUT") {
         if (!trustedMutationOrigin(request)) {
           sendJson(response, 403, { error: "request.untrusted_origin" });
@@ -371,7 +402,9 @@ export function createAppServer(options = {}) {
         sendJson(response, 200, await projectConfigStore.save({
           projectRoot: body?.projectRoot,
           expectedRevision: body?.expectedRevision,
+          expectedSharedConfigSha256: body?.expectedSharedConfigSha256,
           overrides: body?.overrides,
+          scope: body?.scope,
         }));
         return;
       }
@@ -385,6 +418,7 @@ export function createAppServer(options = {}) {
         sendJson(response, 200, await projectConfigStore.restore({
           projectRoot: body?.projectRoot,
           expectedRevision: body?.expectedRevision,
+          expectedSharedConfigSha256: body?.expectedSharedConfigSha256,
           revision: body?.revision,
         }));
         return;

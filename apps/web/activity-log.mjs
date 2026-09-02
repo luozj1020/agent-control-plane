@@ -15,6 +15,7 @@ function projectBindingMatches(run, activation) {
   if (left === null || right === null) return left === right;
   return (
     left.projectId === right.projectId &&
+    left.workspaceId === right.workspaceId &&
     left.projectRevision === right.projectRevision &&
     left.projectConfigSha256 === right.projectConfigSha256
   );
@@ -138,6 +139,10 @@ export function buildActivityLog(history, balancedRuns = [], overnightRuns = [])
       projects: new Set([
         ...activations.map((entry) => entry.projectBinding?.projectId).filter(Boolean),
         ...runs.map((run) => run.projectBinding?.projectId).filter(Boolean),
+      ]).size,
+      workspaces: new Set([
+        ...activations.map((entry) => entry.projectBinding?.workspaceId).filter(Boolean),
+        ...runs.map((run) => run.projectBinding?.workspaceId).filter(Boolean),
       ]).size,
     },
   };

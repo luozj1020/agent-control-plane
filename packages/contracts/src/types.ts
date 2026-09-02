@@ -214,6 +214,7 @@ export interface SkillResolutionInput {
 
 export interface ProjectBinding {
   readonly projectId: string;
+  readonly workspaceId?: string;
   readonly projectRevision: number;
   readonly projectConfigSha256: string;
 }

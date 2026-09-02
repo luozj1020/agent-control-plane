@@ -512,6 +512,7 @@ test("activation treats a different project revision as a distinct target", () =
     ...resolved.value,
     projectBinding: {
       projectId: "project-1",
+      workspaceId: "workspace-1",
       projectRevision: 2,
       projectConfigSha256: "b".repeat(64),
     },
@@ -522,6 +523,7 @@ test("activation treats a different project revision as a distinct target", () =
     contentFingerprint: desired.contentFingerprint,
     projectBinding: {
       projectId: "project-1",
+      workspaceId: "workspace-1",
       projectRevision: 1,
       projectConfigSha256: "a".repeat(64),
     },

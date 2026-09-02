@@ -65,11 +65,13 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /id="nav-integrations"/);
     assert.match(html, /class="integrations-view" id="integrations-view" hidden/);
     assert.match(html, /id="integrations-project-root"/);
+    assert.match(html, /id="integrations-project-browse"/);
     assert.match(html, /id="integration-list"/);
     assert.match(html, /id="workflow-source-panel"/);
     assert.match(html, /id="workflow-source-version"/);
     assert.match(html, /id="workflow-source-diagnose"/);
     assert.match(html, /内置 Workflow Core 契约/);
+    assert.match(html, /id="project-config-browse"/);
     assert.match(html, /工具与集成/);
     assert.match(html, /class="task-card-view" id="task-card-view" hidden/);
     assert.match(html, /id="task-card-editor"/);
@@ -108,8 +110,13 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /Balanced 运行控制/);
     assert.match(html, /id="balanced-first-progress-window"/);
     assert.match(html, /id="project-config-root"/);
+    assert.match(html, /id="project-config-browse"/);
+    assert.match(html, /id="project-config-migrate"/);
+    assert.match(html, /id="project-config-workspace"/);
+    assert.match(html, /id="project-config-publish"/);
     assert.match(html, /id="project-skill-appendix"/);
-    assert.match(html, /保存当前配置为项目覆盖/);
+    assert.match(html, /保存为本机覆盖/);
+    assert.match(html, /发布团队策略/);
     assert.doesNotMatch(html, /总 Token 上限/);
     assert.match(html, /USAGE · ESTIMATED CONTEXT/);
     assert.match(html, /ACTIVATION &amp; RUNTIME ACTIVITY/);
@@ -140,6 +147,45 @@ test("serves the application and health endpoint", async () => {
     assert.match(css, /body \{ font-size: 14px/);
     assert.match(css, /\.interactive-role-tag \{ font-size: 12px/);
   });
+});
+
+test("directory picker API opens only after an explicit local request", async () => {
+  const calls = [];
+  const directoryPicker = {
+    async choose(input) {
+      calls.push(input);
+      return {
+        selected: true,
+        projectRoot: "/workspace/project",
+        provider: "test-picker",
+      };
+    },
+  };
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/system/select-directory`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initialDirectory: "/workspace" }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      selected: true,
+      projectRoot: "/workspace/project",
+      provider: "test-picker",
+    });
+    assert.deepEqual(calls, [{ initialDirectory: "/workspace" }]);
+
+    const rejected = await fetch(`${baseUrl}/api/system/select-directory`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://attacker.example",
+      },
+      body: "{}",
+    });
+    assert.equal(rejected.status, 403);
+    assert.equal(calls.length, 1);
+  }, { directoryPicker });
 });
 
 test("active connectivity endpoint forwards only the explicit diagnostic request", async () => {
@@ -251,6 +297,10 @@ test("project APIs expose explicit initialization, optimistic saves, and revisio
       calls.push(["initialize", projectRoot]);
       return { schemaVersion: 1, projectRoot, initialized: true, revision: 0, overrides: {}, history: [] };
     },
+    async migrate(projectRoot) {
+      calls.push(["migrate", projectRoot]);
+      return { schemaVersion: 2, projectRoot, initialized: true, migrationRequired: false, revision: 0 };
+    },
     async save(input) {
       calls.push(["save", input]);
       return { schemaVersion: 1, ...input, initialized: true, revision: 1, history: [{ revision: 0 }] };
@@ -275,10 +325,23 @@ test("project APIs expose explicit initialization, optimistic saves, and revisio
     });
     assert.equal(initialized.status, 200);
 
+    const migrated = await fetch(`${baseUrl}/api/projects/migrate`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({ projectRoot }),
+    });
+    assert.equal(migrated.status, 200);
+
     const saved = await fetch(`${baseUrl}/api/projects/current`, {
       method: "PUT",
       headers: { "content-type": "application/json", origin: baseUrl },
-      body: JSON.stringify({ projectRoot, expectedRevision: 0, overrides: { modeId: "balanced" } }),
+      body: JSON.stringify({
+        projectRoot,
+        expectedRevision: 0,
+        expectedSharedConfigSha256: "a".repeat(64),
+        scope: "local",
+        overrides: { modeId: "balanced" },
+      }),
     });
     assert.equal(saved.status, 200);
     assert.equal((await saved.json()).revision, 1);
@@ -286,7 +349,12 @@ test("project APIs expose explicit initialization, optimistic saves, and revisio
     const restored = await fetch(`${baseUrl}/api/projects/restore`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: baseUrl },
-      body: JSON.stringify({ projectRoot, expectedRevision: 1, revision: 0 }),
+      body: JSON.stringify({
+        projectRoot,
+        expectedRevision: 1,
+        expectedSharedConfigSha256: "a".repeat(64),
+        revision: 0,
+      }),
     });
     assert.equal(restored.status, 200);
 
@@ -299,8 +367,20 @@ test("project APIs expose explicit initialization, optimistic saves, and revisio
     assert.deepEqual(calls, [
       ["inspect", projectRoot],
       ["initialize", projectRoot],
-      ["save", { projectRoot, expectedRevision: 0, overrides: { modeId: "balanced" } }],
-      ["restore", { projectRoot, expectedRevision: 1, revision: 0 }],
+      ["migrate", projectRoot],
+      ["save", {
+        projectRoot,
+        expectedRevision: 0,
+        expectedSharedConfigSha256: "a".repeat(64),
+        overrides: { modeId: "balanced" },
+        scope: "local",
+      }],
+      ["restore", {
+        projectRoot,
+        expectedRevision: 1,
+        expectedSharedConfigSha256: "a".repeat(64),
+        revision: 0,
+      }],
     ]);
   }, { projectConfigStore });
 });
@@ -807,6 +887,8 @@ test("activation binds a server-verified project revision and rejects stale proj
     initialized: true,
     projectRoot,
     projectId: "project-1",
+    workspaceId: "workspace-1",
+    migrationRequired: false,
     revision: 4,
     configSha256: "c".repeat(64),
     overrides: { modeId: "overnight" },
@@ -825,12 +907,28 @@ test("activation binds a server-verified project revision and rejects stale proj
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           profile: CODEX_OVERNIGHT_CLAUDE_PROFILE,
-          projectContext: { projectRoot, expectedRevision: 4, configSha256 },
+          projectContext: { projectRoot, workspaceId: "workspace-1", expectedRevision: 4, configSha256 },
         }),
       });
       const stale = await activate("d".repeat(64));
       assert.equal(stale.status, 409);
       assert.equal((await stale.json()).error, "project.binding_stale");
+
+      const wrongWorkspace = await fetch(`${baseUrl}/api/activate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          profile: CODEX_OVERNIGHT_CLAUDE_PROFILE,
+          projectContext: {
+            projectRoot,
+            workspaceId: "workspace-other",
+            expectedRevision: 4,
+            configSha256: project.configSha256,
+          },
+        }),
+      });
+      assert.equal(wrongWorkspace.status, 409);
+      assert.equal((await wrongWorkspace.json()).error, "project.binding_stale");
 
       const mismatchedProfile = await fetch(`${baseUrl}/api/activate`, {
         method: "POST",
@@ -842,6 +940,7 @@ test("activation binds a server-verified project revision and rejects stale proj
           },
           projectContext: {
             projectRoot,
+            workspaceId: "workspace-1",
             expectedRevision: 4,
             configSha256: project.configSha256,
           },
@@ -855,6 +954,7 @@ test("activation binds a server-verified project revision and rejects stale proj
       const body = await response.json();
       assert.deepEqual(body.status.active.projectBinding, {
         projectId: "project-1",
+        workspaceId: "workspace-1",
         projectRevision: 4,
         projectConfigSha256: "c".repeat(64),
       });

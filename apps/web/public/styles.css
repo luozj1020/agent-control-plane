@@ -384,9 +384,11 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 42px); line-height: 1.08; letter-spa
 .integrations-control-heading h2, .integration-plan-heading h2 { margin: 3px 0 0; font-size: 20px; }
 .integration-safety-badge { padding: 7px 10px; border-radius: 99px; background: rgba(216, 255, 79, 0.08); color: var(--accent); font-size: 12px; font-weight: 750; }
 .integrations-controls { display: grid; grid-template-columns: minmax(320px, 2fr) minmax(150px, 0.7fr) minmax(130px, 0.55fr); gap: 12px; margin-top: 18px; }
-.integrations-controls label { display: grid; gap: 7px; color: #aeb7c1; font-size: 12px; font-weight: 700; }
+.integrations-controls label, .integration-project-field { display: grid; gap: 7px; color: #aeb7c1; font-size: 12px; font-weight: 700; }
 .integrations-controls input, .integrations-controls select { min-width: 0; padding: 11px 12px; border: 1px solid #2a3038; border-radius: 9px; outline: none; background: #0a0d11; color: #dce2e8; font-size: 13px; }
 .integrations-controls input:focus, .integrations-controls select:focus { border-color: #4b5563; }
+.directory-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.directory-input-row .button { min-width: 104px; }
 .integrations-summary { display: grid; grid-template-columns: repeat(3, minmax(110px, 0.35fr)) minmax(260px, 1fr); gap: 1px; margin-top: 18px; overflow: hidden; border: 1px solid #252b33; border-radius: 10px; background: #252b33; }
 .integrations-summary > div, .integrations-summary > p { min-width: 0; margin: 0; padding: 11px 12px; background: #0d1014; }
 .integrations-summary span, .integrations-summary strong { display: block; }
@@ -622,9 +624,9 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 42px); line-height: 1.08; letter-spa
 
 .project-override-panel { border-color: rgba(126, 167, 255, 0.26); }
 .project-override-description { margin: 14px 0 0; color: var(--muted); font-size: 10px; line-height: 1.65; }
-.project-root-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: end; margin-top: 16px; }
+.project-root-row { display: grid; grid-template-columns: minmax(0, 1fr) repeat(4, auto); gap: 10px; align-items: end; margin-top: 16px; }
 .project-root-row .button { min-width: 98px; }
-.project-config-meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin-top: 14px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--line-soft); }
+.project-config-meta { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; margin-top: 14px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--line-soft); }
 .project-config-meta > div { min-width: 0; padding: 11px 12px; background: #111419; }
 .project-config-meta span, .project-config-meta strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-config-meta span { color: var(--muted); font-size: 11px; }
@@ -635,7 +637,7 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 42px); line-height: 1.08; letter-spa
 .project-skill-appendix textarea:focus { border-color: var(--accent); }
 .project-skill-appendix textarea:disabled { opacity: .55; }
 .project-skill-appendix small { color: var(--muted); font-size: 9px; line-height: 1.55; }
-.project-config-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.project-config-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 
 .mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 20px; }
 .mode-card {
@@ -1003,6 +1005,7 @@ body { font-size: 14px; line-height: 1.45; }
   .top-actions { width: 100%; }
   .top-actions .button { flex: 1; }
   .mode-grid, .field-grid, .overnight-policy-rules, .project-root-row, .project-config-meta { grid-template-columns: 1fr; }
+  .directory-input-row { grid-template-columns: 1fr; }
   .project-config-actions { align-items: stretch; flex-direction: column; }
   .balanced-window-grid, .balanced-budget-grid { grid-template-columns: 1fr 1fr; }
   .interactive-global-grid, .interactive-role-controls { grid-template-columns: 1fr; }

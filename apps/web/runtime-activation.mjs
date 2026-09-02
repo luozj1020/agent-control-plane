@@ -23,6 +23,7 @@ export function normalizeRuntimeActivation(input, ErrorType) {
         : requestedProjectHash;
     if (
       !requestedProject || !SAFE_ID.test(requestedProject.projectId) ||
+      !SAFE_ID.test(requestedProject.workspaceId) ||
       !Number.isSafeInteger(requestedProject.projectRevision) || requestedProject.projectRevision < 0 ||
       typeof projectConfigSha256 !== "string" || !SHA256.test(projectConfigSha256)
     ) {
@@ -30,6 +31,7 @@ export function normalizeRuntimeActivation(input, ErrorType) {
     }
     projectBinding = {
       projectId: requestedProject.projectId,
+      workspaceId: requestedProject.workspaceId,
       projectRevision: requestedProject.projectRevision,
       projectConfigSha256,
     };
@@ -59,7 +61,7 @@ export async function discoverRuntimeActivation(mode, options = {}) {
       ? {
           activationId: active.historyId,
           effectiveSkillSha256: active.contentSha256,
-          projectBinding: active.projectBinding ?? null,
+          projectBinding: active.projectBinding?.workspaceId ? active.projectBinding : null,
         }
       : { activationId: null, effectiveSkillSha256: null, projectBinding: null };
   } catch {

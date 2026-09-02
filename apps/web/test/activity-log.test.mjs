@@ -80,6 +80,7 @@ test("does not hide stale explicit links behind inferred associations", () => {
 test("project-bound runs cannot attach to an activation from another project revision", () => {
   const projectBinding = {
     projectId: "project-1",
+    workspaceId: "workspace-1",
     projectRevision: 3,
     projectConfigSha256: "c".repeat(64),
   };
@@ -92,6 +93,26 @@ test("project-bound runs cannot attach to an activation from another project rev
   assert.equal(activity.entries[0].runs.length, 0);
   assert.equal(activity.unlinkedRuns[0].association.reason, "activation-project-mismatch");
   assert.equal(activity.activitySummary.projects, 1);
+  assert.equal(activity.activitySummary.workspaces, 1);
+});
+
+test("identical project revisions from different workspaces never attach", () => {
+  const projectBinding = {
+    projectId: "project-1",
+    workspaceId: "workspace-1",
+    projectRevision: 3,
+    projectConfigSha256: "c".repeat(64),
+  };
+  const history = { available: true, entries: [activation({ projectBinding })] };
+  const activity = buildActivityLog(history, [run({
+    activationId: "activation-1",
+    projectBinding: { ...projectBinding, workspaceId: "workspace-2" },
+  })], []);
+
+  assert.equal(activity.entries[0].runs.length, 0);
+  assert.equal(activity.unlinkedRuns[0].association.reason, "activation-project-mismatch");
+  assert.equal(activity.activitySummary.projects, 1);
+  assert.equal(activity.activitySummary.workspaces, 2);
 });
 
 test("activity detail carries only runs associated with the selected activation", () => {

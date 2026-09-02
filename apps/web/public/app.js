@@ -134,6 +134,7 @@ const elements = {
   integrationsConfigured: document.querySelector("#integrations-configured"),
   integrationsHarness: document.querySelector("#integrations-harness"),
   integrationsInstalled: document.querySelector("#integrations-installed"),
+  integrationsProjectBrowse: document.querySelector("#integrations-project-browse"),
   integrationsProjectRoot: document.querySelector("#integrations-project-root"),
   integrationsRefresh: document.querySelector("#integrations-refresh"),
   integrationsScope: document.querySelector("#integrations-scope"),
@@ -179,16 +180,20 @@ const elements = {
   overnightRunList: document.querySelector("#overnight-run-list"),
   overnightRuntimeSummary: document.querySelector("#overnight-runtime-summary"),
   projectConfigCheck: document.querySelector("#project-config-check"),
+  projectConfigBrowse: document.querySelector("#project-config-browse"),
   projectConfigClear: document.querySelector("#project-config-clear"),
   projectConfigHash: document.querySelector("#project-config-hash"),
   projectConfigId: document.querySelector("#project-config-id"),
   projectConfigInitialize: document.querySelector("#project-config-initialize"),
+  projectConfigMigrate: document.querySelector("#project-config-migrate"),
+  projectConfigPublish: document.querySelector("#project-config-publish"),
   projectConfigRestore: document.querySelector("#project-config-restore"),
   projectConfigRevision: document.querySelector("#project-config-revision"),
   projectConfigRoot: document.querySelector("#project-config-root"),
   projectConfigSave: document.querySelector("#project-config-save"),
   projectConfigSource: document.querySelector("#project-config-source"),
   projectConfigStatus: document.querySelector("#project-config-status"),
+  projectConfigWorkspace: document.querySelector("#project-config-workspace"),
   projectSkillAppendix: document.querySelector("#project-skill-appendix"),
   overnightScopeRule: document.querySelector("#overnight-scope-rule"),
   navConfiguration: document.querySelector("#nav-configuration"),
@@ -345,6 +350,7 @@ let integrationsData = null;
 let integrationsLoading = false;
 let projectConfigState = null;
 let projectConfigLoading = false;
+let directoryPickerLoading = false;
 let workflowSourceData = null;
 let selectedCoordinationRun = null;
 let coordinationDetailRequest = 0;
@@ -1691,7 +1697,7 @@ function renderHistoryList() {
     return;
   }
 
-  elements.historyStatus.textContent = `${entries.length} 条激活 · ${historyData.activitySummary?.runs ?? 0} 条运行 · ${historyData.activitySummary?.projects ?? 0} 个项目`;
+  elements.historyStatus.textContent = `${entries.length} 条激活 · ${historyData.activitySummary?.runs ?? 0} 条运行 · ${historyData.activitySummary?.projects ?? 0} 个项目 · ${historyData.activitySummary?.workspaces ?? 0} 个工作区`;
   const corrupt = historyData.corruptEntries ?? 0;
   elements.historyIntegrity.textContent = corrupt === 0 ? "完整性通过" : `${corrupt} 条损坏记录`;
   elements.historyIntegrity.classList.toggle("error", corrupt > 0);
@@ -1742,6 +1748,7 @@ function renderHistoryMeta(entry) {
     ["Activated", formatHistoryDate(entry.activatedAt)],
     ["Skill hash", entry.contentSha256 ? entry.contentSha256.slice(0, 12) : "—"],
     ["Project", entry.projectBinding?.projectId ?? "global"],
+    ["Workspace", entry.projectBinding?.workspaceId ?? "—"],
     ["Project revision", entry.projectBinding ? `r${entry.projectBinding.projectRevision}` : "—"],
     ["Project config", entry.projectBinding?.projectConfigSha256?.slice(0, 12) ?? "—"],
   ];
@@ -2298,7 +2305,7 @@ function projectSkillContent(content) {
 
 function draftKeyFor(variant) {
   const project = variant.projectBinding
-    ? `${variant.projectBinding.projectId}:r${variant.projectBinding.projectRevision}:${variant.projectBinding.projectConfigSha256}`
+    ? `${variant.projectBinding.projectId}:${variant.projectBinding.workspaceId}:r${variant.projectBinding.projectRevision}:${variant.projectBinding.projectConfigSha256}`
     : "global";
   return `${variant.id}:${variant.contentFingerprint}:${project}`;
 }
@@ -2312,11 +2319,12 @@ function resolveSkillDraft(modeId = selectedModeId) {
   if (!resolved.ok) return { ok: false, issues: resolved.issues };
   const projected = customizeEffectiveSkill(resolved.value, projectSkillContent(resolved.value.content));
   if (!projected.ok) return { ok: false, issues: projected.issues };
-  const projectBound = projectConfigState?.initialized
+  const projectBound = projectConfigState?.initialized && !projectConfigState.migrationRequired && projectConfigState.workspaceId
     ? {
         ...projected.value,
         projectBinding: {
           projectId: projectConfigState.projectId,
+          workspaceId: projectConfigState.workspaceId,
           projectRevision: projectConfigState.revision,
           projectConfigSha256: projectConfigState.configSha256,
         },
@@ -2376,29 +2384,38 @@ function applyProjectOverrides(overrides = {}) {
 function renderProjectConfig() {
   const state = projectConfigState;
   const initialized = state?.initialized === true;
+  const migrationRequired = initialized && state.migrationRequired === true;
   elements.projectConfigStatus.classList.toggle("error", state?.error !== undefined);
   elements.projectConfigStatus.textContent = projectConfigLoading
     ? "正在读取"
     : state?.error
       ? "项目配置不可用"
-      : initialized ? "项目覆盖已启用" : state ? "项目尚未初始化" : "尚未检查";
+      : migrationRequired
+        ? "需要迁移本地状态"
+        : initialized ? "项目覆盖已启用" : state ? "项目尚未初始化" : "尚未检查";
   elements.projectConfigId.textContent = initialized ? shortHash(state.projectId) : "—";
   elements.projectConfigId.title = initialized ? state.projectId : "";
+  elements.projectConfigWorkspace.textContent = state?.workspaceId ? shortHash(state.workspaceId) : "—";
+  elements.projectConfigWorkspace.title = state?.workspaceId ?? "";
   elements.projectConfigRevision.textContent = initialized ? `r${state.revision}` : "—";
   elements.projectConfigHash.textContent = initialized ? shortHash(state.configSha256) : "—";
   elements.projectConfigHash.title = initialized ? state.configSha256 : "";
-  const overrideCount = initialized ? Object.keys(state.overrides ?? {}).length : 0;
-  elements.projectConfigSource.textContent = overrideCount > 0
-    ? `${overrideCount} 项项目覆盖`
-    : "全局 Profile";
+  const localCount = initialized ? Object.keys(state.localOverrides ?? {}).length : 0;
+  const sharedCount = initialized ? Object.keys(state.sharedOverrides ?? {}).length : 0;
+  elements.projectConfigSource.textContent = localCount > 0
+    ? `本机 ${localCount} 项 · 团队 ${sharedCount} 项`
+    : sharedCount > 0 ? `团队 ${sharedCount} 项` : "全局 Profile";
   elements.projectConfigInitialize.hidden = !state || initialized;
+  elements.projectConfigMigrate.hidden = !migrationRequired;
   elements.projectConfigInitialize.disabled = projectConfigLoading;
+  elements.projectConfigMigrate.disabled = projectConfigLoading;
   elements.projectConfigCheck.disabled = projectConfigLoading;
-  elements.projectConfigSave.disabled = !initialized || projectConfigLoading;
-  elements.projectConfigClear.disabled = !initialized || projectConfigLoading || overrideCount === 0;
+  elements.projectConfigSave.disabled = !initialized || migrationRequired || projectConfigLoading;
+  elements.projectConfigPublish.disabled = !initialized || migrationRequired || projectConfigLoading;
+  elements.projectConfigClear.disabled = !initialized || migrationRequired || projectConfigLoading || localCount === 0;
   elements.projectConfigRestore.disabled =
-    !initialized || projectConfigLoading || (state.history?.length ?? 0) === 0;
-  elements.projectSkillAppendix.disabled = !initialized || projectConfigLoading;
+    !initialized || migrationRequired || projectConfigLoading || (state.history?.length ?? 0) === 0;
+  elements.projectSkillAppendix.disabled = !initialized || migrationRequired || projectConfigLoading;
 }
 
 async function loadProjectConfig(projectRoot = elements.projectConfigRoot.value.trim()) {
@@ -2425,6 +2442,44 @@ async function loadProjectConfig(projectRoot = elements.projectConfigRoot.value.
   }
 }
 
+function renderDirectoryPickerState() {
+  for (const button of [elements.projectConfigBrowse, elements.integrationsProjectBrowse]) {
+    button.disabled = directoryPickerLoading;
+    button.textContent = directoryPickerLoading ? "选择中…" : "选择文件夹";
+  }
+}
+
+async function chooseProjectDirectory() {
+  if (directoryPickerLoading) return;
+  directoryPickerLoading = true;
+  renderDirectoryPickerState();
+  const initialDirectory =
+    elements.projectConfigRoot.value.trim() || elements.integrationsProjectRoot.value.trim();
+  try {
+    const result = await requestJson("/api/system/select-directory", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initialDirectory: initialDirectory || undefined }),
+    });
+    if (!result.selected) {
+      showToast("已取消选择，当前项目目录未改变。");
+      return;
+    }
+    elements.projectConfigRoot.value = result.projectRoot;
+    elements.integrationsProjectRoot.value = result.projectRoot;
+    localStorage.setItem(INTEGRATION_PROJECT_KEY, result.projectRoot);
+    elements.integrationPlanPanel.hidden = true;
+    await loadProjectConfig(result.projectRoot);
+    await loadIntegrations();
+    showToast("已从文件管理器载入项目目录。");
+  } catch (error) {
+    showToast(`无法选择项目目录：${error.message}`);
+  } finally {
+    directoryPickerLoading = false;
+    renderDirectoryPickerState();
+  }
+}
+
 function currentProjectOverrides() {
   const profile = createProfile();
   const overrides = {
@@ -2444,7 +2499,7 @@ function currentProjectOverrides() {
   return overrides;
 }
 
-async function writeProjectOverrides(overrides, successMessage) {
+async function writeProjectOverrides(overrides, successMessage, scope = "local") {
   if (!projectConfigState?.initialized || projectConfigLoading) return;
   projectConfigLoading = true;
   renderProjectConfig();
@@ -2455,7 +2510,9 @@ async function writeProjectOverrides(overrides, successMessage) {
       body: JSON.stringify({
         projectRoot: projectConfigState.projectRoot,
         expectedRevision: projectConfigState.revision,
+        expectedSharedConfigSha256: projectConfigState.sharedConfigSha256,
         overrides,
+        scope,
       }),
     });
     applyProjectOverrides(projectConfigState.overrides);
@@ -3181,6 +3238,15 @@ function refresh(options = {}) {
     activationIssues.push({
       path: "/skill-store",
       message: serverStatus.error ?? `Skill store health: ${serverStatus.health}`,
+    });
+  }
+  if (projectConfigState?.migrationRequired) {
+    elements.compatibilityBadge.textContent = "项目状态需要迁移";
+    elements.compatibilityBadge.classList.add("error");
+    elements.activateButton.disabled = true;
+    activationIssues.push({
+      path: "/project",
+      message: "先迁移旧版项目本地状态，再激活带项目覆盖的 Skill。",
     });
   }
   const agentIssue = interactive && serverStatus.writeEnabled ? interactiveAgentIssue() : null;
@@ -4068,7 +4134,7 @@ function renderActivityRuns(target, runs, options = {}) {
     const title = document.createElement("strong");
     title.textContent = run.runId;
     const subtitle = document.createElement("span");
-    subtitle.textContent = `${run.mode} · ${run.adapterId ?? "adapter 未知"} · ${run.state ?? "状态未知"} · ${run.projectBinding ? `project ${shortHash(run.projectBinding.projectId)}@r${run.projectBinding.projectRevision}` : "global"}`;
+    subtitle.textContent = `${run.mode} · ${run.adapterId ?? "adapter 未知"} · ${run.state ?? "状态未知"} · ${run.projectBinding ? `project ${shortHash(run.projectBinding.projectId)} · workspace ${run.projectBinding.workspaceId ? shortHash(run.projectBinding.workspaceId) : "legacy"}@r${run.projectBinding.projectRevision}` : "global"}`;
     const association = document.createElement("span");
     association.className = `coordination-association ${run.association?.confidence ?? "unknown"}`;
     association.textContent = associationText(run.association);
@@ -4230,7 +4296,7 @@ async function loadInteractiveAgentStatus() {
 }
 
 elements.activateButton.addEventListener("click", async () => {
-  if (!currentResolution) return;
+  if (!currentResolution || projectConfigState?.migrationRequired) return;
   if (serverStatus.writeEnabled) {
     elements.activateButton.disabled = true;
     try {
@@ -4244,9 +4310,11 @@ elements.activateButton.addEventListener("click", async () => {
             selectedModeId === "interactive" && elements.interactiveAgentOverwrite.checked,
           interactiveAgents:
             selectedModeId === "interactive" ? interactiveAgentConfiguration : undefined,
-          projectContext: projectConfigState?.initialized
-            ? {
+          projectContext:
+            projectConfigState?.initialized && projectConfigState.workspaceId
+              ? {
                 projectRoot: projectConfigState.projectRoot,
+                workspaceId: projectConfigState.workspaceId,
                 expectedRevision: projectConfigState.revision,
                 configSha256: projectConfigState.configSha256,
               }
@@ -4294,6 +4362,7 @@ elements.skillPreview.addEventListener("input", () => {
   refresh({ preserveEditor: true });
 });
 elements.projectConfigCheck.addEventListener("click", () => loadProjectConfig());
+elements.projectConfigBrowse.addEventListener("click", chooseProjectDirectory);
 elements.projectConfigRoot.addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadProjectConfig();
 });
@@ -4319,12 +4388,40 @@ elements.projectConfigInitialize.addEventListener("click", async () => {
     renderProjectConfig();
   }
 });
+elements.projectConfigMigrate.addEventListener("click", async () => {
+  if (!projectConfigState?.migrationRequired || projectConfigLoading) return;
+  if (!window.confirm(
+    "迁移旧项目状态？\n\n仓库中的 history 与 lock 将在校验后迁入本机状态目录；project.json 和 workflow.json 将升级为可共享声明式配置。",
+  )) return;
+  projectConfigLoading = true;
+  renderProjectConfig();
+  try {
+    projectConfigState = await requestJson("/api/projects/migrate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectRoot: projectConfigState.projectRoot }),
+    });
+    applyProjectOverrides(projectConfigState.overrides);
+    showToast(`项目状态迁移完成；已迁移 ${projectConfigState.migration?.movedHistory ?? 0} 条本机历史。`);
+  } catch (error) {
+    showToast(`项目状态迁移失败：${error.message}`);
+  } finally {
+    projectConfigLoading = false;
+    renderProjectConfig();
+  }
+});
 elements.projectConfigSave.addEventListener("click", () =>
-  writeProjectOverrides(currentProjectOverrides(), "当前模式与 Skill 增量已保存为项目覆盖。")
+  writeProjectOverrides(currentProjectOverrides(), "当前模式与 Skill 增量已保存为本机覆盖。", "local")
 );
 elements.projectConfigClear.addEventListener("click", () =>
-  writeProjectOverrides({}, "已恢复全局 Profile 继承；项目历史仍可回退。")
+  writeProjectOverrides({}, "已清除本机覆盖；现在继承团队策略与全局 Profile。", "local")
 );
+elements.projectConfigPublish.addEventListener("click", () => {
+  if (!window.confirm(
+    "将当前配置发布为团队策略？\n\n这会更新仓库中的 .agent-control-plane/workflow.json，并清除当前工作区对它的本机覆盖。",
+  )) return;
+  writeProjectOverrides(currentProjectOverrides(), "当前配置已发布为团队项目策略。", "shared");
+});
 elements.projectConfigRestore.addEventListener("click", async () => {
   const revision = projectConfigState?.history?.[0]?.revision;
   if (!Number.isSafeInteger(revision) || projectConfigLoading) return;
@@ -4337,6 +4434,7 @@ elements.projectConfigRestore.addEventListener("click", async () => {
       body: JSON.stringify({
         projectRoot: projectConfigState.projectRoot,
         expectedRevision: projectConfigState.revision,
+        expectedSharedConfigSha256: projectConfigState.sharedConfigSha256,
         revision,
       }),
     });
@@ -4537,6 +4635,7 @@ elements.coordinationDetailClose.addEventListener("click", () => {
   refreshActivityRunSelections();
 });
 elements.integrationsRefresh.addEventListener("click", loadIntegrations);
+elements.integrationsProjectBrowse.addEventListener("click", chooseProjectDirectory);
 elements.workflowSourceDiagnose.addEventListener("click", diagnoseWorkflowSource);
 elements.integrationsProjectRoot.addEventListener("change", loadIntegrations);
 elements.integrationsProjectRoot.addEventListener("keydown", (event) => {

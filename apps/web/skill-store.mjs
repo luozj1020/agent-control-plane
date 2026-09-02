@@ -65,6 +65,7 @@ function validProjectBinding(value) {
   return (
     value === undefined || value === null ||
     (value && safeIdentifier(value.projectId) &&
+      (value.workspaceId === undefined || safeIdentifier(value.workspaceId)) &&
       Number.isSafeInteger(value.projectRevision) && value.projectRevision >= 0 &&
       typeof value.projectConfigSha256 === "string" &&
       /^[a-f0-9]{64}$/.test(value.projectConfigSha256))

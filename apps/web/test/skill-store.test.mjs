@@ -160,6 +160,7 @@ test("project binding changes create a distinct activation and survive rollback"
     const variant = resolveMode("overnight");
     const firstBinding = {
       projectId: "project-1",
+      workspaceId: "workspace-1",
       projectRevision: 1,
       projectConfigSha256: "a".repeat(64),
     };

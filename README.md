@@ -355,30 +355,74 @@ core, incompatible Contract, or hash mismatch fails closed.
 ## Project overrides
 
 The Skill configuration page can explicitly initialize a repository-owned
-`.agent-control-plane/` directory. `project.json` contains only the durable
-project identity; `workflow.json` stores a versioned delta over the current
-global Profile. The delta may select the mode and Agent bindings, retain the
-relevant Overnight or Balanced controls, and add a bounded project Skill
-appendix. It never copies the complete mode Skill, embeds secrets, or rewrites
-an existing `AGENTS.md`.
+`.agent-control-plane/` directory. Repository files are declarative and safe to
+share through version control:
 
-Project writes use optimistic revision checks, a project-local single-writer
-lock, atomic replacement, immutable revision snapshots, and explicit restore.
-Unknown fields, unsafe control paths, stale revisions, malformed timing or call
+```text
+repo/.agent-control-plane/
+├── project.json       # logical project identity
+└── workflow.json      # shared delta over the global Profile
+```
+
+Mutable state is deliberately kept outside the repository:
+
+```text
+~/.agent-control-plane/workspaces/<workspaceId>/
+├── binding.json       # this physical checkout
+├── state.json         # local revision and local overrides
+├── history/           # immutable local snapshots
+└── project.lock       # local single-writer lock
+```
+
+`AGENT_CONTROL_PROJECT_STATE_DIR` may select another absolute local state root.
+`projectId` identifies the logical repository configuration; `workspaceId`
+identifies one physical checkout on one control-plane installation. Two clones
+therefore share policy without sharing locks, revision history, or runtime
+identity.
+
+The UI exposes two explicit write scopes. **保存为本机覆盖** writes only local
+state and masks matching shared fields. **发布团队策略** writes the current
+effective delta to `workflow.json` and clears the masking local delta. The
+delta may select the mode and Agent bindings, retain the relevant Overnight or
+Balanced controls, and add a bounded project Skill appendix. It never copies
+the complete mode Skill, embeds secrets, or rewrites an existing `AGENTS.md`.
+
+Project paths can be typed or selected through an explicit host directory
+dialog. WSL/Windows uses the Windows folder browser and maps the result back to
+the WSL path; macOS uses Finder, while Linux tries Zenity and then KDialog. The
+browser never invents a filesystem path: the local server canonicalizes the
+selected existing directory, cancellation preserves the current value, and an
+unavailable desktop picker is reported without changing project state.
+
+Project writes use optimistic local-revision and shared-policy-hash checks, a
+workspace-local single-writer lock, atomic replacement, immutable local
+snapshots, and explicit restore. Unknown fields, unsafe control paths, stale
+revisions, concurrent Git/shared-policy changes, malformed timing or call
 budgets, and Skill appendices above 32 KiB fail closed. Initialization and
-project-override saves do not activate a Harness. Every initialized revision has
-a deterministic configuration SHA-256. The explicit activation request sends
-the project id, revision, and hash back to the server, which reloads the project
-configuration and rejects stale context, profile mismatches, or a missing Skill
-appendix before any managed Skill write.
+project-override saves do not activate a Harness. Every effective configuration
+has a deterministic SHA-256 independent of its local revision number.
 
-The verified project binding is stored in the active manifest and immutable
-activation history. Balanced and Overnight runtime discovery propagates the
-same binding into run metadata. Activity association requires project identity,
-revision, and configuration hash to match; a run without that evidence remains
-global or unlinked instead of being inferred into the current project. This
-keeps activation, rollback, runtime evidence, and coordination telemetry on one
-auditable project identity chain. Native writes into Harness-specific project
+Projects created by the previous repository-local state format remain readable
+but cannot be edited or activated until the user confirms **迁移本地状态**. The
+migration preserves the logical `projectId`, moves legacy revision snapshots to
+the workspace state root, rewrites only the declarative repository files, and
+removes the old repository-local lock/history layout after successful copying.
+There is no silent migration.
+
+The explicit activation request sends the workspace id, local revision, and
+effective hash back to the server. The server reloads both shared and local
+configuration and rejects stale workspace context, profile mismatches, or a
+missing Skill appendix before any managed Skill write.
+
+The verified project/workspace binding is stored in the active manifest and
+immutable activation history. Balanced and Overnight runtime discovery
+propagates the same binding into run metadata. Activity association requires
+project identity, workspace identity, revision, and configuration hash to
+match; a run without that evidence remains global or unlinked instead of being
+inferred into another checkout. Legacy activation history remains readable but
+is not projected into new workspace-bound runtime lineage. This keeps
+activation, rollback, runtime evidence, and coordination telemetry on one
+auditable checkout identity chain. Native writes into Harness-specific project
 configuration remain a separate adapter capability and are not implied by
 initializing project overrides.
 
