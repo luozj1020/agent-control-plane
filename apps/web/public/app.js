@@ -2648,13 +2648,20 @@ function renderBalancedRuns() {
     id.textContent = run.taskId ?? run.runId;
     id.title = run.runId;
     const state = document.createElement("b");
-    state.textContent = run.state;
+    state.textContent = displayedRunState(run);
+    const stateActions = document.createElement("div");
+    stateActions.className = "overnight-run-actions";
+    stateActions.append(state);
+    appendSubmissionRetry(stateActions, "balanced", run);
     const budget = document.createElement("small");
     const used = run.budgetState?.used ?? {};
     const limits = run.budgetState?.limits ?? {};
     const failure = run.latestFailureCategory ? ` · ${run.latestFailureCategory}` : "";
-    budget.textContent = `轮次 ${run.rounds ?? 0} · 下游 ${used.downstream ?? 0}/${limits.downstreamCalls ?? 0} · 审阅 ${used.main ?? 0}/${limits.mainReviewCalls ?? 0} · Token ${formatTokens(run.budgetState?.totalTokens ?? 0)}${failure}`;
-    item.append(id, state, budget);
+    const linkFailure = run.runCreation?.state === "submission_link_failed"
+      ? ` · 关联失败（尝试 ${run.runCreation.submissionLink?.attempts ?? 0} 次，下游未启动）`
+      : "";
+    budget.textContent = `轮次 ${run.rounds ?? 0} · 下游 ${used.downstream ?? 0}/${limits.downstreamCalls ?? 0} · 审阅 ${used.main ?? 0}/${limits.mainReviewCalls ?? 0} · Token ${formatTokens(run.budgetState?.totalTokens ?? 0)}${failure}${linkFailure}`;
+    item.append(id, stateActions, budget);
     elements.balancedRunList.append(item);
   }
 }
@@ -2686,11 +2693,15 @@ function renderOvernightRuns() {
     id.textContent = run.taskId ?? run.runId;
     id.title = run.runId;
     const state = document.createElement("b");
-    state.textContent = run.state;
+    state.textContent = displayedRunState(run);
     const stateActions = document.createElement("div");
     stateActions.className = "overnight-run-actions";
     stateActions.append(state);
-    if (!["accepted", "stopped", "interrupted"].includes(run.state)) {
+    appendSubmissionRetry(stateActions, "overnight", run);
+    if (
+      run.runCreation?.state !== "submission_link_failed" &&
+      !["accepted", "stopped", "interrupted"].includes(run.state)
+    ) {
       const interrupt = document.createElement("button");
       interrupt.type = "button";
       interrupt.className = "overnight-interrupt";
@@ -2715,10 +2726,45 @@ function renderOvernightRuns() {
     const strategy = run.strategy === "continuous-improvement" ? "持续改进" : "收缩式";
     const delivery = run.wakeDelivery?.status ? ` · 唤醒 ${run.wakeDelivery.status}` : "";
     const failure = run.latestFailureCategory ? ` · ${run.latestFailureCategory}` : "";
-    detail.textContent = `${strategy} · 周期 ${run.cycle ?? 0} · ${run.adapterId ?? "未知下游"}${delivery}${failure}`;
+    const linkFailure = run.runCreation?.state === "submission_link_failed"
+      ? ` · 关联失败（尝试 ${run.runCreation.submissionLink?.attempts ?? 0} 次，下游未启动）`
+      : "";
+    detail.textContent = `${strategy} · 周期 ${run.cycle ?? 0} · ${run.adapterId ?? "未知下游"}${delivery}${failure}${linkFailure}`;
     item.append(id, stateActions, detail);
     elements.overnightRunList.append(item);
   }
+}
+
+function displayedRunState(run) {
+  return ["created", "ready", "submission_link_failed"].includes(run.runCreation?.state)
+    ? run.runCreation.state
+    : run.state;
+}
+
+function appendSubmissionRetry(container, mode, run) {
+  if (run.runCreation?.state !== "submission_link_failed") return;
+  if (run.runCreation.submissionLink?.failure?.retryable === false) return;
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "overnight-interrupt";
+  retry.textContent = "重试关联";
+  retry.title = "仅重试 Task/Preflight/Run 关联，不会创建新 Run 或启动下游";
+  retry.addEventListener("click", async () => {
+    retry.disabled = true;
+    try {
+      await requestJson(
+        `/api/${mode}/runs/${encodeURIComponent(run.runId)}/retry-submission-link`,
+        { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+      );
+      showToast("任务关联已恢复；下游尚未启动");
+      if (mode === "balanced") await loadBalancedRuns();
+      else await loadOvernightRuns();
+    } catch (error) {
+      showToast(`重试关联失败：${error.message}`);
+      retry.disabled = false;
+    }
+  });
+  container.append(retry);
 }
 
 async function loadOvernightRuns() {

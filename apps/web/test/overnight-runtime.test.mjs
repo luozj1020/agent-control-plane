@@ -11,6 +11,8 @@ import {
   validateImprovementContinuation,
 } from "../overnight-runtime.mjs";
 import { createTaskCardTemplate, validateTaskCard } from "../task-card.mjs";
+import { createPreflightReceipt, taskCardSha256 } from "../execution-receipt.mjs";
+import { normalizeRuntimeEnvironment } from "../runtime-environment.mjs";
 import { EMBEDDED_RUNTIME_PROTOCOLS } from "../workflow-runtime-protocol.mjs";
 
 const TEST_CONTRACT_SHA256 = `sha256:${"a".repeat(64)}`;
@@ -200,6 +202,99 @@ test("new Overnight runs fail closed without an immutable Preflight Receipt", as
       }),
       (error) => error instanceof OvernightRuntimeError && error.code === "runtime.preflight_required",
     );
+  });
+});
+
+test("Overnight keeps downstream stopped until the same Run submission link is ready", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const adapter = editingAdapter();
+    const frozenTask = task({ id: "overnight-linked" });
+    const taskSha256 = taskCardSha256(frozenTask);
+    const runtimeEnvironment = normalizeRuntimeEnvironment();
+    const activation = {
+      activationId: "activation-overnight",
+      effectiveSkillSha256: "b".repeat(64),
+      projectBinding: {
+        projectId: null,
+        workspaceId: "workspace-overnight",
+        projectRevision: 3,
+        projectConfigSha256: "c".repeat(64),
+      },
+    };
+    const receipt = createPreflightReceipt({
+      preflightId: "preflight-overnight-1",
+      createdAt: "2026-09-03T03:00:00.000Z",
+      task: {
+        workspaceId: "workspace-overnight",
+        taskId: frozenTask.id,
+        taskRevision: 1,
+        taskSha256,
+      },
+      workflow: {
+        workspaceRevision: 3,
+        configSha256: "c".repeat(64),
+        activationId: activation.activationId,
+        effectiveSkillSha256: activation.effectiveSkillSha256,
+      },
+      runtimeEnvelope: {
+        schemaVersion: 1,
+        workflowMode: "overnight",
+        taskId: frozenTask.id,
+        taskSha256,
+        worktree,
+        adapterId: adapter.id,
+        runtimeEnvironment,
+        workflowContract: {
+          sourceId: "agent-control-plane/workflow-core",
+          version: "1.1.0",
+          sha256: TEST_CONTRACT_SHA256,
+          compatible: true,
+        },
+        strategy: "convergent",
+        wakeAdapterId: "durable-file",
+      },
+      checks: [],
+      issues: [],
+    });
+    const runtime = createOvernightRuntime({
+      runtimeRoot,
+      adapters: registry(adapter),
+      pollMilliseconds: 1,
+      protocolProvider,
+    });
+    const created = await runtime.createRun({
+      task: frozenTask,
+      worktree,
+      adapterId: adapter.id,
+      strategy: "convergent",
+      wakeAdapterId: "durable-file",
+      runtimeEnvironment,
+      ...activation,
+      preflightReceipt: receipt,
+    });
+    assert.equal(created.metadata.runCreation.state, "created");
+    await assert.rejects(
+      runtime.executeCycle(created.runDirectory),
+      (error) => error.code === "runtime.run_not_ready",
+    );
+    assert.equal(await readFile(join(worktree, "app.txt"), "utf8"), "before\n");
+
+    await assert.rejects(
+      runtime.linkSubmission(created.runDirectory, async () => {
+        throw new Error("simulated Task Store I/O failure");
+      }),
+      (error) => error.code === "runtime.submission_link_failed",
+    );
+    assert.equal((await runtime.status(created.runDirectory)).runCreation.state, "submission_link_failed");
+    await runtime.linkSubmission(created.runDirectory, async ({ metadata }) => {
+      assert.equal(metadata.runId, created.metadata.runId);
+    });
+    assert.equal((await runtime.status(created.runDirectory)).runCreation.state, "ready");
+
+    await runtime.executeCycle(created.runDirectory);
+    const status = await runtime.status(created.runDirectory);
+    assert.equal(status.runCreation.state, "running");
+    assert.equal(status.runCreation.submissionLink.attempts, 2);
   });
 });
 

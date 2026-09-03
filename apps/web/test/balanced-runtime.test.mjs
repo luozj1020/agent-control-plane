@@ -274,7 +274,7 @@ test("Balanced run snapshots its Preflight Receipt and verifies it on reload", a
       adapters: adapterRegistry(adapter),
       protocolProvider,
     });
-    const result = await runtime.run({
+    const runInput = {
       task: frozenTask,
       worktree,
       adapterId: adapter.id,
@@ -286,11 +286,39 @@ test("Balanced run snapshots its Preflight Receipt and verifies it on reload", a
       budget,
       runtimeEnvironment,
       preflightReceipt: receipt,
+    };
+    let failedRun;
+    await assert.rejects(
+      runtime.run({
+        ...runInput,
+        onRunCreated: async () => {
+          throw new Error("simulated Task Store I/O failure");
+        },
+      }),
+      (error) => {
+        failedRun = error.details;
+        return error.code === "runtime.submission_link_failed";
+      },
+    );
+    assert.equal(await readFile(join(worktree, "app.txt"), "utf8"), "before\n");
+    const failedStatus = await runtime.status(failedRun.runDirectory);
+    assert.equal(failedStatus.runCreation.state, "submission_link_failed");
+    assert.equal(failedStatus.runCreation.submissionLink.attempts, 1);
+    assert.equal(failedStatus.runCreation.submissionLink.failure.code, "task_store_write_failed");
+    assert.equal(failedStatus.rounds, 0);
+
+    const ready = await runtime.linkSubmission(failedRun.runDirectory, async ({ metadata }) => {
+      assert.equal(metadata.runId, failedRun.runId);
     });
+    assert.equal(ready.runCreation.state, "ready");
+    assert.equal(ready.runCreation.submissionLink.attempts, 2);
+    const result = await runtime.start(failedRun.runDirectory);
     const status = await runtime.status(result.runDirectory);
     assert.equal(status.executionBinding.task.taskRevision, 1);
     assert.equal(status.executionBinding.preflight.preflightId, "preflight-balanced-1");
     assert.match(status.initialTaskContractSha256, /^[a-f0-9]{64}$/);
+    assert.equal(status.runCreation.state, "running");
+    assert.equal(status.runCreation.submissionLink.attempts, 2);
     assert.equal(Object.hasOwn(status, "taskSha256"), false);
     assert.match(result.runDirectory, /annc-123/);
 

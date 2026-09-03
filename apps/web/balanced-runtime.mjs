@@ -50,6 +50,16 @@ import {
   validateBoundedTaskRevision,
   validateRevisionDeltaArtifact,
 } from "./revision-delta.mjs";
+import {
+  assertRunReady,
+  beginSubmissionLink,
+  classifySubmissionLinkFailure,
+  completeSubmissionLink,
+  createRunCreation,
+  failSubmissionLink,
+  markRunRunning,
+  normalizedRunCreation,
+} from "./run-creation-state.mjs";
 
 const RUNTIME_SCHEMA_VERSION = 1;
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,159}$/;
@@ -664,6 +674,7 @@ export function createBalancedRuntime(options = {}) {
       runId,
       state: protocol.initialState,
       taskId: task.id,
+      runCreation: createRunCreation(clock, { linked: !executionBinding }),
       initialTaskContractSha256: sha256(contractText),
       executionBinding,
       revisionBindings: [],
@@ -722,6 +733,7 @@ export function createBalancedRuntime(options = {}) {
     if (!metadata || metadata.schemaVersion !== RUNTIME_SCHEMA_VERSION || !SAFE_ID.test(metadata.runId ?? "")) {
       throw new BalancedRuntimeError("runtime.corrupt_run", "Balanced run metadata is invalid.", 409);
     }
+    metadata.runCreation = normalizedRunCreation(metadata, BalancedRuntimeError);
     if (basename(runDirectory) !== metadata.runId) {
       throw new BalancedRuntimeError("runtime.corrupt_run", "Balanced run identity does not match its directory.", 409);
     }
@@ -802,6 +814,7 @@ export function createBalancedRuntime(options = {}) {
 
   async function executeRoundLocked(context, task, revisionDecision = null) {
     const { runDirectory, metadata, adapter, policy, budget, protocol } = context;
+    assertRunReady(metadata, BalancedRuntimeError);
     const round = metadata.rounds + 1;
     const roundDirectory = join(runDirectory, "rounds", String(round).padStart(3, "0"));
     await mkdir(roundDirectory, { recursive: true, mode: 0o700 });
@@ -950,14 +963,6 @@ export function createBalancedRuntime(options = {}) {
       });
     };
 
-    metadata.state = protocol.activeState;
-    metadata.rounds = round;
-    metadata.updatedAt = new Date(clock()).toISOString();
-    await writeJsonAtomic(join(runDirectory, "run.json"), metadata);
-    await recordCoordination(runDirectory, metadata, "state_transition", {
-      target: { type: "state", id: metadata.state },
-      detail: { to: metadata.state, round },
-    });
     record({ type: "round-started", policyRef: metadata.policyRef, baselineDigest: baseline.digest });
 
     try {
@@ -999,6 +1004,22 @@ export function createBalancedRuntime(options = {}) {
             }));
           }
         },
+      });
+      const wasReady = metadata.runCreation.state === "ready";
+      markRunRunning(metadata, clock);
+      metadata.state = protocol.activeState;
+      metadata.rounds = round;
+      metadata.updatedAt = new Date(clock()).toISOString();
+      await writeJsonAtomic(join(runDirectory, "run.json"), metadata);
+      if (wasReady) {
+        await recordCoordination(runDirectory, metadata, "state_transition", {
+          target: { type: "state", id: "run-creation:running" },
+          detail: { creationState: "running", round },
+        });
+      }
+      await recordCoordination(runDirectory, metadata, "state_transition", {
+        target: { type: "state", id: metadata.state },
+        detail: { to: metadata.state, round },
       });
       await writeJsonAtomic(join(roundDirectory, "process.json"), {
         schemaVersion: 1,
@@ -1413,10 +1434,78 @@ export function createBalancedRuntime(options = {}) {
 
   async function run(input) {
     const created = await createRun(input);
-    if (typeof input?.onRunCreated === "function") {
-      await input.onRunCreated({ runDirectory: created.runDirectory, metadata: created.metadata });
+    await linkSubmission(created.runDirectory, input?.onRunCreated);
+    return start(created.runDirectory);
+  }
+
+  async function start(runDirectoryInput) {
+    const loaded = await loadRun(runDirectoryInput);
+    return withRunLock(loaded.runDirectory, async () => {
+      const current = await loadRun(loaded.runDirectory);
+      assertRunReady(current.metadata, BalancedRuntimeError);
+      if (current.metadata.rounds !== 0 || current.metadata.state !== current.protocol.initialState) {
+        throw new BalancedRuntimeError(
+          "runtime.invalid_state",
+          `Balanced run '${current.metadata.runId}' has already started.`,
+          409,
+        );
+      }
+      return executeRoundLocked(current, current.task);
+    });
+  }
+
+  async function linkSubmission(runDirectoryInput, linker) {
+    const loaded = await loadRun(runDirectoryInput);
+    return withRunLock(loaded.runDirectory, async () => {
+      const current = await loadRun(loaded.runDirectory);
+      const attempt = beginSubmissionLink(current.metadata, clock);
+      if (attempt.alreadyLinked) return current.metadata;
+      await writeJsonAtomic(join(current.runDirectory, "run.json"), current.metadata);
+      try {
+        if (typeof linker !== "function") {
+          throw new BalancedRuntimeError(
+            "runtime.submission_link_required",
+            "A submission-link handler is required before downstream execution.",
+            409,
+          );
+        }
+        await linker({ runDirectory: current.runDirectory, metadata: current.metadata });
+        completeSubmissionLink(current.metadata, clock);
+        current.metadata.updatedAt = new Date(clock()).toISOString();
+        await writeJsonAtomic(join(current.runDirectory, "run.json"), current.metadata);
+        await recordCoordination(current.runDirectory, current.metadata, "state_transition", {
+          target: { type: "state", id: "run-creation:ready" },
+          detail: { creationState: "ready" },
+        });
+        return current.metadata;
+      } catch (error) {
+        const failure = classifySubmissionLinkFailure(error);
+        failSubmissionLink(current.metadata, clock, failure);
+        current.metadata.updatedAt = new Date(clock()).toISOString();
+        await writeJsonAtomic(join(current.runDirectory, "run.json"), current.metadata);
+        await recordCoordination(current.runDirectory, current.metadata, "state_transition", {
+          target: { type: "state", id: "run-creation:submission_link_failed" },
+          detail: { creationState: "submission_link_failed", code: failure.code },
+        });
+        throw new BalancedRuntimeError(
+          "runtime.submission_link_failed",
+          failure.retryable
+            ? "Run was created, but Task submission metadata could not be linked. Downstream was not started and the link can be retried safely."
+            : "Run was created, but its immutable submission reference is invalid. Downstream was not started and automatic retry is disabled.",
+          409,
+          { runId: current.metadata.runId, runDirectory: current.runDirectory, runCreation: current.metadata.runCreation },
+        );
+      }
+    });
+  }
+
+  async function linkSubmissionById(runId, linker) {
+    if (!SAFE_ID.test(runId ?? "")) {
+      throw new BalancedRuntimeError("runtime.unsafe_path", "Run id is invalid.");
     }
-    return withRunLock(created.runDirectory, () => executeRoundLocked(created, created.task));
+    const root = await existingRuntimeRoot(runtimeRootConfigured);
+    if (!root) throw new BalancedRuntimeError("runtime.path_missing", "Balanced runtime root does not exist.", 404);
+    return linkSubmission(resolve(root, runId), linker);
   }
 
   async function review(input) {
@@ -1657,5 +1746,14 @@ export function createBalancedRuntime(options = {}) {
     );
   }
 
-  return Object.freeze({ coordinationDetail, listRuns, review, run, status });
+  return Object.freeze({
+    coordinationDetail,
+    linkSubmission,
+    linkSubmissionById,
+    listRuns,
+    review,
+    run,
+    start,
+    status,
+  });
 }

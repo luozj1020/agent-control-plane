@@ -111,11 +111,14 @@ function usage() {
     "  agent-control-plane balanced run --workspace PATH --task-id ID --preflight-id ID",
     "  agent-control-plane balanced review --run RUN_DIR --decision accept|revise|stop [--workspace PATH --delta DELTA.json]",
     "  agent-control-plane balanced status --run RUN_DIR",
+    "  agent-control-plane balanced start --run RUN_DIR",
+    "  agent-control-plane balanced retry-submission-link --run RUN_DIR",
     "  agent-control-plane balanced list",
     "  agent-control-plane overnight submit --workspace PATH --task-id ID --preflight-id ID",
     "  agent-control-plane overnight review --run RUN_DIR --decision accept|revise|continue|stop [--workspace PATH --delta DELTA.json] [--next NEXT.json]",
     "  agent-control-plane overnight interrupt --run RUN_DIR",
     "  agent-control-plane overnight status --run RUN_DIR",
+    "  agent-control-plane overnight retry-submission-link --run RUN_DIR",
     "  agent-control-plane overnight list",
     "  agent-control-plane overnight next-init --run RUN_DIR [--output NEXT.json]",
     "  agent-control-plane task init [--output TASK.json]",
@@ -421,6 +424,26 @@ function launchOvernightSupervisor(runDirectory) {
   return child.pid ?? null;
 }
 
+async function retrySubmissionLink(runtime, runDirectory) {
+  const store = workspaceTaskStore();
+  const metadata = await runtime.linkSubmission(runDirectory, ({ metadata: run }) => {
+    if (!run.executionBinding) {
+      throw cliError("runtime.submission_link_required", "Run has no immutable Task/Preflight binding.");
+    }
+    return store.recordSubmission({
+      projectRoot: run.worktree,
+      taskId: run.executionBinding.task.taskId,
+      preflightId: run.executionBinding.preflight.preflightId,
+      runId: run.runId,
+    });
+  });
+  return {
+    runId: metadata.runId,
+    runDirectory,
+    creationState: metadata.runCreation.state,
+  };
+}
+
 async function loadExecutionReceipt(mode, options) {
   if (!options.workspace || !options["task-id"] || !options["preflight-id"]) {
     throw cliError(
@@ -546,13 +569,12 @@ async function runOvernightCommand(command, options) {
       runtimeEnvironment: envelope.runtimeEnvironment,
       preflightReceipt: bound.receipt,
     });
-    await bound.store.recordSubmission({
+    await runtime.linkSubmission(created.runDirectory, ({ metadata }) => bound.store.recordSubmission({
       projectRoot: options.workspace,
       taskId: options["task-id"],
       preflightId: options["preflight-id"],
-      runId: created.metadata.runId,
-      activation: bound.active,
-    });
+      runId: metadata.runId,
+    }));
     return {
       state: created.metadata.state,
       runDirectory: created.runDirectory,
@@ -569,6 +591,11 @@ async function runOvernightCommand(command, options) {
       wakePath: executed.wakePath,
       wakeSha256: executed.wakeSha256,
     };
+  }
+  if (command === "retry-submission-link") {
+    requireAllowedOptions(options, new Set(["run"]));
+    if (!options.run) throw cliError("cli.missing_argument", "--run is required.");
+    return retrySubmissionLink(runtime, options.run);
   }
   if (command === "review") {
     requireAllowedOptions(options, new Set(["run", "decision", "workspace", "task-id", "delta", "next"]));
@@ -722,6 +749,20 @@ async function main(argv) {
     requireAllowedOptions(options, new Set(["run"]));
     if (!options.run) throw new BalancedRuntimeError("cli.missing_argument", "--run is required.");
     result = await runtime.status(options.run);
+  } else if (command === "start") {
+    requireAllowedOptions(options, new Set(["run"]));
+    if (!options.run) throw new BalancedRuntimeError("cli.missing_argument", "--run is required.");
+    const started = await runtime.start(options.run);
+    result = {
+      state: started.review.roundStatus,
+      runDirectory: started.runDirectory,
+      reviewPath: started.reviewPath,
+      reviewSha256: started.reviewSha256,
+    };
+  } else if (command === "retry-submission-link") {
+    requireAllowedOptions(options, new Set(["run"]));
+    if (!options.run) throw new BalancedRuntimeError("cli.missing_argument", "--run is required.");
+    result = await retrySubmissionLink(runtime, options.run);
   } else if (command === "list") {
     if (Object.keys(options).length > 0) {
       throw new BalancedRuntimeError("cli.invalid_argument", "The list command accepts no options.");

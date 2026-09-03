@@ -906,6 +906,47 @@ export function createAppServer(options = {}) {
         return;
       }
 
+      const retrySubmissionLink = pathname.match(
+        /^\/api\/(balanced|overnight)\/runs\/([^/]+)\/retry-submission-link$/,
+      );
+      if (retrySubmissionLink && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        if (!workspaceTaskStore) {
+          sendJson(response, 501, { error: "task.workspace_store_unavailable" });
+          return;
+        }
+        const [, mode, runId] = retrySubmissionLink;
+        const runtime = mode === "balanced" ? balancedRuntime : overnightRuntime;
+        if (typeof runtime.linkSubmissionById !== "function") {
+          sendJson(response, 501, { error: "runtime.submission_retry_unsupported" });
+          return;
+        }
+        const metadata = await runtime.linkSubmissionById(runId, ({ metadata: run }) => {
+          if (!run.executionBinding) {
+            throw new ProjectConfigError(
+              "runtime.submission_link_required",
+              "Run has no immutable Task/Preflight binding.",
+              409,
+            );
+          }
+          return workspaceTaskStore.recordSubmission({
+            projectRoot: run.worktree,
+            taskId: run.executionBinding.task.taskId,
+            preflightId: run.executionBinding.preflight.preflightId,
+            runId: run.runId,
+          });
+        });
+        sendJson(response, 200, {
+          runId: metadata.runId,
+          creationState: metadata.runCreation.state,
+          runCreation: metadata.runCreation,
+        });
+        return;
+      }
+
       const overnightInterrupt = pathname.match(/^\/api\/overnight\/runs\/([^/]+)\/interrupt$/);
       if (overnightInterrupt && request.method === "POST") {
         if (!trustedMutationOrigin(request)) {

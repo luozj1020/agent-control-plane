@@ -963,6 +963,50 @@ test("serves persisted Overnight run and wake state", async () => {
   );
 });
 
+test("retries a failed submission link against the frozen run binding", async () => {
+  const calls = [];
+  const run = {
+    runId: "failed-run",
+    worktree: "/workspace/example",
+    executionBinding: {
+      task: { taskId: "task-1", taskRevision: 2, taskSha256: "a".repeat(64) },
+      preflight: { preflightId: "preflight-1", preflightSha256: "b".repeat(64) },
+    },
+    runCreation: { state: "submission_link_failed" },
+  };
+  const balancedRuntime = {
+    async listRuns() { return []; },
+    async linkSubmissionById(runId, linker) {
+      assert.equal(runId, run.runId);
+      await linker({ metadata: run });
+      return { ...run, runCreation: { state: "ready" } };
+    },
+  };
+  const workspaceTaskStore = {
+    async recordSubmission(input) {
+      calls.push(input);
+      return {};
+    },
+  };
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/api/balanced/runs/failed-run/retry-submission-link`,
+        { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+      );
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).creationState, "ready");
+      assert.deepEqual(calls, [{
+        projectRoot: run.worktree,
+        taskId: "task-1",
+        preflightId: "preflight-1",
+        runId: "failed-run",
+      }]);
+    },
+    { balancedRuntime, workspaceTaskStore },
+  );
+});
+
 test("aggregates coordination telemetry without inventing unsupported reads or messages", async () => {
   const summary = (overrides) => ({
     schemaVersion: 1,

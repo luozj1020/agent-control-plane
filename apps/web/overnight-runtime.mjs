@@ -45,6 +45,16 @@ import {
 } from "./revision-delta.mjs";
 import { createWakeAdapterRegistry } from "./wake-adapters.mjs";
 import { resolveRuntimeProtocol } from "./workflow-runtime-protocol.mjs";
+import {
+  assertRunReady,
+  beginSubmissionLink,
+  classifySubmissionLinkFailure,
+  completeSubmissionLink,
+  createRunCreation,
+  failSubmissionLink,
+  markRunRunning,
+  normalizedRunCreation,
+} from "./run-creation-state.mjs";
 
 const RUNTIME_SCHEMA_VERSION = 1;
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,159}$/;
@@ -430,6 +440,7 @@ export function createOvernightRuntime(options = {}) {
       state: protocol.initialState,
       strategy: input.strategy,
       taskId: task.id,
+      runCreation: createRunCreation(clock, { linked: !executionBinding }),
       initialCycleContractSha256: sha256(taskText),
       currentCycleContractSha256: sha256(taskText),
       executionBinding,
@@ -487,6 +498,7 @@ export function createOvernightRuntime(options = {}) {
     if (!metadata || metadata.schemaVersion !== RUNTIME_SCHEMA_VERSION || !SAFE_ID.test(metadata.runId ?? "")) {
       throw new OvernightRuntimeError("runtime.corrupt_run", "Overnight run metadata is invalid.", 409);
     }
+    metadata.runCreation = normalizedRunCreation(metadata, OvernightRuntimeError);
     if (basename(runDirectory) !== metadata.runId || resolve(root, metadata.runId) !== runDirectory) {
       throw new OvernightRuntimeError("runtime.unsafe_path", "Run identity does not match the configured runtime root.", 409);
     }
@@ -663,10 +675,10 @@ export function createOvernightRuntime(options = {}) {
     return withRunLock(loaded.runDirectory, async () => {
       const current = await loadRun(loaded.runDirectory);
       const { runDirectory, cycleDirectory, metadata, task, adapter } = current;
+      assertRunReady(metadata, OvernightRuntimeError);
       if (metadata.state !== current.protocol.initialState) {
         throw new OvernightRuntimeError("runtime.invalid_state", `Cannot supervise a run in '${metadata.state}'.`, 409);
       }
-      await persistMetadata(runDirectory, metadata, current.protocol.activeState);
       const baseline = await snapshot(metadata.worktree);
       const baselineRecord = { digest: baseline.digest, fileCount: baseline.fileCount, totalBytes: baseline.totalBytes };
       await writeJsonAtomic(join(cycleDirectory, "baseline.json"), baselineRecord);
@@ -724,6 +736,15 @@ export function createOvernightRuntime(options = {}) {
           }
         },
       });
+      const wasReady = metadata.runCreation.state === "ready";
+      markRunRunning(metadata, clock);
+      await persistMetadata(runDirectory, metadata, current.protocol.activeState);
+      if (wasReady) {
+        await recordCoordination(runDirectory, metadata, "state_transition", {
+          target: { type: "state", id: "run-creation:running" },
+          detail: { creationState: "running", cycle: metadata.cycle },
+        });
+      }
       metadata.activeProcess = controller.identity ?? { pid: controller.pid ?? null };
       await writeJsonAtomic(join(runDirectory, "run.json"), metadata);
       await appendEvent(runDirectory, clock, "process-started", { cycle: metadata.cycle, identity: metadata.activeProcess });
@@ -1032,6 +1053,60 @@ export function createOvernightRuntime(options = {}) {
     return (await loadRun(runDirectory)).metadata;
   }
 
+  async function linkSubmission(runDirectoryInput, linker) {
+    const loaded = await loadRun(runDirectoryInput);
+    return withRunLock(loaded.runDirectory, async () => {
+      const current = await loadRun(loaded.runDirectory);
+      const attempt = beginSubmissionLink(current.metadata, clock);
+      if (attempt.alreadyLinked) return current.metadata;
+      await writeJsonAtomic(join(current.runDirectory, "run.json"), current.metadata);
+      try {
+        if (typeof linker !== "function") {
+          throw new OvernightRuntimeError(
+            "runtime.submission_link_required",
+            "A submission-link handler is required before downstream execution.",
+            409,
+          );
+        }
+        await linker({ runDirectory: current.runDirectory, metadata: current.metadata });
+        completeSubmissionLink(current.metadata, clock);
+        current.metadata.updatedAt = new Date(clock()).toISOString();
+        await writeJsonAtomic(join(current.runDirectory, "run.json"), current.metadata);
+        await recordCoordination(current.runDirectory, current.metadata, "state_transition", {
+          target: { type: "state", id: "run-creation:ready" },
+          detail: { creationState: "ready" },
+        });
+        return current.metadata;
+      } catch (error) {
+        const failure = classifySubmissionLinkFailure(error);
+        failSubmissionLink(current.metadata, clock, failure);
+        current.metadata.updatedAt = new Date(clock()).toISOString();
+        await writeJsonAtomic(join(current.runDirectory, "run.json"), current.metadata);
+        await recordCoordination(current.runDirectory, current.metadata, "state_transition", {
+          target: { type: "state", id: "run-creation:submission_link_failed" },
+          detail: { creationState: "submission_link_failed", code: failure.code },
+        });
+        throw new OvernightRuntimeError(
+          "runtime.submission_link_failed",
+          failure.retryable
+            ? "Run was created, but Task submission metadata could not be linked. Downstream was not started and the link can be retried safely."
+            : "Run was created, but its immutable submission reference is invalid. Downstream was not started and automatic retry is disabled.",
+          409,
+          { runId: current.metadata.runId, runDirectory: current.runDirectory, runCreation: current.metadata.runCreation },
+        );
+      }
+    });
+  }
+
+  async function linkSubmissionById(runId, linker) {
+    if (!SAFE_ID.test(runId ?? "")) {
+      throw new OvernightRuntimeError("runtime.unsafe_path", "Run id is invalid.");
+    }
+    const root = await existingRoot(runtimeRootConfigured);
+    if (!root) throw new OvernightRuntimeError("runtime.path_missing", "Overnight runtime root does not exist.", 404);
+    return linkSubmission(resolve(root, runId), linker);
+  }
+
   async function nextTemplate(runDirectory) {
     return createNextCycleTemplate((await loadRun(runDirectory)).task);
   }
@@ -1077,6 +1152,8 @@ export function createOvernightRuntime(options = {}) {
     interrupt,
     interruptById,
     listRuns,
+    linkSubmission,
+    linkSubmissionById,
     nextTemplate,
     review,
     status,

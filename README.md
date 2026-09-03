@@ -404,6 +404,48 @@ New Balanced and Overnight runs reject raw Task JSON and missing, stale, or
 tampered receipts. Each run snapshots `preflight-receipt.json` and verifies it
 again whenever the run is loaded.
 
+Both delegated runtimes share a separate Run Creation state machine:
+
+```text
+created -> ready -> running
+   |
+   +-> submission_link_failed -> ready
+```
+
+`created` means the durable run id, immutable Task reference, and Preflight
+snapshot exist but no downstream process may start. `ready` is written only
+after the Workspace Task Store has idempotently recorded the same `runId` in
+the referenced Task Revision. `running` is written only after the adapter has
+accepted the downstream process. A failed link stores a sanitized diagnostic
+receipt under `runCreation.submissionLink.failure`, including the stage,
+machine code, retryability, attempt count, and timestamps; exception text and
+provider credentials are not persisted. The runtime fails closed before
+adapter startup.
+
+Submission-link recovery always reuses the frozen execution binding, `runId`,
+Task Revision, and Preflight Receipt. It does not consult the currently active
+Skill and does not create another run:
+
+```bash
+agent-control-plane balanced retry-submission-link --run RUN_DIR
+agent-control-plane balanced start --run RUN_DIR
+
+agent-control-plane overnight retry-submission-link --run RUN_DIR
+agent-control-plane overnight supervise --run RUN_DIR
+```
+
+The run lists expose the failure and attempt count and offer **重试关联**. The
+UI retry performs only the idempotent relationship write and leaves the run in
+`ready`; starting downstream remains a separate explicit action.
+
+The default test gate includes two canonical execution-lineage scenarios. The
+Balanced scenario performs Task creation/freeze, activation, Preflight, a
+downstream round, a review-bound Revision Delta, a second round, and acceptance.
+The Overnight scenario follows the same immutable chain through the detached
+supervisor and two durable wake boundaries. Both scenarios reload and validate
+every Task/Preflight/Run/Delta reference and recompute the Task hashes instead
+of treating a zero process exit code as sufficient evidence.
+
 Preflight also freezes the downstream runtime environment. The default is
 `executionEnvironment=auto`, `proxyMode=direct`,
 `isolationMode=provider-scoped`, and metadata-only network diagnostics.
