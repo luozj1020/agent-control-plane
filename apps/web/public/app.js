@@ -254,6 +254,7 @@ const elements = {
   storeStatusDetail: document.querySelector("#store-status-detail"),
   storeStatusTitle: document.querySelector("#store-status-title"),
   taskCardEditor: document.querySelector("#task-card-editor"),
+  taskCardEditRevision: document.querySelector("#task-card-edit-revision"),
   taskCardEditorSwitch: document.querySelector("#task-card-editor-switch"),
   taskCardEmpty: document.querySelector("#task-card-empty"),
   taskCardEnvironmentIsolation: document.querySelector("#task-card-environment-isolation"),
@@ -1079,6 +1080,10 @@ function renderWorkspaceTaskInspector() {
   elements.taskCardScaffold.disabled = workspaceTaskLoading || !taskCardTemplate;
 
   const working = context.kind === "working-copy" && context.lifecycleStatus !== "frozen";
+  const editableFrozen = context.kind === "frozen" &&
+    context.metadata?.taskRevisions?.[String(context.revisionArtifact?.taskRevision)]?.supersededBy === undefined;
+  elements.taskCardEditRevision.hidden = !editableFrozen;
+  elements.taskCardEditRevision.disabled = workspaceTaskLoading || !editableFrozen;
   elements.taskCardSaveWorkingCopy.hidden = !working;
   elements.taskCardSaveWorkingCopy.disabled = workspaceTaskLoading ||
     !taskCardWorkingCopyDirty || !validatedTaskCard;
@@ -1318,6 +1323,38 @@ async function freezeWorkspaceTask() {
     workspaceTaskLoading = false;
     if (frozen) await loadWorkspaceTaskInspector({ taskId });
     else renderWorkspaceTaskInspector();
+  }
+}
+
+async function editWorkspaceTaskRevision() {
+  if (workspaceTaskContext.kind !== "frozen") return;
+  const taskId = workspaceTaskContext.taskId;
+  const baseTaskRevision = workspaceTaskContext.revisionArtifact?.taskRevision;
+  if (!Number.isSafeInteger(baseTaskRevision)) return;
+  if (!window.confirm(
+    `从 ${taskId} 的 Task Revision ${baseTaskRevision} 创建新的 working copy？\n\n原合同保持不可变；修改需重新保存、验证并冻结。`,
+  )) return;
+  workspaceTaskLoading = true;
+  renderWorkspaceTaskInspector();
+  try {
+    const result = await requestJson("/api/workspace-tasks/edit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectRoot: projectConfigState.projectRoot,
+        taskId,
+        baseTaskRevision,
+        source: { kind: "human", actor: "control-plane-ui" },
+      }),
+    });
+    taskCardWorkingCopyDirty = false;
+    showToast(`已从 Task Revision ${baseTaskRevision} 创建 generation ${result.workingCopy.workingCopyGeneration} 草稿。`);
+    await loadWorkspaceTaskInspector({ taskId });
+  } catch (error) {
+    showToast(`创建新版本草稿失败：${error.message}`);
+    renderWorkspaceTaskInspector();
+  } finally {
+    workspaceTaskLoading = false;
   }
 }
 
@@ -5564,6 +5601,7 @@ elements.taskCardRefresh.addEventListener("click", () => loadWorkspaceTaskInspec
   taskId: workspaceTaskContext.taskId,
 }));
 elements.taskCardScaffold.addEventListener("click", showTaskCardScaffold);
+elements.taskCardEditRevision.addEventListener("click", editWorkspaceTaskRevision);
 elements.taskCardSaveWorkingCopy.addEventListener("click", saveWorkspaceTaskWorkingCopy);
 elements.taskCardValidateWorkingCopy.addEventListener("click", validateWorkspaceTaskWorkingCopy);
 elements.taskCardFreeze.addEventListener("click", freezeWorkspaceTask);

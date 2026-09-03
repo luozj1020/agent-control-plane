@@ -290,6 +290,8 @@ test("Balanced run snapshots its Preflight Receipt and verifies it on reload", a
     const status = await runtime.status(result.runDirectory);
     assert.equal(status.executionBinding.task.taskRevision, 1);
     assert.equal(status.executionBinding.preflight.preflightId, "preflight-balanced-1");
+    assert.match(status.initialTaskContractSha256, /^[a-f0-9]{64}$/);
+    assert.equal(Object.hasOwn(status, "taskSha256"), false);
     assert.match(result.runDirectory, /annc-123/);
 
     await rm(join(result.runDirectory, "preflight-receipt.json"));

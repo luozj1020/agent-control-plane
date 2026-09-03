@@ -443,6 +443,10 @@ test("workspace Task APIs preserve explicit lifecycle names and protect every mu
       calls.push(["write", input]);
       return { workingCopy: { workingCopyGeneration: 2, baseTaskRevision: null } };
     },
+    async edit(input) {
+      calls.push(["edit", input]);
+      return { workingCopy: { workingCopyGeneration: 3, baseTaskRevision: input.baseTaskRevision } };
+    },
     async validate(input) {
       calls.push(["validate", input]);
       return { valid: true, workingCopyGeneration: input.expectedWorkingCopyGeneration };
@@ -493,6 +497,14 @@ test("workspace Task APIs preserve explicit lifecycle names and protect every mu
     assert.equal(written.status, 200);
     assert.equal((await written.json()).workingCopy.workingCopyGeneration, 2);
 
+    const edited = await fetch(`${baseUrl}/api/workspace-tasks/edit`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({ projectRoot, taskId: "task-1", baseTaskRevision: 1, source }),
+    });
+    assert.equal(edited.status, 200);
+    assert.equal((await edited.json()).workingCopy.baseTaskRevision, 1);
+
     for (const action of ["validate", "freeze"]) {
       const response = await fetch(`${baseUrl}/api/workspace-tasks/${action}`, {
         method: "POST",
@@ -535,6 +547,7 @@ test("workspace Task APIs preserve explicit lifecycle names and protect every mu
         task,
         source,
       }],
+      ["edit", { projectRoot, taskId: "task-1", baseTaskRevision: 1, source }],
       ["validate", {
         projectRoot,
         taskId: "task-1",

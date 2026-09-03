@@ -135,6 +135,9 @@ test("convergent strategy writes hash-bound wake evidence and accepts terminal r
       strategy: "convergent",
     });
     assert.equal(created.metadata.state, "submitted");
+    assert.match(created.metadata.initialCycleContractSha256, /^[a-f0-9]{64}$/);
+    assert.match(created.metadata.currentCycleContractSha256, /^[a-f0-9]{64}$/);
+    assert.equal(Object.hasOwn(created.metadata, "initialTaskSha256"), false);
     assert.deepEqual(created.metadata.workflowContract, {
       source: "agent-control-plane/workflow-core",
       version: "1.1.0",

@@ -664,7 +664,7 @@ export function createBalancedRuntime(options = {}) {
       runId,
       state: protocol.initialState,
       taskId: task.id,
-      taskSha256: sha256(contractText),
+      initialTaskContractSha256: sha256(contractText),
       executionBinding,
       revisionBindings: [],
       worktree,
@@ -691,7 +691,7 @@ export function createBalancedRuntime(options = {}) {
     await recordCoordination(runDirectory, metadata, "artifact_write", {
       target: { type: "artifact", id: "task.json" },
       bytes: Buffer.byteLength(contractText),
-      detail: { artifactKind: "frozen_task", sha256: metadata.taskSha256 },
+      detail: { artifactKind: "initial_task_contract", sha256: metadata.initialTaskContractSha256 },
     });
     if (executionBinding) {
       const receiptText = stableJson(input.preflightReceipt);
@@ -730,7 +730,8 @@ export function createBalancedRuntime(options = {}) {
     }
     const taskPath = join(runDirectory, "task.json");
     const taskText = await readFile(taskPath).catch(() => null);
-    if (!taskText || sha256(taskText) !== metadata.taskSha256) {
+    const initialTaskContractSha256 = metadata.initialTaskContractSha256 ?? metadata.taskSha256;
+    if (!taskText || sha256(taskText) !== initialTaskContractSha256) {
       throw new BalancedRuntimeError("runtime.corrupt_run", "Frozen Balanced Task hash is invalid.", 409);
     }
     const taskEnvelope = JSON.parse(taskText.toString("utf8"));
@@ -1329,7 +1330,7 @@ export function createBalancedRuntime(options = {}) {
       executionOwner: "downstream",
       adapterId: metadata.adapterId,
       sessionId: adapterResult?.sessionId ?? metadata.sessionId ?? null,
-      taskSha256: sha256(roundContractText),
+      roundContractSha256: sha256(roundContractText),
       priorReviewSha256: revisionDecision?.reviewSha256 ?? null,
       timeWindowPlan: {
         source: "agent-control-plane-runtime",
@@ -1412,6 +1413,9 @@ export function createBalancedRuntime(options = {}) {
 
   async function run(input) {
     const created = await createRun(input);
+    if (typeof input?.onRunCreated === "function") {
+      await input.onRunCreated({ runDirectory: created.runDirectory, metadata: created.metadata });
+    }
     return withRunLock(created.runDirectory, () => executeRoundLocked(created, created.task));
   }
 
@@ -1588,6 +1592,9 @@ export function createBalancedRuntime(options = {}) {
           detail: { to: metadata.state, round: metadata.rounds },
         });
         loaded.metadata = metadata;
+        if (revisionBinding && typeof input.onRevisionCreated === "function") {
+          await input.onRevisionCreated({ runDirectory: loaded.runDirectory, metadata });
+        }
         return executeRoundLocked(loaded, revision, decision);
       }
       metadata.state = loaded.protocol.decisionStates[input.decision];

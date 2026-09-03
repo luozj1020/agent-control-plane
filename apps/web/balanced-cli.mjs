@@ -120,6 +120,7 @@ function usage() {
     "  agent-control-plane overnight next-init --run RUN_DIR [--output NEXT.json]",
     "  agent-control-plane task init [--output TASK.json]",
     "  agent-control-plane task create --workspace PATH --task-id ID [--task TASK.json] [--source AGENT]",
+    "  agent-control-plane task edit --workspace PATH --task-id ID [--base-task-revision N] [--source AGENT]",
     "  agent-control-plane task write --workspace PATH --task-id ID --task TASK.json --expected-working-copy-generation N [--source AGENT]",
     "  agent-control-plane task validate --task TASK.json",
     "  agent-control-plane task validate --workspace PATH --task-id ID --expected-working-copy-generation N",
@@ -268,6 +269,18 @@ async function runTaskCommand(command, options) {
       task: await readTask(options.task, "Task Card"),
       expectedWorkingCopyGeneration: integerOption(options, "expected-working-copy-generation"),
       source: { kind: "upstream-agent", ...(options.source ? { actor: options.source } : {}) },
+    });
+  }
+  if (command === "edit") {
+    requireAllowedOptions(options, new Set(["workspace", "task-id", "base-task-revision", "source"]));
+    if (!options.workspace || !options["task-id"]) {
+      throw cliError("cli.missing_argument", "--workspace and --task-id are required.");
+    }
+    return workspaceTaskStore().edit({
+      projectRoot: options.workspace,
+      taskId: options["task-id"],
+      baseTaskRevision: integerOption(options, "base-task-revision"),
+      source: { kind: "manual-revision", ...(options.source ? { actor: options.source } : {}) },
     });
   }
   if (command === "freeze") {
@@ -656,13 +669,12 @@ async function main(argv) {
       timing: envelope.timing,
       runtimeEnvironment: envelope.runtimeEnvironment,
       preflightReceipt: bound.receipt,
-    });
-    await bound.store.recordSubmission({
-      projectRoot: options.workspace,
-      taskId: options["task-id"],
-      preflightId: options["preflight-id"],
-      runId: result.review.runId,
-      activation: bound.active,
+      onRunCreated: ({ metadata }) => bound.store.recordSubmission({
+        projectRoot: options.workspace,
+        taskId: options["task-id"],
+        preflightId: options["preflight-id"],
+        runId: metadata.runId,
+      }),
     });
     result = {
       state: result.review.roundStatus,
@@ -687,16 +699,13 @@ async function main(argv) {
         revisionDelta: revision.revisionDelta,
         preflightReceipt: revision.receipt,
       } : undefined,
-    });
-    if (revision) {
-      await revision.store.recordSubmission({
+      onRevisionCreated: revision ? ({ metadata }) => revision.store.recordSubmission({
         projectRoot: options.workspace,
         taskId: revision.taskId,
         preflightId: revision.receipt.preflightId,
-        runId: (await runtime.status(options.run)).runId,
-        activation: revision.active,
-      });
-    }
+        runId: metadata.runId,
+      }) : undefined,
+    });
     result = result.review
       ? {
           state: result.review.roundStatus,

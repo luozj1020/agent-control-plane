@@ -547,6 +547,79 @@ export function createWorkspaceTaskStore(options = {}) {
     });
   }
 
+  async function edit({ projectRoot, taskId, baseTaskRevision, source } = {}) {
+    const resolved = await resolveTask(projectRoot, taskId);
+    return withTaskLock(resolved, async () => {
+      const current = await readTaskState(resolved);
+      if (current.metadata.workingCopyState.lifecycleStatus !== "frozen") {
+        throw new WorkspaceTaskStoreError(
+          "task.working_copy_active",
+          "A working copy is already active; save, validate, or freeze it before creating another edit.",
+          409,
+        );
+      }
+      const selectedRevision = baseTaskRevision ?? current.metadata.workingCopyState.frozenTaskRevision;
+      if (!Number.isSafeInteger(selectedRevision) || selectedRevision < 1) {
+        throw new WorkspaceTaskStoreError("task.base_revision_invalid", "baseTaskRevision must identify a frozen Task Revision.", 422);
+      }
+      const selectedMetadata = current.metadata.taskRevisions[String(selectedRevision)];
+      if (!selectedMetadata) {
+        throw new WorkspaceTaskStoreError("task.base_revision_missing", "The selected Task Revision does not exist.", 404);
+      }
+      if (selectedMetadata.supersededBy !== undefined) {
+        throw new WorkspaceTaskStoreError(
+          "task.base_revision_superseded",
+          "A superseded Task Revision cannot be edited into a second successor.",
+          409,
+        );
+      }
+      const baseReference = {
+        workspaceId: resolved.workspace.workspaceId,
+        taskId: resolved.taskId,
+        taskRevision: selectedRevision,
+        taskSha256: selectedMetadata.taskSha256,
+      };
+      const baseArtifact = validateRevisionArtifact(
+        await readJson(
+          taskRevisionFile(resolved.paths, selectedRevision),
+          "task.task_revision_corrupt",
+          "Task Revision is not valid JSON.",
+        ),
+        baseReference,
+      );
+      const timestamp = clock().toISOString();
+      const workingCopy = {
+        ...current.workingCopy,
+        workingCopyGeneration: current.workingCopy.workingCopyGeneration + 1,
+        baseTaskRevision: selectedRevision,
+        updatedAt: timestamp,
+        source: normalizeSource(source ?? current.workingCopy.source),
+        task: baseArtifact.task,
+      };
+      const metadata = {
+        ...current.metadata,
+        updatedAt: timestamp,
+        workingCopyState: {
+          workingCopyGeneration: workingCopy.workingCopyGeneration,
+          baseTaskRevision: selectedRevision,
+          lifecycleStatus: "draft",
+          validatedWorkingCopyGeneration: null,
+          validatedTaskSha256: null,
+        },
+      };
+      let workingCopyWritten = false;
+      try {
+        await writeJsonAtomic(resolved.paths.workingCopy, workingCopy, nonceFactory());
+        workingCopyWritten = true;
+        await writeJsonAtomic(resolved.paths.metadata, metadata, nonceFactory());
+      } catch (error) {
+        if (workingCopyWritten) await writeJsonAtomic(resolved.paths.workingCopy, current.workingCopy, nonceFactory());
+        throw error;
+      }
+      return { workspace: publicWorkspace(resolved.workspace), workingCopy, metadata };
+    });
+  }
+
   async function validate({ projectRoot, taskId, expectedWorkingCopyGeneration } = {}) {
     const resolved = await resolveTask(projectRoot, taskId);
     return withTaskLock(resolved, async () => {
@@ -644,6 +717,20 @@ export function createWorkspaceTaskStore(options = {}) {
           supersedes: current.workingCopy.baseTaskRevision,
         }),
       };
+      if (current.workingCopy.baseTaskRevision !== null) {
+        const predecessor = metadata.taskRevisions[String(current.workingCopy.baseTaskRevision)];
+        if (!predecessor || predecessor.supersededBy !== undefined) {
+          throw new WorkspaceTaskStoreError(
+            "task.supersession_conflict",
+            "The base Task Revision already has a successor.",
+            409,
+          );
+        }
+        metadata.taskRevisions[String(current.workingCopy.baseTaskRevision)] = {
+          ...predecessor,
+          supersededBy: taskRevision,
+        };
+      }
       let revisionWritten = false;
       let metadataWritten = false;
       let activeWritten = false;
@@ -1179,16 +1266,32 @@ export function createWorkspaceTaskStore(options = {}) {
     taskId,
     preflightId,
     runId,
-    activation,
   } = {}) {
-    const bound = await preflight({ projectRoot, taskId, preflightId, activation });
+    const workspace = await projectConfigStore.resolveWorkspace(projectRoot, { register: false });
+    const safeTaskId = requireTaskId(taskId);
+    const paths = taskPaths(workspace.workspaceRoot, safeTaskId);
+    const receiptPath = preflightFile(paths, preflightId);
+    if ((await pathType(receiptPath)) !== "file") {
+      throw new WorkspaceTaskStoreError("preflight.not_found", "Preflight Receipt was not found.", 404);
+    }
+    const receipt = validatePreflightReceipt(
+      await readJson(receiptPath, "preflight.receipt_corrupt", "Preflight Receipt is not valid JSON."),
+      WorkspaceTaskStoreError,
+    );
+    if (receipt.task.workspaceId !== workspace.workspaceId || receipt.task.taskId !== safeTaskId) {
+      throw new WorkspaceTaskStoreError(
+        "task.submission_reference_stale",
+        "Preflight Receipt belongs to another Workspace Task.",
+        409,
+      );
+    }
     const safeRunId = requireTaskId(runId, "runId");
     const resolved = await resolveTask(projectRoot, taskId);
     return withTaskLock(resolved, async () => {
       const state = await readTaskState(resolved);
-      const revisionKey = String(bound.receipt.task.taskRevision);
+      const revisionKey = String(receipt.task.taskRevision);
       const revision = state.metadata.taskRevisions[revisionKey];
-      if (!revision || revision.taskSha256 !== bound.receipt.task.taskSha256) {
+      if (!revision || revision.taskSha256 !== receipt.task.taskSha256) {
         throw new WorkspaceTaskStoreError(
           "task.submission_reference_stale",
           "Task Revision metadata no longer matches the submitted Preflight Receipt.",
@@ -1214,6 +1317,7 @@ export function createWorkspaceTaskStore(options = {}) {
     create,
     createPreflight,
     current,
+    edit,
     freeze,
     list,
     preflight,

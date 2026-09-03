@@ -430,8 +430,8 @@ export function createOvernightRuntime(options = {}) {
       state: protocol.initialState,
       strategy: input.strategy,
       taskId: task.id,
-      initialTaskSha256: sha256(taskText),
-      currentTaskSha256: sha256(taskText),
+      initialCycleContractSha256: sha256(taskText),
+      currentCycleContractSha256: sha256(taskText),
       executionBinding,
       revisionBindings: [],
       worktree,
@@ -458,7 +458,7 @@ export function createOvernightRuntime(options = {}) {
     await recordCoordination(runDirectory, metadata, "artifact_write", {
       target: { type: "artifact", id: "cycles/001/task.json" },
       bytes: Buffer.byteLength(taskText),
-      detail: { artifactKind: "frozen_task", sha256: metadata.currentTaskSha256 },
+      detail: { artifactKind: "initial_cycle_contract", sha256: metadata.currentCycleContractSha256 },
     });
     if (executionBinding) {
       const receiptText = stableJson(input.preflightReceipt);
@@ -492,7 +492,8 @@ export function createOvernightRuntime(options = {}) {
     }
     const cycleDirectory = join(runDirectory, "cycles", String(metadata.cycle).padStart(3, "0"));
     const taskText = await readFile(join(cycleDirectory, "task.json"), "utf8").catch(() => null);
-    if (!taskText || sha256(taskText) !== metadata.currentTaskSha256) {
+    const currentCycleContractSha256 = metadata.currentCycleContractSha256 ?? metadata.currentTaskSha256;
+    if (!taskText || sha256(taskText) !== currentCycleContractSha256) {
       throw new OvernightRuntimeError("runtime.corrupt_run", "Current Overnight task hash is invalid.", 409);
     }
     const task = validateTaskCard(JSON.parse(taskText).task);
@@ -551,7 +552,8 @@ export function createOvernightRuntime(options = {}) {
       priorTaskBinding = entry.executionBinding.task;
     }
     const initialText = await readFile(join(runDirectory, "cycles", "001", "task.json"), "utf8").catch(() => null);
-    if (!initialText || sha256(initialText) !== metadata.initialTaskSha256) {
+    const initialCycleContractSha256 = metadata.initialCycleContractSha256 ?? metadata.initialTaskSha256;
+    if (!initialText || sha256(initialText) !== initialCycleContractSha256) {
       throw new OvernightRuntimeError("runtime.corrupt_run", "Initial Overnight task hash is invalid.", 409);
     }
     const initialTask = validateTaskCard(JSON.parse(initialText).task);
@@ -590,7 +592,7 @@ export function createOvernightRuntime(options = {}) {
       cycle: metadata.cycle,
       strategy: metadata.strategy,
       state,
-      taskSha256: metadata.currentTaskSha256,
+      cycleContractSha256: metadata.currentCycleContractSha256 ?? metadata.currentTaskSha256,
       evidencePath,
       evidenceSha256: sha256(evidenceText),
       allowedDecisions: [...(protocol.reviewDecisions[state] ?? [])],
@@ -785,7 +787,7 @@ export function createOvernightRuntime(options = {}) {
         runId: metadata.runId,
         cycle: metadata.cycle,
         strategy: metadata.strategy,
-        taskSha256: metadata.currentTaskSha256,
+        cycleContractSha256: metadata.currentCycleContractSha256 ?? metadata.currentTaskSha256,
         baseline: baselineRecord,
         after: { digest: after.digest, fileCount: after.fileCount, totalBytes: after.totalBytes },
         process: adapterResult,
@@ -938,7 +940,7 @@ export function createOvernightRuntime(options = {}) {
         schemaVersion: 1,
         decision: input.decision,
         nextCycle,
-        nextTaskSha256: sha256(taskText),
+        nextCycleContractSha256: sha256(taskText),
         wakeSha256: metadata.latestWakeSha256,
         decidedAt: new Date(clock()).toISOString(),
         ...(revisionBinding ? {
@@ -959,7 +961,7 @@ export function createOvernightRuntime(options = {}) {
         },
       });
       metadata.cycle = nextCycle;
-      metadata.currentTaskSha256 = sha256(taskText);
+      metadata.currentCycleContractSha256 = sha256(taskText);
       if (revisionBinding) {
         metadata.revisionBindings = [...(metadata.revisionBindings ?? []), {
           cycle: nextCycle,

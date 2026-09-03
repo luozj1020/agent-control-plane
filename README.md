@@ -314,6 +314,13 @@ agent-control-plane task freeze \
   --task-id ANNC-123 \
   --expected-working-copy-generation 1
 
+# Generic human/upstream edit path: r1 remains immutable; a new draft is based on r1.
+agent-control-plane task edit \
+  --workspace /absolute/repository/path \
+  --task-id ANNC-123 \
+  --base-task-revision 1 \
+  --source codex
+
 agent-control-plane task current --workspace /absolute/repository/path
 agent-control-plane task current --workspace /absolute/repository/path --task-id ANNC-123
 agent-control-plane task list --workspace /absolute/repository/path
@@ -344,7 +351,9 @@ names `workspaceRevision`, `taskRevision`, `workingCopyGeneration`, and
 `revisionDeltaId` remain separate throughout storage and API contracts.
 After a run is created, its `runId` is appended to the mutable revision
 metadata and that revision becomes `submitted`; the immutable Task Revision
-file is never rewritten.
+file is never rewritten. This records the receipt-bound run identity at run
+creation, not after downstream execution, so a later Skill/configuration change
+cannot erase a real historical submission.
 
 Continuous improvement creates its next-cycle Card from the current frozen
 run, preserving the acceptance and forbidden floors by default:
@@ -362,6 +371,13 @@ the local state directory. A frozen Task Revision is always read-only. Draft
 changes require an explicit CAS save; schema validation in the editor does not
 silently mark a generation as validated, and freeze remains a separate explicit
 action. Save conflicts preserve the unsaved browser draft.
+
+For a normal non-review change, `task edit` clones an unsuperseded frozen
+revision into the next `workingCopyGeneration`, with `baseTaskRevision` set and
+no `taskRevision`. The normal CAS write → validate → freeze path then produces
+the next immutable revision and writes both `supersedes` and `supersededBy`.
+It never thaws or overwrites the prior contract. A review-driven Revision Delta
+remains a separate atomic bounded-freeze path.
 
 When no upstream Task exists, the page shows an empty state instead of opening
 the template as if it were a user form. **查看 Scaffold** is an explicit,

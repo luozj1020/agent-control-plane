@@ -122,6 +122,7 @@ function renderTaskContract(): string[] {
     "```",
     "",
     "Use the generations returned by the product. Do not hand-write revisions or hashes. Validation commands are argv arrays, never shell strings.",
+    "To change a frozen contract outside review, first create a new working copy with `task edit`; do not overwrite or thaw an immutable Task Revision.",
   ];
 }
 

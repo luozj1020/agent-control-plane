@@ -512,6 +512,25 @@ export function createAppServer(options = {}) {
         return;
       }
 
+      if (pathname === "/api/workspace-tasks/edit" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        if (!workspaceTaskStore) {
+          sendJson(response, 501, { error: "task.workspace_store_unavailable" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await workspaceTaskStore.edit({
+          projectRoot: body?.projectRoot,
+          taskId: body?.taskId,
+          baseTaskRevision: body?.baseTaskRevision,
+          source: body?.source,
+        }));
+        return;
+      }
+
       const workspaceTaskAction = pathname.match(/^\/api\/workspace-tasks\/(validate|freeze)$/);
       if (workspaceTaskAction && request.method === "POST") {
         if (!trustedMutationOrigin(request)) {

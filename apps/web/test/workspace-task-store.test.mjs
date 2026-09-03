@@ -290,7 +290,9 @@ test("Workspace Preflight Receipt is immutable and becomes stale with Task or Sk
       taskId: "receipt-task",
       preflightId: persisted.receipt.preflightId,
       runId: "run-1",
-      activation,
+      // Submission is a receipt-bound historical fact. It must not be rejected
+      // merely because the currently active Skill changed after run creation.
+      activation: { ...activation, effectiveSkillSha256: "e".repeat(64) },
     });
     assert.equal(submitted.metadata.taskRevisions["1"].lifecycleStatus, "submitted");
     assert.deepEqual(submitted.metadata.taskRevisions["1"].submittedRuns, ["run-1"]);
@@ -390,6 +392,49 @@ test("Revision Delta atomically creates a new immutable Task Revision and supers
       }),
       (error) => error instanceof WorkspaceTaskStoreError && error.code === "revision_delta.base_task_stale",
     );
+  });
+});
+
+test("editing a frozen Task creates a CAS working copy and generic freeze preserves supersession lineage", async () => {
+  await withStore(async ({ projectRoot, store }) => {
+    await store.create({ projectRoot, taskId: "edit-task", task: validTask("edit-task") });
+    await store.validate({ projectRoot, taskId: "edit-task", expectedWorkingCopyGeneration: 1 });
+    const first = await store.freeze({ projectRoot, taskId: "edit-task", expectedWorkingCopyGeneration: 1 });
+    const draft = await store.edit({
+      projectRoot,
+      taskId: "edit-task",
+      source: { kind: "human", actor: "control-plane-ui" },
+    });
+    assert.equal(draft.workingCopy.baseTaskRevision, 1);
+    assert.equal(draft.workingCopy.workingCopyGeneration, 2);
+    assert.equal(draft.metadata.workingCopyState.lifecycleStatus, "draft");
+    const revisedTask = structuredClone(draft.workingCopy.task);
+    revisedTask.handoff.must_not_do.push("Do not edit generated output.");
+    const written = await store.write({
+      projectRoot,
+      taskId: "edit-task",
+      expectedWorkingCopyGeneration: 2,
+      task: revisedTask,
+      source: { kind: "human", actor: "control-plane-ui" },
+    });
+    await store.validate({
+      projectRoot,
+      taskId: "edit-task",
+      expectedWorkingCopyGeneration: written.workingCopy.workingCopyGeneration,
+    });
+    const second = await store.freeze({
+      projectRoot,
+      taskId: "edit-task",
+      expectedWorkingCopyGeneration: written.workingCopy.workingCopyGeneration,
+    });
+    assert.equal(second.task.taskRevision, 2);
+    assert.equal(second.metadata.taskRevisions["1"].supersededBy, 2);
+    assert.equal(second.metadata.taskRevisions["2"].supersedes, 1);
+    await assert.rejects(
+      store.edit({ projectRoot, taskId: "edit-task", baseTaskRevision: 1 }),
+      (error) => error instanceof WorkspaceTaskStoreError && error.code === "task.base_revision_superseded",
+    );
+    assert.equal(first.task.taskRevision, 1);
   });
 });
 
