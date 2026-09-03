@@ -422,6 +422,16 @@ machine code, retryability, attempt count, and timestamps; exception text and
 provider credentials are not persisted. The runtime fails closed before
 adapter startup.
 
+`ready` is intentionally not another terminal failure state: an initial
+baseline, budget-reservation, contract-write, or adapter-start failure keeps
+the Run ready and records a sanitized `runCreation.start.failure` receipt.
+The next explicit start retries the same immutable Run/Task/Preflight binding.
+Balanced reuses an identical initial contract and its existing reservation, so
+this recovery neither overwrites evidence nor spends a second downstream call.
+Submission-link telemetry is best effort: after the Task relationship and
+`ready` state are durable, a telemetry write failure is recorded as degraded
+telemetry and cannot demote the Run back to `submission_link_failed`.
+
 Submission-link recovery always reuses the frozen execution binding, `runId`,
 Task Revision, and Preflight Receipt. It does not consult the currently active
 Skill and does not create another run:

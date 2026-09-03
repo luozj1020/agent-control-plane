@@ -10,6 +10,7 @@ import {
   validateConvergentRevision,
   validateImprovementContinuation,
 } from "../overnight-runtime.mjs";
+import { snapshotWorktree } from "../balanced-runtime.mjs";
 import { createTaskCardTemplate, validateTaskCard } from "../task-card.mjs";
 import { createPreflightReceipt, taskCardSha256 } from "../execution-receipt.mjs";
 import { normalizeRuntimeEnvironment } from "../runtime-environment.mjs";
@@ -63,6 +64,11 @@ function editingAdapter(options = {}) {
     filesystemEventSource: options.readContainment ? "fake-read-events" : null,
     async start(context) {
       calls += 1;
+      if (options.failStarts && calls <= options.failStarts) {
+        const error = new Error("simulated adapter startup failure");
+        error.code = "EHOSTUNREACH";
+        throw error;
+      }
       context.onEvent?.({ type: "task-directed" });
       for (const path of options.observedReads ?? []) {
         context.onEvent?.({
@@ -202,6 +208,72 @@ test("new Overnight runs fail closed without an immutable Preflight Receipt", as
       }),
       (error) => error instanceof OvernightRuntimeError && error.code === "runtime.preflight_required",
     );
+  });
+});
+
+test("adapter startup failure leaves an initial Overnight Run ready for supervision retry", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const adapter = editingAdapter({ failStarts: 1 });
+    const runtime = createOvernightRuntime({
+      allowUnboundTaskForTests: true,
+      runtimeRoot,
+      adapters: registry(adapter),
+      pollMilliseconds: 1,
+      protocolProvider,
+    });
+    const created = await runtime.createRun({
+      task: task(), worktree, adapterId: adapter.id, strategy: "convergent",
+    });
+    await assert.rejects(
+      runtime.executeCycle(created.runDirectory),
+      (error) => error.code === "runtime.start_failed",
+    );
+    const beforeRetry = await runtime.status(created.runDirectory);
+    assert.equal(beforeRetry.runCreation.state, "ready");
+    assert.equal(beforeRetry.runCreation.start.failure.stage, "adapter-start");
+    const retried = await runtime.executeCycle(created.runDirectory);
+    assert.equal(retried.state, "revision_pending");
+    const afterRetry = await runtime.status(created.runDirectory);
+    assert.equal(afterRetry.runCreation.state, "running");
+    assert.equal(afterRetry.runCreation.start.attempts, 2);
+  });
+});
+
+test("baseline snapshot failure keeps an Overnight Run ready for supervision retry", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    let snapshotAttempts = 0;
+    const adapter = editingAdapter();
+    const runtime = createOvernightRuntime({
+      allowUnboundTaskForTests: true,
+      runtimeRoot,
+      adapters: registry(adapter),
+      pollMilliseconds: 1,
+      protocolProvider,
+      async snapshotWorktree(target) {
+        snapshotAttempts += 1;
+        if (snapshotAttempts === 1) {
+          const error = new Error("simulated baseline snapshot failure");
+          error.code = "EIO";
+          throw error;
+        }
+        return snapshotWorktree(target);
+      },
+    });
+    const created = await runtime.createRun({
+      task: task(), worktree, adapterId: adapter.id, strategy: "convergent",
+    });
+    await assert.rejects(
+      runtime.executeCycle(created.runDirectory),
+      (error) => error.code === "runtime.start_failed",
+    );
+    const beforeRetry = await runtime.status(created.runDirectory);
+    assert.equal(beforeRetry.runCreation.state, "ready");
+    assert.equal(beforeRetry.runCreation.start.failure.stage, "baseline-snapshot");
+    const retried = await runtime.executeCycle(created.runDirectory);
+    assert.equal(retried.state, "revision_pending");
+    const afterRetry = await runtime.status(created.runDirectory);
+    assert.equal(afterRetry.runCreation.state, "running");
+    assert.equal(afterRetry.runCreation.start.attempts, 2);
   });
 });
 

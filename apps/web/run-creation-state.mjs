@@ -25,6 +25,12 @@ export function createRunCreation(clock = Date.now, { linked = false } = {}) {
       linkedAt: linked ? createdAt : null,
       failure: null,
     },
+    start: {
+      attempts: 0,
+      lastAttemptedAt: null,
+      acceptedAt: null,
+      failure: null,
+    },
   };
 }
 
@@ -49,6 +55,7 @@ export function normalizedRunCreation(metadata, ErrorType = null) {
   const value = metadata?.runCreation;
   if (value !== undefined) {
     const link = value?.submissionLink;
+    const start = value?.start;
     const failure = link?.failure;
     const validFailure = failure === null || (
       failure && typeof failure === "object" &&
@@ -65,10 +72,39 @@ export function normalizedRunCreation(metadata, ErrorType = null) {
       !link || typeof link !== "object" ||
       !Number.isSafeInteger(link.attempts) || link.attempts < 0 ||
       !validTimestamp(link.lastAttemptedAt, { nullable: true }) ||
-      !validTimestamp(link.linkedAt, { nullable: true }) || !validFailure
+      !validTimestamp(link.linkedAt, { nullable: true }) || !validFailure ||
+      !start || typeof start !== "object" ||
+      !Number.isSafeInteger(start.attempts) || start.attempts < 0 ||
+      !validTimestamp(start.lastAttemptedAt, { nullable: true }) ||
+      !validTimestamp(start.acceptedAt, { nullable: true }) ||
+      !(start.failure === null || (
+        start.failure && typeof start.failure === "object" &&
+        typeof start.failure.code === "string" && start.failure.code.length > 0 &&
+        typeof start.failure.stage === "string" && start.failure.stage.length > 0 &&
+        typeof start.failure.retryable === "boolean" &&
+        Number.isSafeInteger(start.failure.attemptCount) && start.failure.attemptCount >= 1 &&
+        validTimestamp(start.failure.lastAttemptedAt) && validTimestamp(start.failure.recordedAt)
+      ))
     ) {
       throw corruptRunCreation(ErrorType);
     }
+    const linked = link.linkedAt !== null;
+    const accepted = start.acceptedAt !== null;
+    const validByState = (
+      (value.state === RUN_CREATION_STATES.created &&
+        value.readyAt === null && value.runningAt === null && !linked && !accepted &&
+        link.failure === null && start.failure === null) ||
+      (value.state === RUN_CREATION_STATES.submissionLinkFailed &&
+        value.readyAt === null && value.runningAt === null && !linked && !accepted &&
+        link.failure !== null && start.failure === null) ||
+      (value.state === RUN_CREATION_STATES.ready &&
+        value.readyAt !== null && value.runningAt === null && linked && !accepted &&
+        link.failure === null) ||
+      (value.state === RUN_CREATION_STATES.running &&
+        value.readyAt !== null && value.runningAt !== null && linked && accepted &&
+        link.failure === null && start.failure === null)
+    );
+    if (!validByState) throw corruptRunCreation(ErrorType);
     return value;
   }
   // Runs created before the creation FSM already crossed this boundary. Treat
@@ -83,6 +119,12 @@ export function normalizedRunCreation(metadata, ErrorType = null) {
       attempts: 0,
       lastAttemptedAt: null,
       linkedAt: metadata?.createdAt ?? null,
+      failure: null,
+    },
+    start: {
+      attempts: 0,
+      lastAttemptedAt: null,
+      acceptedAt: metadata?.createdAt ?? null,
       failure: null,
     },
     legacyInferred: true,
@@ -186,6 +228,47 @@ export function markRunRunning(metadata, clock = Date.now) {
     ...current,
     state: RUN_CREATION_STATES.running,
     runningAt: timestamp(clock),
+    start: {
+      ...current.start,
+      acceptedAt: current.start.acceptedAt ?? timestamp(clock),
+      failure: null,
+    },
+  };
+  return metadata.runCreation;
+}
+
+export function beginDownstreamStart(metadata, clock = Date.now) {
+  const current = normalizedRunCreation(metadata);
+  if (current.state !== RUN_CREATION_STATES.ready) return { tracked: false, runCreation: current };
+  metadata.runCreation = {
+    ...current,
+    start: {
+      ...current.start,
+      attempts: current.start.attempts + 1,
+      lastAttemptedAt: timestamp(clock),
+      failure: null,
+    },
+  };
+  return { tracked: true, runCreation: metadata.runCreation };
+}
+
+export function failDownstreamStart(metadata, clock = Date.now, options = {}) {
+  const current = normalizedRunCreation(metadata);
+  if (current.state !== RUN_CREATION_STATES.ready) return current;
+  const recordedAt = timestamp(clock);
+  metadata.runCreation = {
+    ...current,
+    start: {
+      ...current.start,
+      failure: {
+        code: options.code ?? "adapter_start_failed",
+        stage: options.stage ?? "adapter-start",
+        retryable: options.retryable !== false,
+        attemptCount: current.start.attempts,
+        lastAttemptedAt: current.start.lastAttemptedAt,
+        recordedAt,
+      },
+    },
   };
   return metadata.runCreation;
 }

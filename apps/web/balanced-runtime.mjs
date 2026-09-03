@@ -52,11 +52,13 @@ import {
 } from "./revision-delta.mjs";
 import {
   assertRunReady,
+  beginDownstreamStart,
   beginSubmissionLink,
   classifySubmissionLinkFailure,
   completeSubmissionLink,
   createRunCreation,
   failSubmissionLink,
+  failDownstreamStart,
   markRunRunning,
   normalizedRunCreation,
 } from "./run-creation-state.mjs";
@@ -91,6 +93,22 @@ async function writeJsonAtomic(path, value) {
   } catch (error) {
     await rm(temporary, { force: true });
     throw error;
+  }
+}
+
+async function writeImmutableTextOrVerify(path, text, options = {}) {
+  try {
+    await writeFile(path, text, { encoding: "utf8", flag: "wx", mode: options.mode ?? 0o600 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const existing = await readFile(path, "utf8");
+    if (existing !== text) {
+      throw new BalancedRuntimeError(
+        "runtime.start_artifact_conflict",
+        `Existing startup artifact '${basename(path)}' does not match the frozen Run contract.`,
+        409,
+      );
+    }
   }
 }
 
@@ -398,6 +416,19 @@ async function checkBudgetAvailable(runDirectory, budget, role, stage) {
 
 async function reserveBudget(runDirectory, budget, role, stage) {
   const ledgerPath = join(runDirectory, "budget-ledger.jsonl");
+  const records = await readLedger(ledgerPath);
+  const existing = records.find(
+    (entry) => entry.role === role && entry.stage === stage && entry.state === "reserved",
+  );
+  if (existing) {
+    return {
+      reservationId: existing.reservationId,
+      role,
+      stage,
+      snapshot: budgetSnapshot(records, budget),
+      reused: true,
+    };
+  }
   const snapshot = await checkBudgetAvailable(runDirectory, budget, role, stage);
   const reservationId = randomUUID();
   await appendJsonLine(ledgerPath, {
@@ -815,20 +846,52 @@ export function createBalancedRuntime(options = {}) {
   async function executeRoundLocked(context, task, revisionDecision = null) {
     const { runDirectory, metadata, adapter, policy, budget, protocol } = context;
     assertRunReady(metadata, BalancedRuntimeError);
+    const initialStart = beginDownstreamStart(metadata, clock);
+    if (initialStart.tracked) {
+      metadata.updatedAt = new Date(clock()).toISOString();
+      await writeJsonAtomic(join(runDirectory, "run.json"), metadata);
+    }
+    const failInitialStart = async (error, stage) => {
+      if (!initialStart.tracked) throw error;
+      const budgetFailure = stage === "budget-reservation" && error?.code === "budget_exhausted";
+      failDownstreamStart(metadata, clock, {
+        code: budgetFailure ? "budget_reservation_failed" : `${stage.replaceAll("-", "_")}_failed`,
+        stage,
+        retryable: !budgetFailure,
+      });
+      metadata.updatedAt = new Date(clock()).toISOString();
+      await writeJsonAtomic(join(runDirectory, "run.json"), metadata).catch(() => undefined);
+      throw new BalancedRuntimeError(
+        "runtime.start_failed",
+        "Downstream was not accepted. The Run remains ready and can be started again when the reported dependency is available.",
+        409,
+        { runId: metadata.runId, runDirectory, runCreation: metadata.runCreation },
+      );
+    };
+    const prepareStart = async (stage, operation) => {
+      try {
+        return await operation();
+      } catch (error) {
+        return failInitialStart(error, stage);
+      }
+    };
     const round = metadata.rounds + 1;
     const roundDirectory = join(runDirectory, "rounds", String(round).padStart(3, "0"));
-    await mkdir(roundDirectory, { recursive: true, mode: 0o700 });
-    const reservation = await reserveBudget(runDirectory, budget, "downstream", `round-${round}`);
+    await prepareStart("round-directory", () => mkdir(roundDirectory, { recursive: true, mode: 0o700 }));
+    const reservation = await prepareStart(
+      "budget-reservation",
+      () => reserveBudget(runDirectory, budget, "downstream", `round-${round}`),
+    );
     reservation.role = "downstream";
     reservation.stage = `round-${round}`;
-    const baseline = await snapshot(metadata.worktree);
+    const baseline = await prepareStart("baseline-snapshot", () => snapshot(metadata.worktree));
     const baselineRecord = {
       digest: baseline.digest,
       fileCount: baseline.fileCount,
       totalBytes: baseline.totalBytes,
       recordedAt: new Date(clock()).toISOString(),
     };
-    await writeJsonAtomic(join(roundDirectory, "baseline.json"), baselineRecord);
+    await prepareStart("baseline-write", () => writeJsonAtomic(join(roundDirectory, "baseline.json"), baselineRecord));
     const roundContract = {
       schemaVersion: 1,
       round,
@@ -836,11 +899,10 @@ export function createBalancedRuntime(options = {}) {
       priorReviewSha256: revisionDecision?.reviewSha256 ?? null,
     };
     const roundContractText = stableJson(roundContract);
-    await writeFile(join(roundDirectory, "contract.json"), roundContractText, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
+    await prepareStart(
+      "contract-write",
+      () => writeImmutableTextOrVerify(join(roundDirectory, "contract.json"), roundContractText),
+    );
 
     const startedAt = clock();
     const hardDeadline = startedAt + policy.hardCapSeconds * 1000;
@@ -970,7 +1032,7 @@ export function createBalancedRuntime(options = {}) {
         target: { type: "agent", id: metadata.adapterId },
         correlationId: `round-${round}`,
         detail: { round, resumed: Boolean(metadata.sessionId) },
-      });
+      }).catch(() => undefined);
       controller = await adapter.start({
         worktree: metadata.worktree,
         prompt: buildPrompt(task, { round }),
@@ -1239,6 +1301,9 @@ export function createBalancedRuntime(options = {}) {
         }
       }
     } catch (error) {
+      if (initialStart.tracked && !controller) {
+        return failInitialStart(error, "adapter-start");
+      }
       terminationReason = error.code === "ENOENT" ? "adapter_unavailable" : "adapter_failed";
       if (controller && !settled) {
         await controller.terminate().catch(() => undefined);
@@ -1476,6 +1541,14 @@ export function createBalancedRuntime(options = {}) {
         await recordCoordination(current.runDirectory, current.metadata, "state_transition", {
           target: { type: "state", id: "run-creation:ready" },
           detail: { creationState: "ready" },
+        }).catch(async () => {
+          current.metadata.telemetry = {
+            status: "degraded",
+            stage: "submission-link-telemetry",
+            recordedAt: new Date(clock()).toISOString(),
+          };
+          current.metadata.updatedAt = new Date(clock()).toISOString();
+          await writeJsonAtomic(join(current.runDirectory, "run.json"), current.metadata).catch(() => undefined);
         });
         return current.metadata;
       } catch (error) {

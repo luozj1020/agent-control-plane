@@ -8,6 +8,7 @@ import { BUILTIN_MODE_CATALOG } from "../../../packages/contracts/dist/index.js"
 import {
   BalancedRuntimeError,
   createBalancedRuntime,
+  snapshotWorktree,
   validateBalancedTask,
 } from "../balanced-runtime.mjs";
 import { createTaskCardTemplate } from "../task-card.mjs";
@@ -448,6 +449,11 @@ function editingAdapter(options = {}) {
     filesystemEventSource: options.readContainment ? "fake-read-events" : null,
     async start(context) {
       calls += 1;
+      if (options.failStarts && calls <= options.failStarts) {
+        const error = new Error("simulated adapter startup failure");
+        error.code = "EHOSTUNREACH";
+        throw error;
+      }
       let finish;
       let finished = false;
       const result = new Promise((resolve) => {
@@ -497,6 +503,76 @@ function editingAdapter(options = {}) {
     },
   };
 }
+
+test("adapter startup failure leaves an initial Balanced Run ready with retryable diagnostics", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const adapter = editingAdapter({ failStarts: 1 });
+    const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
+      runtimeRoot,
+      catalog: testCatalog(),
+      adapters: adapterRegistry(adapter),
+    });
+    let failed;
+    await assert.rejects(
+      runtime.run({ task: task(), worktree, adapterId: adapter.id, policyRef: "balanced-test@1.0.0" }),
+      (error) => {
+        failed = error;
+        return error.code === "runtime.start_failed";
+      },
+    );
+    const beforeRetry = await runtime.status(failed.details.runDirectory);
+    assert.equal(beforeRetry.runCreation.state, "ready");
+    assert.equal(beforeRetry.runCreation.start.attempts, 1);
+    assert.equal(beforeRetry.runCreation.start.failure.stage, "adapter-start");
+    assert.equal(beforeRetry.runCreation.start.failure.retryable, true);
+    assert.equal(beforeRetry.rounds, 0);
+    const retried = await runtime.start(failed.details.runDirectory);
+    assert.equal(retried.review.roundStatus, "review_pending");
+    const afterRetry = await runtime.status(failed.details.runDirectory);
+    assert.equal(afterRetry.runCreation.state, "running");
+    assert.equal(afterRetry.runCreation.start.attempts, 2);
+  });
+});
+
+test("baseline snapshot failure keeps a Balanced Run ready and reuses its reservation on retry", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    let snapshotAttempts = 0;
+    const adapter = editingAdapter();
+    const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
+      runtimeRoot,
+      catalog: testCatalog(),
+      adapters: adapterRegistry(adapter),
+      async snapshotWorktree(target) {
+        snapshotAttempts += 1;
+        if (snapshotAttempts === 1) {
+          const error = new Error("simulated baseline snapshot failure");
+          error.code = "EIO";
+          throw error;
+        }
+        return snapshotWorktree(target);
+      },
+    });
+    let failed;
+    await assert.rejects(
+      runtime.run({ task: task(), worktree, adapterId: adapter.id, policyRef: "balanced-test@1.0.0" }),
+      (error) => {
+        failed = error;
+        return error.code === "runtime.start_failed";
+      },
+    );
+    const beforeRetry = await runtime.status(failed.details.runDirectory);
+    assert.equal(beforeRetry.runCreation.state, "ready");
+    assert.equal(beforeRetry.runCreation.start.failure.stage, "baseline-snapshot");
+    assert.equal(beforeRetry.budgetState.used.downstream, 1);
+    const retried = await runtime.start(failed.details.runDirectory);
+    assert.equal(retried.review.roundStatus, "review_pending");
+    const afterRetry = await runtime.status(failed.details.runDirectory);
+    assert.equal(afterRetry.runCreation.state, "running");
+    assert.equal(afterRetry.budgetState.used.downstream, 1);
+  });
+});
 
 test("runs a hash-bound Balanced round and records an accepted review", async () => {
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
@@ -842,7 +918,9 @@ test("invalidates an advisor decision when the product changes during evaluation
       .map((line) => JSON.parse(line));
     const started = events.find((event) => event.type === "extension-evaluation-started");
     assert(started);
-    assert(Date.parse(started.activeDeadline) > Date.parse(started.recordedAt));
+    // Timers are serialized at millisecond precision. Under a loaded full-suite
+    // run, the still-valid evaluation window can share the event timestamp.
+    assert(Date.parse(started.activeDeadline) >= Date.parse(started.recordedAt));
     assert(events.some((event) => event.type === "extension-evaluation-invalidated"));
     assert.equal(result.review.evidence.budget.used.advisor, 0);
   });

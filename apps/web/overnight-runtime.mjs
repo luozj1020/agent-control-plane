@@ -47,11 +47,13 @@ import { createWakeAdapterRegistry } from "./wake-adapters.mjs";
 import { resolveRuntimeProtocol } from "./workflow-runtime-protocol.mjs";
 import {
   assertRunReady,
+  beginDownstreamStart,
   beginSubmissionLink,
   classifySubmissionLinkFailure,
   completeSubmissionLink,
   createRunCreation,
   failSubmissionLink,
+  failDownstreamStart,
   markRunRunning,
   normalizedRunCreation,
 } from "./run-creation-state.mjs";
@@ -679,9 +681,37 @@ export function createOvernightRuntime(options = {}) {
       if (metadata.state !== current.protocol.initialState) {
         throw new OvernightRuntimeError("runtime.invalid_state", `Cannot supervise a run in '${metadata.state}'.`, 409);
       }
-      const baseline = await snapshot(metadata.worktree);
+      const initialStart = beginDownstreamStart(metadata, clock);
+      if (initialStart.tracked) {
+        metadata.updatedAt = new Date(clock()).toISOString();
+        await writeJsonAtomic(join(runDirectory, "run.json"), metadata);
+      }
+      const failInitialStart = async (error, stage) => {
+        if (!initialStart.tracked) throw error;
+        failDownstreamStart(metadata, clock, {
+          code: `${stage.replaceAll("-", "_")}_failed`,
+          stage,
+          retryable: true,
+        });
+        metadata.updatedAt = new Date(clock()).toISOString();
+        await writeJsonAtomic(join(runDirectory, "run.json"), metadata).catch(() => undefined);
+        throw new OvernightRuntimeError(
+          "runtime.start_failed",
+          "Downstream was not accepted. The Run remains ready and can be supervised again.",
+          409,
+          { runId: metadata.runId, runDirectory, runCreation: metadata.runCreation },
+        );
+      };
+      const prepareStart = async (stage, operation) => {
+        try {
+          return await operation();
+        } catch (error) {
+          return failInitialStart(error, stage);
+        }
+      };
+      const baseline = await prepareStart("baseline-snapshot", () => snapshot(metadata.worktree));
       const baselineRecord = { digest: baseline.digest, fileCount: baseline.fileCount, totalBytes: baseline.totalBytes };
-      await writeJsonAtomic(join(cycleDirectory, "baseline.json"), baselineRecord);
+      await prepareStart("baseline-write", () => writeJsonAtomic(join(cycleDirectory, "baseline.json"), baselineRecord));
       await recordCoordination(runDirectory, metadata, "artifact_write", {
         target: { type: "artifact", id: `cycles/${String(metadata.cycle).padStart(3, "0")}/baseline.json` },
         measurementSource: "filesystem_snapshot",
@@ -697,8 +727,10 @@ export function createOvernightRuntime(options = {}) {
         target: { type: "agent", id: metadata.adapterId },
         correlationId: `cycle-${metadata.cycle}`,
         detail: { cycle: metadata.cycle, resumed: Boolean(metadata.sessionId) },
-      });
-      const controller = await adapter.start({
+      }).catch(() => undefined);
+      let controller;
+      try {
+        controller = await adapter.start({
         worktree: metadata.worktree,
         prompt: buildPrompt(task, {
           cycle: metadata.cycle,
@@ -735,7 +767,13 @@ export function createOvernightRuntime(options = {}) {
             }));
           }
         },
-      });
+        });
+      } catch (error) {
+        if (initialStart.tracked) {
+          return failInitialStart(error, "adapter-start");
+        }
+        throw error;
+      }
       const wasReady = metadata.runCreation.state === "ready";
       markRunRunning(metadata, clock);
       await persistMetadata(runDirectory, metadata, current.protocol.activeState);
@@ -1075,6 +1113,14 @@ export function createOvernightRuntime(options = {}) {
         await recordCoordination(current.runDirectory, current.metadata, "state_transition", {
           target: { type: "state", id: "run-creation:ready" },
           detail: { creationState: "ready" },
+        }).catch(async () => {
+          current.metadata.telemetry = {
+            status: "degraded",
+            stage: "submission-link-telemetry",
+            recordedAt: new Date(clock()).toISOString(),
+          };
+          current.metadata.updatedAt = new Date(clock()).toISOString();
+          await writeJsonAtomic(join(current.runDirectory, "run.json"), current.metadata).catch(() => undefined);
         });
         return current.metadata;
       } catch (error) {

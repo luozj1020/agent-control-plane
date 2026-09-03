@@ -67,6 +67,15 @@ test("present but malformed creation metadata fails closed instead of becoming l
   );
 });
 
+test("state-dependent timestamps and failure relations fail closed", () => {
+  const invalid = createRunCreation(() => Date.parse("2026-09-03T00:00:00.000Z"));
+  invalid.state = "running";
+  assert.throws(
+    () => normalizedRunCreation({ runCreation: invalid }, TestError),
+    (error) => error.code === "runtime.corrupt_run",
+  );
+});
+
 test("submission failure classification exposes retryability without exception text", () => {
   assert.deepEqual(classifySubmissionLinkFailure({ code: "EIO", message: "secret path" }), {
     code: "task_store_write_failed",
