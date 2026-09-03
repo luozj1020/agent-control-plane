@@ -255,12 +255,15 @@ const elements = {
   storeStatusTitle: document.querySelector("#store-status-title"),
   taskCardEditor: document.querySelector("#task-card-editor"),
   taskCardEditorSwitch: document.querySelector("#task-card-editor-switch"),
+  taskCardEmpty: document.querySelector("#task-card-empty"),
   taskCardEnvironmentIsolation: document.querySelector("#task-card-environment-isolation"),
   taskCardExecutionEnvironment: document.querySelector("#task-card-execution-environment"),
   taskCardExport: document.querySelector("#task-card-export"),
   taskCardForm: document.querySelector("#task-card-form"),
   taskCardImport: document.querySelector("#task-card-import"),
   taskCardImportInput: document.querySelector("#task-card-import-input"),
+  taskCardInspectorNote: document.querySelector("#task-card-inspector-note"),
+  taskCardLifecycleState: document.querySelector("#task-card-lifecycle-state"),
   taskCardMarkdown: document.querySelector("#task-card-markdown"),
   taskCardMessage: document.querySelector("#task-card-message"),
   taskCardNetworkDiagnostics: document.querySelector("#task-card-network-diagnostics"),
@@ -271,17 +274,31 @@ const elements = {
   taskCardPreflightRun: document.querySelector("#task-card-preflight-run"),
   taskCardPreflightState: document.querySelector("#task-card-preflight-state"),
   taskCardProxyMode: document.querySelector("#task-card-proxy-mode"),
+  taskCardRefresh: document.querySelector("#task-card-refresh"),
   taskCardRedo: document.querySelector("#task-card-redo"),
   taskCardRevert: document.querySelector("#task-card-revert"),
   taskCardReset: document.querySelector("#task-card-reset"),
+  taskCardSaveWorkingCopy: document.querySelector("#task-card-save-working-copy"),
+  taskCardScaffold: document.querySelector("#task-card-scaffold"),
+  taskCardSource: document.querySelector("#task-card-source"),
   taskCardState: document.querySelector("#task-card-state"),
   taskCardStrategy: document.querySelector("#task-card-strategy"),
   taskCardStrategyField: document.querySelector("#task-card-strategy-field"),
+  taskCardTaskId: document.querySelector("#task-card-task-id"),
+  taskCardTaskRevision: document.querySelector("#task-card-task-revision"),
+  taskCardTaskSelect: document.querySelector("#task-card-task-select"),
+  taskCardTaskSha256: document.querySelector("#task-card-task-sha256"),
   taskCardUndo: document.querySelector("#task-card-undo"),
+  taskCardValidateWorkingCopy: document.querySelector("#task-card-validate-working-copy"),
   taskCardViewSwitch: document.querySelector("#task-card-view-switch"),
   taskCardView: document.querySelector("#task-card-view"),
+  taskCardWorkingCopyGeneration: document.querySelector("#task-card-working-copy-generation"),
   taskCardWorkflowMode: document.querySelector("#task-card-workflow-mode"),
+  taskCardWorkspaceId: document.querySelector("#task-card-workspace-id"),
   taskCardWorktree: document.querySelector("#task-card-worktree"),
+  taskCardBaseTaskRevision: document.querySelector("#task-card-base-task-revision"),
+  taskCardContext: document.querySelector("#task-card-context"),
+  taskCardFreeze: document.querySelector("#task-card-freeze"),
   toast: document.querySelector("#toast"),
   tokenEstimate: document.querySelector("#token-estimate"),
   tokenDimension: document.querySelector("#token-dimension"),
@@ -361,6 +378,11 @@ let taskCardHistoryAt = 0;
 let taskCardSetBaselineOnValidation = false;
 let taskCardPreflightOptions = { workflowModes: [], overnightStrategies: [], adapters: [] };
 let taskCardConnectivityRunning = false;
+let workspaceTaskIndex = { activeTask: null, tasks: [], corruptEntries: 0 };
+let workspaceTaskContext = { kind: "loading" };
+let workspaceTaskLoading = false;
+let workspaceTaskRefreshQueued = false;
+let taskCardWorkingCopyDirty = false;
 let integrationsData = null;
 let integrationsLoading = false;
 let integrationsRefreshQueued = false;
@@ -906,11 +928,396 @@ function switchView(view, options = {}) {
     elements.taskCardWorkflowMode.value = selectedModeId;
     synchronizeTaskCardStrategy();
   }
+  if (options.load !== false && taskCard) loadWorkspaceTaskInspector();
   if (options.load !== false && integrations && !integrationsData) loadIntegrations();
   if (options.load !== false && usage) loadRuntimeUsage();
   if (options.load !== false && history) {
     loadCoordination();
     loadHistory({ selectEntry: true });
+  }
+}
+
+function taskCardEditorMutable() {
+  if (workspaceTaskLoading) return false;
+  if (workspaceTaskContext.kind === "scaffold") return true;
+  return workspaceTaskContext.kind === "working-copy" &&
+    workspaceTaskContext.lifecycleStatus !== "frozen";
+}
+
+function taskCardSourceLabel(source) {
+  if (!source) return "—";
+  return source.actor ? `${source.kind} · ${source.actor}` : source.kind;
+}
+
+function taskCardLifecycleLabel(status) {
+  return {
+    loading: "正在载入",
+    none: "尚无合同",
+    scaffold: "Scaffold",
+    draft: "草稿",
+    validated: "已验证",
+    frozen: "已冻结",
+    submitted: "已提交",
+    error: "不可用",
+    "no-workspace": "未选择 Workspace",
+  }[status] ?? status;
+}
+
+function clearTaskCardDocument() {
+  taskCardDraft = null;
+  validatedTaskCard = null;
+  taskCardBaseline = null;
+  taskCardErrorPath = null;
+  taskCardProjections = { audit: "", execution: "" };
+  taskCardWorkingCopyDirty = false;
+  taskCardUndoStack.length = 0;
+  taskCardRedoStack.length = 0;
+  elements.taskCardEditor.value = "";
+  elements.taskCardMarkdown.value = "";
+  elements.taskCardForm.replaceChildren();
+}
+
+function renderWorkspaceTaskInspector() {
+  const context = workspaceTaskContext;
+  const lifecycleStatus = new Set(["working-copy", "frozen"]).has(context.kind)
+    ? context.lifecycleStatus
+    : context.kind;
+  const lifecycleTone = lifecycleStatus === "validated"
+    ? "valid"
+    : new Set(["error", "no-workspace"]).has(lifecycleStatus)
+      ? "unavailable"
+      : lifecycleStatus === "none" ? "pending" : lifecycleStatus;
+  elements.taskCardLifecycleState.className = `task-card-state ${lifecycleTone}`;
+  elements.taskCardLifecycleState.textContent = taskCardLifecycleLabel(lifecycleStatus);
+  const workspace = context.workspace ?? workspaceTaskIndex.workspace ?? null;
+  elements.taskCardWorkspaceId.textContent = workspace?.workspaceId
+    ? shortHash(workspace.workspaceId)
+    : "—";
+  elements.taskCardWorkspaceId.title = workspace?.workspaceId ?? "";
+  const taskId = context.taskId ?? context.workingCopy?.taskId ?? context.activeTask?.taskId ?? null;
+  const matchingActiveTask = context.activeTask?.taskId === taskId ? context.activeTask : null;
+  elements.taskCardTaskId.textContent = taskId ?? "—";
+  elements.taskCardTaskId.title = taskId ?? "";
+  const workingCopyGeneration = context.workingCopy?.workingCopyGeneration ??
+    context.metadata?.workingCopyState?.workingCopyGeneration ?? null;
+  elements.taskCardWorkingCopyGeneration.textContent = workingCopyGeneration === null
+    ? "—"
+    : `g${workingCopyGeneration}`;
+  const baseTaskRevision = context.workingCopy?.baseTaskRevision ??
+    context.metadata?.workingCopyState?.baseTaskRevision ?? null;
+  elements.taskCardBaseTaskRevision.textContent = new Set(["working-copy", "frozen"]).has(context.kind)
+    ? baseTaskRevision === null ? "无" : `r${baseTaskRevision}`
+    : "—";
+  const taskRevision = matchingActiveTask?.taskRevision ??
+    context.revisionArtifact?.taskRevision ??
+    context.metadata?.workingCopyState?.frozenTaskRevision ?? null;
+  elements.taskCardTaskRevision.textContent = taskRevision === null ? "—" : `r${taskRevision}`;
+  const taskSha256 = matchingActiveTask?.taskSha256 ??
+    context.revisionArtifact?.taskSha256 ??
+    (taskRevision === null ? context.metadata?.workingCopyState?.validatedTaskSha256 :
+      context.metadata?.taskRevisions?.[String(taskRevision)]?.taskSha256) ?? null;
+  elements.taskCardTaskSha256.textContent = taskSha256 ? shortHash(taskSha256) : "—";
+  elements.taskCardTaskSha256.title = taskSha256 ?? "";
+  const source = context.workingCopy?.source ??
+    context.metadata?.taskRevisions?.[String(taskRevision)]?.source ?? null;
+  elements.taskCardSource.textContent = taskCardSourceLabel(source);
+  elements.taskCardSource.title = elements.taskCardSource.textContent;
+
+  elements.taskCardTaskSelect.replaceChildren();
+  const tasks = workspaceTaskIndex.tasks ?? [];
+  if (tasks.length === 0) {
+    elements.taskCardTaskSelect.append(option("", "尚无 Workspace Task"));
+  } else {
+    for (const task of tasks) {
+      elements.taskCardTaskSelect.append(option(
+        task.taskId,
+        `${task.taskId} · ${taskCardLifecycleLabel(task.lifecycleStatus)}${task.active ? " · 当前" : ""}`,
+      ));
+    }
+    if (taskId && tasks.some((task) => task.taskId === taskId)) {
+      elements.taskCardTaskSelect.value = taskId;
+    }
+  }
+  elements.taskCardTaskSelect.disabled = workspaceTaskLoading || tasks.length === 0;
+
+  const hasDocument = new Set(["scaffold", "working-copy", "frozen"]).has(context.kind);
+  if (!hasDocument) {
+    const emptyTitle = elements.taskCardEmpty.querySelector("strong");
+    const emptyCopy = elements.taskCardEmpty.querySelector("p");
+    if (context.kind === "loading") {
+      emptyTitle.textContent = "正在读取 Workspace Task";
+      emptyCopy.textContent = "正在读取本地任务索引和不可变引用，不会修改代码仓库。";
+      setTaskCardState("pending", "正在读取 Workspace Task Store。");
+    } else if (context.kind === "error") {
+      emptyTitle.textContent = "Workspace Task 不可用";
+      emptyCopy.textContent = context.error ?? "任务存储读取失败。";
+    } else if (context.kind === "no-workspace") {
+      emptyTitle.textContent = "尚未选择 Workspace";
+      emptyCopy.textContent = "先在 Skill 配置页打开工作目录，或仅查看标准 Scaffold。";
+      setTaskCardState("unavailable", "尚未选择 Workspace；Scaffold 仍可只作参考。");
+    } else {
+      emptyTitle.textContent = "尚无上游 Agent 创建的任务合同";
+      emptyCopy.textContent = "等待上游 Agent 通过 CLI/API 创建 working copy，或者只读查看 Scaffold。";
+      setTaskCardState("unavailable", "当前 Workspace 尚无 Task Card；未生成任何 Task Revision。");
+    }
+  }
+  elements.taskCardEmpty.hidden = hasDocument;
+  elements.taskCardForm.hidden = !hasDocument || taskCardEditorView !== "form";
+  elements.taskCardEditor.hidden = !hasDocument || taskCardEditorView !== "json";
+  elements.taskCardEditorSwitch.hidden = !hasDocument;
+  elements.taskCardViewSwitch.hidden = !hasDocument;
+  elements.taskCardMarkdown.hidden = !hasDocument;
+  elements.taskCardEditor.disabled = !taskCardEditorMutable();
+  elements.taskCardImport.disabled = !taskCardEditorMutable();
+  elements.taskCardReset.hidden = context.kind !== "scaffold";
+  elements.taskCardUndo.disabled = !taskCardEditorMutable() || taskCardUndoStack.length === 0;
+  elements.taskCardRedo.disabled = !taskCardEditorMutable() || taskCardRedoStack.length === 0;
+  elements.taskCardRevert.disabled = !taskCardEditorMutable() ||
+    !taskCardBaseline || taskCardSnapshot() === taskCardBaseline;
+  elements.taskCardExport.disabled = !hasDocument || !validatedTaskCard;
+  elements.taskCardRefresh.disabled = workspaceTaskLoading || !projectConfigState?.initialized;
+  elements.taskCardScaffold.disabled = workspaceTaskLoading || !taskCardTemplate;
+
+  const working = context.kind === "working-copy" && context.lifecycleStatus !== "frozen";
+  elements.taskCardSaveWorkingCopy.hidden = !working;
+  elements.taskCardSaveWorkingCopy.disabled = workspaceTaskLoading ||
+    !taskCardWorkingCopyDirty || !validatedTaskCard;
+  elements.taskCardValidateWorkingCopy.hidden = !working;
+  elements.taskCardValidateWorkingCopy.disabled = workspaceTaskLoading ||
+    taskCardWorkingCopyDirty || !validatedTaskCard || context.lifecycleStatus !== "draft";
+  elements.taskCardFreeze.hidden = !(working && context.lifecycleStatus === "validated");
+  elements.taskCardFreeze.disabled = workspaceTaskLoading || taskCardWorkingCopyDirty || !validatedTaskCard;
+
+  if (context.kind === "loading") {
+    elements.taskCardContext.textContent = "正在读取 Workspace Task 索引与不可变引用。";
+    elements.taskCardInspectorNote.textContent = "读取期间不会修改 Workspace 或代码仓库。";
+  } else if (context.kind === "no-workspace") {
+    elements.taskCardContext.textContent = "先在 Skill 配置页打开一个工作目录。";
+    elements.taskCardInspectorNote.textContent = "没有 Workspace 时仅可查看 Scaffold；不会创建仓库文件。";
+  } else if (context.kind === "none") {
+    elements.taskCardContext.textContent = "当前 Workspace 尚无上游 Agent 创建的 Task Card。";
+    elements.taskCardInspectorNote.textContent = "等待上游 Agent 通过 CLI/API 创建；Scaffold 仅作参考和人工兜底。";
+  } else if (context.kind === "scaffold") {
+    elements.taskCardContext.textContent = "当前显示未持久化的 Scaffold，不是 Workspace 执行合同。";
+    elements.taskCardInspectorNote.textContent = "编辑和导出不会创建 Task Revision，也不会更新 active-task.json。";
+  } else if (context.kind === "frozen" || new Set(["frozen", "submitted"]).has(context.lifecycleStatus)) {
+    elements.taskCardContext.textContent = context.lifecycleStatus === "submitted"
+      ? `${taskId} 的已提交不可变合同正在只读展示。`
+      : `${taskId} 的不可变合同正在只读展示。`;
+    elements.taskCardInspectorNote.textContent = "冻结内容不能原地编辑；执行关系旁挂在 metadata，不会修改 Task Revision。";
+  } else {
+    elements.taskCardContext.textContent = `${taskId} 的 Workspace working copy。`;
+    elements.taskCardInspectorNote.textContent = taskCardWorkingCopyDirty
+      ? "浏览器有未保存修改；先保存草稿，再登记验证或 freeze。"
+      : context.lifecycleStatus === "validated"
+        ? "当前 generation 已登记验证，可以显式冻结为新的不可变合同。"
+        : "即时字段校验不会改变生命周期；点击“验证草稿”后才登记 validated。";
+  }
+}
+
+function setTaskCardDocument(task, { setBaseline = true } = {}) {
+  const serialized = JSON.stringify(task, null, 2);
+  elements.taskCardEditor.value = serialized;
+  taskCardLastEditorValue = serialized;
+  taskCardDraft = taskCardClone(task);
+  taskCardWorkingCopyDirty = false;
+  taskCardUndoStack.length = 0;
+  taskCardRedoStack.length = 0;
+  if (setBaseline) {
+    taskCardBaseline = serialized;
+    taskCardSetBaselineOnValidation = false;
+  }
+  renderTaskCardForm();
+  return validateTaskCardDraft();
+}
+
+async function loadWorkspaceTaskInspector(options = {}) {
+  if (workspaceTaskLoading) {
+    workspaceTaskRefreshQueued = true;
+    return;
+  }
+  if (!projectConfigState?.initialized || !projectConfigState.projectRoot) {
+    workspaceTaskIndex = { activeTask: null, tasks: [], corruptEntries: 0 };
+    workspaceTaskContext = { kind: "no-workspace" };
+    clearTaskCardDocument();
+    renderWorkspaceTaskInspector();
+    return;
+  }
+  workspaceTaskLoading = true;
+  workspaceTaskContext = { kind: "loading", workspace: { workspaceId: projectConfigState.workspaceId } };
+  renderWorkspaceTaskInspector();
+  try {
+    const query = new URLSearchParams({ projectRoot: projectConfigState.projectRoot });
+    workspaceTaskIndex = await requestJson(`/api/workspace-tasks?${query}`);
+    const tasks = workspaceTaskIndex.tasks ?? [];
+    if (tasks.length === 0) {
+      workspaceTaskContext = { kind: "none", workspace: workspaceTaskIndex.workspace };
+      clearTaskCardDocument();
+      return;
+    }
+    const requestedTaskId = options.taskId;
+    const selected = tasks.find((task) => task.taskId === requestedTaskId) ??
+      tasks.find((task) => task.active) ?? tasks[0];
+    const detailQuery = new URLSearchParams({ projectRoot: projectConfigState.projectRoot });
+    if (!selected.active) detailQuery.set("taskId", selected.taskId);
+    const detail = await requestJson(`/api/workspace-tasks/current?${detailQuery}`);
+    if (detail.revisionArtifact) {
+      const taskRevisionMetadata = detail.metadata.taskRevisions[
+        String(detail.revisionArtifact.taskRevision)
+      ];
+      workspaceTaskContext = {
+        kind: "frozen",
+        taskId: selected.taskId,
+        lifecycleStatus: taskRevisionMetadata?.lifecycleStatus ?? "frozen",
+        ...detail,
+      };
+      await setTaskCardDocument(detail.revisionArtifact.task);
+    } else {
+      workspaceTaskContext = {
+        kind: "working-copy",
+        taskId: selected.taskId,
+        lifecycleStatus: detail.metadata.workingCopyState.lifecycleStatus,
+        ...detail,
+      };
+      await setTaskCardDocument(detail.workingCopy.task);
+    }
+  } catch (error) {
+    workspaceTaskContext = { kind: "error", error: error.message };
+    clearTaskCardDocument();
+    setTaskCardState("unavailable", `Workspace Task 读取失败：${error.message}`);
+  } finally {
+    workspaceTaskLoading = false;
+    renderWorkspaceTaskInspector();
+    if (taskCardEditorView === "form" && taskCardDraft) renderTaskCardForm();
+    if (workspaceTaskRefreshQueued) {
+      workspaceTaskRefreshQueued = false;
+      queueMicrotask(() => loadWorkspaceTaskInspector(options));
+    }
+  }
+}
+
+async function showTaskCardScaffold() {
+  if (!taskCardTemplate) return;
+  if (taskCardWorkingCopyDirty && !window.confirm("放弃尚未保存的 Workspace 草稿修改并查看 Scaffold？")) return;
+  workspaceTaskContext = {
+    kind: "scaffold",
+    workspace: workspaceTaskIndex.workspace ?? null,
+  };
+  const stored = localStorage.getItem(TASK_CARD_DRAFT_KEY);
+  let scaffold = taskCardTemplate;
+  if (stored) {
+    try {
+      scaffold = JSON.parse(stored);
+    } catch {
+      localStorage.removeItem(TASK_CARD_DRAFT_KEY);
+    }
+  }
+  await setTaskCardDocument(scaffold);
+  renderWorkspaceTaskInspector();
+}
+
+async function saveWorkspaceTaskWorkingCopy() {
+  if (
+    workspaceTaskContext.kind !== "working-copy" ||
+    workspaceTaskContext.lifecycleStatus === "frozen" ||
+    !taskCardWorkingCopyDirty ||
+    !validatedTaskCard
+  ) return;
+  const taskId = workspaceTaskContext.taskId;
+  let saved = false;
+  workspaceTaskLoading = true;
+  renderWorkspaceTaskInspector();
+  try {
+    await requestJson("/api/workspace-tasks/working-copy", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectRoot: projectConfigState.projectRoot,
+        taskId,
+        expectedWorkingCopyGeneration:
+          workspaceTaskContext.workingCopy.workingCopyGeneration,
+        task: validatedTaskCard,
+        source: { kind: "human", actor: "control-plane-ui" },
+      }),
+    });
+    taskCardWorkingCopyDirty = false;
+    saved = true;
+    showToast("Workspace 草稿已通过 CAS 保存；验证状态已失效。");
+  } catch (error) {
+    showToast(`草稿保存失败：${error.message}`);
+  } finally {
+    workspaceTaskLoading = false;
+    if (saved) await loadWorkspaceTaskInspector({ taskId });
+    else renderWorkspaceTaskInspector();
+  }
+}
+
+async function validateWorkspaceTaskWorkingCopy() {
+  if (
+    workspaceTaskContext.kind !== "working-copy" ||
+    workspaceTaskContext.lifecycleStatus !== "draft" ||
+    taskCardWorkingCopyDirty ||
+    !validatedTaskCard
+  ) return;
+  const taskId = workspaceTaskContext.taskId;
+  let validated = false;
+  workspaceTaskLoading = true;
+  renderWorkspaceTaskInspector();
+  try {
+    await requestJson("/api/workspace-tasks/validate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectRoot: projectConfigState.projectRoot,
+        taskId,
+        expectedWorkingCopyGeneration:
+          workspaceTaskContext.workingCopy.workingCopyGeneration,
+      }),
+    });
+    validated = true;
+    showToast("当前 workingCopyGeneration 已登记为 validated。");
+  } catch (error) {
+    showToast(`草稿验证失败：${error.message}`);
+  } finally {
+    workspaceTaskLoading = false;
+    if (validated) await loadWorkspaceTaskInspector({ taskId });
+    else renderWorkspaceTaskInspector();
+  }
+}
+
+async function freezeWorkspaceTask() {
+  if (
+    workspaceTaskContext.kind !== "working-copy" ||
+    workspaceTaskContext.lifecycleStatus !== "validated" ||
+    taskCardWorkingCopyDirty ||
+    !validatedTaskCard
+  ) return;
+  const taskId = workspaceTaskContext.taskId;
+  const workingCopyGeneration = workspaceTaskContext.workingCopy.workingCopyGeneration;
+  let frozen = false;
+  if (!window.confirm(
+    `冻结 ${taskId} 的 generation ${workingCopyGeneration}？\n\n成功后会产生不可变 Task Revision，当前 working copy 不能再原地编辑。`,
+  )) return;
+  workspaceTaskLoading = true;
+  renderWorkspaceTaskInspector();
+  try {
+    const result = await requestJson("/api/workspace-tasks/freeze", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectRoot: projectConfigState.projectRoot,
+        taskId,
+        expectedWorkingCopyGeneration: workingCopyGeneration,
+      }),
+    });
+    frozen = true;
+    showToast(`${taskId} 已冻结为 Task Revision ${result.task.taskRevision}。`);
+  } catch (error) {
+    showToast(`合同冻结失败：${error.message}`);
+  } finally {
+    workspaceTaskLoading = false;
+    if (frozen) await loadWorkspaceTaskInspector({ taskId });
+    else renderWorkspaceTaskInspector();
   }
 }
 
@@ -973,9 +1380,10 @@ function setTaskCardValue(target, path, value, { removeEmpty = false } = {}) {
 }
 
 function updateTaskCardHistoryButtons() {
-  elements.taskCardUndo.disabled = taskCardUndoStack.length === 0;
-  elements.taskCardRedo.disabled = taskCardRedoStack.length === 0;
-  elements.taskCardRevert.disabled = !taskCardBaseline || taskCardSnapshot() === taskCardBaseline;
+  elements.taskCardUndo.disabled = !taskCardEditorMutable() || taskCardUndoStack.length === 0;
+  elements.taskCardRedo.disabled = !taskCardEditorMutable() || taskCardRedoStack.length === 0;
+  elements.taskCardRevert.disabled = !taskCardEditorMutable() ||
+    !taskCardBaseline || taskCardSnapshot() === taskCardBaseline;
 }
 
 function recordTaskCardHistory(previous, group = null) {
@@ -998,16 +1406,20 @@ function replaceTaskCardSnapshot(snapshot, { render = true } = {}) {
   taskCardLastEditorValue = snapshot;
   try {
     taskCardDraft = JSON.parse(snapshot);
+    if (workspaceTaskContext.kind === "working-copy") {
+      taskCardWorkingCopyDirty = snapshot !== taskCardBaseline;
+    }
     if (render) renderTaskCardForm();
   } catch {
     taskCardDraft = null;
   }
   queueTaskCardValidation({ preserveHistoryGroup: true });
   updateTaskCardHistoryButtons();
+  renderWorkspaceTaskInspector();
 }
 
 function commitTaskCardMutation(mutator, group, { render = false } = {}) {
-  if (!taskCardDraft) return;
+  if (!taskCardDraft || !taskCardEditorMutable()) return;
   const previous = taskCardSnapshot();
   const next = taskCardClone(taskCardDraft);
   mutator(next);
@@ -1015,11 +1427,15 @@ function commitTaskCardMutation(mutator, group, { render = false } = {}) {
   if (serialized === previous) return;
   recordTaskCardHistory(previous, group);
   taskCardDraft = next;
+  if (workspaceTaskContext.kind === "working-copy") {
+    taskCardWorkingCopyDirty = serialized !== taskCardBaseline;
+  }
   elements.taskCardEditor.value = serialized;
   taskCardLastEditorValue = serialized;
   if (render) renderTaskCardForm();
   queueTaskCardValidation({ preserveHistoryGroup: true });
   updateTaskCardHistoryButtons();
+  renderWorkspaceTaskInspector();
 }
 
 function createTaskCardControl(labelText, control, path = null, help = null) {
@@ -1051,7 +1467,7 @@ function createTaskCardInput(path, value, options = {}) {
   if (options.removeEmpty) control.dataset.taskRemoveEmpty = "true";
   if (options.rerender) control.dataset.taskRerender = "true";
   if (options.placeholder) control.placeholder = options.placeholder;
-  if (options.disabled) control.disabled = true;
+  if (options.disabled || !taskCardEditorMutable()) control.disabled = true;
   return control;
 }
 
@@ -1065,6 +1481,7 @@ function createTaskCardSelect(path, value, values, options = {}) {
     control.append(option(choice.value, choice.label));
   }
   control.value = value ?? "";
+  control.disabled = !taskCardEditorMutable();
   return control;
 }
 
@@ -1098,6 +1515,7 @@ function createTaskCardRemoveButton(path, index, label = "删除") {
   button.dataset.taskIndex = String(index);
   button.setAttribute("aria-label", label);
   button.textContent = "−";
+  button.disabled = !taskCardEditorMutable();
   return button;
 }
 
@@ -1109,6 +1527,7 @@ function createTaskCardAddButton(path, kind, label) {
   button.dataset.taskPath = taskCardPath(path);
   button.dataset.taskKind = kind;
   button.textContent = `＋ ${label}`;
+  button.disabled = !taskCardEditorMutable();
   return button;
 }
 
@@ -1330,8 +1749,13 @@ async function validateTaskCardDraft() {
       "valid",
       result.migrated
         ? "已从 legacy-v0 自动迁移并保存为 task-card-v1；请检查生成的稳定验收 ID。"
-        : "task-card-v1 契约有效，浏览器草稿已保存；可供 Overnight 与 Balanced 使用。",
+        : workspaceTaskContext.kind === "frozen"
+          ? "不可变 Task Revision 通过结构校验；当前为只读 Inspector。"
+          : workspaceTaskContext.kind === "working-copy"
+            ? "Task Card 结构有效；生命周期只由显式保存、验证和 freeze 操作改变。"
+            : "Scaffold 结构有效，但尚未写入 Workspace Task Store。",
     );
+    renderWorkspaceTaskInspector();
   } catch (error) {
     if (requestId !== taskCardValidationRequest) return;
     validatedTaskCard = null;
@@ -1343,11 +1767,14 @@ async function validateTaskCardDraft() {
     elements.taskCardPreflightRun.disabled = true;
     setTaskCardState("invalid", error.message);
     if (taskCardEditorView === "form") renderTaskCardForm();
+    renderWorkspaceTaskInspector();
   }
 }
 
 function queueTaskCardValidation(options = {}) {
-  localStorage.setItem(TASK_CARD_DRAFT_KEY, elements.taskCardEditor.value);
+  if (workspaceTaskContext.kind === "scaffold") {
+    localStorage.setItem(TASK_CARD_DRAFT_KEY, elements.taskCardEditor.value);
+  }
   taskCardValidationRequest += 1;
   if (!options.preserveHistoryGroup) taskCardHistoryGroup = null;
   clearTimeout(taskCardValidationTimer);
@@ -1358,12 +1785,8 @@ async function loadTaskCard() {
   try {
     const result = await requestJson("/api/task-card/template");
     taskCardTemplate = result.task;
-    const stored = localStorage.getItem(TASK_CARD_DRAFT_KEY);
-    elements.taskCardEditor.value = stored ?? JSON.stringify(taskCardTemplate, null, 2);
-    taskCardLastEditorValue = elements.taskCardEditor.value;
-    taskCardSetBaselineOnValidation = true;
-    await validateTaskCardDraft();
     await loadTaskCardPreflightOptions();
+    await loadWorkspaceTaskInspector();
   } catch (error) {
     validatedTaskCard = null;
     elements.taskCardEditor.disabled = true;
@@ -1378,7 +1801,11 @@ function exportTaskCard() {
   const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = "TASK.json";
+  const taskId = workspaceTaskContext.taskId ?? validatedTaskCard.id ?? "TASK";
+  const taskRevision = workspaceTaskContext.revisionArtifact?.taskRevision ?? null;
+  anchor.download = taskRevision === null
+    ? `${taskId}.json`
+    : `${taskId}-task-revision-${String(taskRevision).padStart(4, "0")}.json`;
   anchor.click();
   URL.revokeObjectURL(url);
   showToast("已导出经过校验的 TASK.json。");
@@ -1615,17 +2042,31 @@ async function runTaskCardConnectivityProbe() {
 
 function renderTaskCardPreflight(result) {
   elements.taskCardPreflightResult.replaceChildren();
-  elements.taskCardPreflightState.className = `task-card-state ${result.ready ? "valid" : "invalid"}`;
-  elements.taskCardPreflightState.textContent = result.ready ? "可以启动" : "存在阻断";
+  const executionReady = result.executionReady === true;
+  elements.taskCardPreflightState.className = `task-card-state ${executionReady ? "valid" : result.ready ? "pending" : "invalid"}`;
+  elements.taskCardPreflightState.textContent = executionReady
+    ? "回执已冻结"
+    : result.ready ? "仅诊断通过" : "存在阻断";
 
   const summary = document.createElement("div");
   summary.className = "task-card-preflight-summary";
   const title = document.createElement("strong");
-  title.textContent = result.ready ? "启动前检查通过" : "启动前检查未通过";
+  title.textContent = executionReady
+    ? "Preflight Receipt 已生成，可以启动"
+    : result.ready
+      ? "诊断通过，但没有不可变执行绑定"
+      : "启动前检查未通过";
   const fingerprint = document.createElement("code");
   fingerprint.textContent = result.taskSha256 ? `sha256:${result.taskSha256.slice(0, 16)}…` : "无任务指纹";
   summary.append(title, fingerprint);
   elements.taskCardPreflightResult.append(summary);
+  if (result.receipt) {
+    const receipt = document.createElement("p");
+    receipt.className = "task-card-inspector-note";
+    receipt.textContent = `${result.receipt.preflightId} · ${shortHash(result.receipt.preflightSha256)} · Task r${result.receipt.task.taskRevision}`;
+    receipt.title = result.receipt.preflightSha256;
+    elements.taskCardPreflightResult.append(receipt);
+  }
 
   const checks = document.createElement("div");
   checks.className = "task-card-preflight-checks";
@@ -1666,11 +2107,22 @@ async function runTaskCardPreflight() {
   elements.taskCardPreflightState.textContent = "正在检查";
   try {
     const workflowMode = elements.taskCardWorkflowMode.value;
+    const frozenTask = workspaceTaskContext.kind === "frozen"
+      ? workspaceTaskContext.revisionArtifact
+      : null;
     const result = await requestJson("/api/task-card/preflight", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         task: validatedTaskCard,
+        ...(frozenTask ? {
+          workspaceTask: {
+            projectRoot: projectConfigState.projectRoot,
+            taskId: frozenTask.taskId,
+            taskRevision: frozenTask.taskRevision,
+            taskSha256: frozenTask.taskSha256,
+          },
+        } : {}),
         workflowMode,
         worktree: elements.taskCardWorktree.value,
         adapterId: elements.taskCardAdapter.value,
@@ -2692,11 +3144,13 @@ async function loadProjectConfig(projectRoot = elements.projectConfigRoot.value.
     void loadRecentProjects();
     void loadIntegrations();
     void loadHistory();
+    void loadWorkspaceTaskInspector();
   } catch (error) {
     projectConfigState = { initialized: false, error: error.message };
     resetControlsToGlobalProfile();
     renderModeCards();
     refresh();
+    void loadWorkspaceTaskInspector();
   } finally {
     projectConfigLoading = false;
     renderProjectConfig();
@@ -4968,14 +5422,19 @@ elements.integrationsScope.addEventListener("change", () => {
   elements.integrationPlanPanel.hidden = true;
 });
 elements.taskCardEditor.addEventListener("input", () => {
+  if (!taskCardEditorMutable()) return;
   recordTaskCardHistory(taskCardLastEditorValue, "json-editor");
   taskCardLastEditorValue = elements.taskCardEditor.value;
+  if (workspaceTaskContext.kind === "working-copy") {
+    taskCardWorkingCopyDirty = elements.taskCardEditor.value !== taskCardBaseline;
+  }
   try {
     taskCardDraft = JSON.parse(elements.taskCardEditor.value);
   } catch {
     taskCardDraft = null;
   }
   queueTaskCardValidation({ preserveHistoryGroup: true });
+  renderWorkspaceTaskInspector();
 });
 elements.taskCardEditorSwitch.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-task-card-editor-view]");
@@ -5071,7 +5530,8 @@ elements.taskCardImportInput.addEventListener("change", async () => {
     recordTaskCardHistory(taskCardSnapshot(), "import");
     elements.taskCardEditor.value = imported;
     taskCardLastEditorValue = imported;
-    taskCardSetBaselineOnValidation = true;
+    taskCardSetBaselineOnValidation = workspaceTaskContext.kind === "scaffold";
+    if (workspaceTaskContext.kind === "working-copy") taskCardWorkingCopyDirty = true;
     try {
       taskCardDraft = JSON.parse(imported);
       renderTaskCardForm();
@@ -5080,14 +5540,15 @@ elements.taskCardImportInput.addEventListener("change", async () => {
       setTaskCardEditorView("json");
     }
     queueTaskCardValidation({ preserveHistoryGroup: true });
+    renderWorkspaceTaskInspector();
     showToast(`已载入 ${file.name}，正在校验。`);
   } catch (error) {
     showToast(`导入失败：${error.message}`);
   }
 });
 elements.taskCardReset.addEventListener("click", () => {
-  if (!taskCardTemplate) return;
-  if (!window.confirm("恢复标准 Task Card 模板？当前浏览器草稿会被替换。")) return;
+  if (!taskCardTemplate || workspaceTaskContext.kind !== "scaffold") return;
+  if (!window.confirm("恢复标准 Task Card Scaffold？当前浏览器草稿会被替换。")) return;
   recordTaskCardHistory(taskCardSnapshot(), "reset-template");
   const template = JSON.stringify(taskCardTemplate, null, 2);
   elements.taskCardEditor.value = template;
@@ -5097,7 +5558,22 @@ elements.taskCardReset.addEventListener("click", () => {
   localStorage.removeItem(TASK_CARD_DRAFT_KEY);
   renderTaskCardForm();
   validateTaskCardDraft();
-  showToast("已恢复标准 Task Card 模板。");
+  showToast("已恢复标准 Task Card Scaffold。");
+});
+elements.taskCardRefresh.addEventListener("click", () => loadWorkspaceTaskInspector({
+  taskId: workspaceTaskContext.taskId,
+}));
+elements.taskCardScaffold.addEventListener("click", showTaskCardScaffold);
+elements.taskCardSaveWorkingCopy.addEventListener("click", saveWorkspaceTaskWorkingCopy);
+elements.taskCardValidateWorkingCopy.addEventListener("click", validateWorkspaceTaskWorkingCopy);
+elements.taskCardFreeze.addEventListener("click", freezeWorkspaceTask);
+elements.taskCardTaskSelect.addEventListener("change", () => {
+  if (!elements.taskCardTaskSelect.value) return;
+  if (taskCardWorkingCopyDirty && !window.confirm("放弃尚未保存的草稿修改并切换 Task？")) {
+    elements.taskCardTaskSelect.value = workspaceTaskContext.taskId ?? "";
+    return;
+  }
+  loadWorkspaceTaskInspector({ taskId: elements.taskCardTaskSelect.value });
 });
 elements.taskCardWorkflowMode.addEventListener("change", () => {
   synchronizeTaskCardStrategy();

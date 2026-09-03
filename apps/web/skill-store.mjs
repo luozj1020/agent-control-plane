@@ -630,6 +630,8 @@ export function createSkillStore(options = {}) {
       targetAdapterId: metadata.targetAdapterId,
       includedAgentIds: metadata.includedAgentIds,
       overnightLoopPolicy: metadata.overnightLoopPolicy ?? null,
+      balancedBudget: metadata.balancedBudget ?? null,
+      balancedTiming: metadata.balancedTiming ?? null,
       projectBinding: metadata.projectBinding ?? null,
       contentFingerprint: metadata.contentFingerprint,
       contentSha256: metadata.contentSha256,

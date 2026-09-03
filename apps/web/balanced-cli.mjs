@@ -5,20 +5,34 @@ import { lstat, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { BUILTIN_MODE_CATALOG } from "../../packages/contracts/dist/index.js";
 import { BalancedRuntimeError, createBalancedRuntime } from "./balanced-runtime.mjs";
 import { OvernightRuntimeError, createOvernightRuntime } from "./overnight-runtime.mjs";
 import { createWorkflowCoreAdapter } from "./workflow-core-adapter.mjs";
 import { discoverRuntimeActivation } from "./runtime-activation.mjs";
+import { createProjectConfigStore, ProjectConfigError } from "./project-config-store.mjs";
 import {
   TaskCardError,
   createTaskCardTemplate,
   normalizeTaskCard,
   renderTaskCardMarkdown,
 } from "./task-card.mjs";
+import {
+  WorkspaceTaskStoreError,
+  createWorkspaceTaskStore,
+} from "./workspace-task-store.mjs";
+import {
+  createTaskCardPreflightAdapters,
+  preflightTaskCard,
+} from "./task-card-preflight.mjs";
 
 const CLI_PATH = fileURLToPath(import.meta.url);
 const workflowCoreAdapter = createWorkflowCoreAdapter();
 const runtimeProtocolProvider = (mode) => workflowCoreAdapter.runtimeProtocol(mode);
+
+function workspaceTaskStore() {
+  return createWorkspaceTaskStore({ projectConfigStore: createProjectConfigStore() });
+}
 
 function writeStream(stream, value) {
   return new Promise((resolveWrite, rejectWrite) => {
@@ -94,18 +108,25 @@ function usage() {
     "Agent Control Plane Runtime",
     "",
     "Commands:",
-    "  agent-control-plane balanced run --task TASK.json --worktree PATH --adapter ID [budget/environment/activation options]",
-    "  agent-control-plane balanced review --run RUN_DIR --decision accept|revise|stop [--revision TASK.json]",
+    "  agent-control-plane balanced run --workspace PATH --task-id ID --preflight-id ID",
+    "  agent-control-plane balanced review --run RUN_DIR --decision accept|revise|stop [--workspace PATH --delta DELTA.json]",
     "  agent-control-plane balanced status --run RUN_DIR",
     "  agent-control-plane balanced list",
-    "  agent-control-plane overnight submit --task TASK.json --worktree PATH --adapter ID --strategy convergent|continuous-improvement [--wake-adapter ID] [--activation-id ID --skill-sha256 HASH] [--execution-env auto|host|sandbox --proxy-mode direct|inherit]",
-    "  agent-control-plane overnight review --run RUN_DIR --decision accept|revise|continue|stop [--revision TASK.json] [--next NEXT.json]",
+    "  agent-control-plane overnight submit --workspace PATH --task-id ID --preflight-id ID",
+    "  agent-control-plane overnight review --run RUN_DIR --decision accept|revise|continue|stop [--workspace PATH --delta DELTA.json] [--next NEXT.json]",
     "  agent-control-plane overnight interrupt --run RUN_DIR",
     "  agent-control-plane overnight status --run RUN_DIR",
     "  agent-control-plane overnight list",
     "  agent-control-plane overnight next-init --run RUN_DIR [--output NEXT.json]",
     "  agent-control-plane task init [--output TASK.json]",
+    "  agent-control-plane task create --workspace PATH --task-id ID [--task TASK.json] [--source AGENT]",
+    "  agent-control-plane task write --workspace PATH --task-id ID --task TASK.json --expected-working-copy-generation N [--source AGENT]",
     "  agent-control-plane task validate --task TASK.json",
+    "  agent-control-plane task validate --workspace PATH --task-id ID --expected-working-copy-generation N",
+    "  agent-control-plane task freeze --workspace PATH --task-id ID --expected-working-copy-generation N",
+    "  agent-control-plane task current --workspace PATH [--task-id ID]",
+    "  agent-control-plane task list --workspace PATH",
+    "  agent-control-plane task preflight --workspace PATH --workflow-mode balanced|overnight [runtime options]",
     "  agent-control-plane task migrate --task LEGACY.json [--output TASK.json]",
     "  agent-control-plane task render --task TASK.json --view audit|execution [--output TASK.md]",
     "",
@@ -117,6 +138,50 @@ function usage() {
     "  --context-seconds N --first-progress-seconds N --active-seconds N",
     "  --extension-seconds N --growing-extension-seconds N --hard-cap-seconds N",
   ].join("\n");
+}
+
+function balancedPreflightProfile(active, options) {
+  const timingPolicy = BUILTIN_MODE_CATALOG.tunedWindowPolicies.find(
+    (entry) => entry.id === "balanced-default" && entry.version === "1.0.0",
+  );
+  const budgetPolicy = BUILTIN_MODE_CATALOG.balancedBudgetPolicies.find(
+    (entry) => entry.id === "balanced-standard" && entry.version === "1.0.0",
+  );
+  const timingBase = active.balancedTiming ?? timingPolicy;
+  const budgetBase = active.balancedBudget ?? budgetPolicy;
+  const pick = (name, fallback) => integerOption(options, name) ?? fallback;
+  return {
+    policyRef: "balanced-default@1.0.0",
+    timing: {
+      contextAcquisitionSeconds: pick("context-seconds", timingBase.contextAcquisitionSeconds),
+      firstProgressSeconds: pick("first-progress-seconds", timingBase.firstProgressSeconds),
+      activeWindowSeconds: pick("active-seconds", timingBase.activeWindowSeconds),
+      progressExtensionSeconds: pick("extension-seconds", timingBase.progressExtensionSeconds),
+      growingProgressExtensionSeconds: pick(
+        "growing-extension-seconds",
+        timingBase.growingProgressExtensionSeconds,
+      ),
+      hardCapSeconds: pick("hard-cap-seconds", timingBase.hardCapSeconds),
+    },
+    budget: {
+      mainReviewCalls: pick("main-review-calls", budgetBase.mainReviewCalls),
+      downstreamCalls: pick("downstream-calls", budgetBase.downstreamCalls),
+      advisorCalls: pick("advisor-calls", budgetBase.advisorCalls),
+      reservedFinalReviewCalls: pick(
+        "reserved-final-review-calls",
+        budgetBase.reservedFinalReviewCalls,
+      ),
+    },
+  };
+}
+
+function overnightPreflightStrategy(active, requested) {
+  if (requested) return requested;
+  const reference = active.overnightLoopPolicy;
+  const policy = BUILTIN_MODE_CATALOG.overnightLoopPolicies.find(
+    (entry) => entry.id === reference?.id && entry.version === reference?.version,
+  );
+  return policy?.strategy ?? "convergent";
 }
 
 async function writeScaffold(value, output, label) {
@@ -164,9 +229,143 @@ async function runTaskCommand(command, options) {
     return writeScaffold(createTaskCardTemplate(), options.output, "Task Card");
   }
   if (command === "validate") {
+    if (options.workspace !== undefined) {
+      requireAllowedOptions(options, new Set([
+        "workspace", "task-id", "expected-working-copy-generation",
+      ]));
+      return workspaceTaskStore().validate({
+        projectRoot: options.workspace,
+        taskId: options["task-id"],
+        expectedWorkingCopyGeneration: integerOption(options, "expected-working-copy-generation"),
+      });
+    }
     requireAllowedOptions(options, new Set(["task"]));
     const normalized = normalizeTaskCard(await readTask(options.task, "Task Card"));
     return { valid: true, ...normalized };
+  }
+  if (command === "create") {
+    requireAllowedOptions(options, new Set(["workspace", "task-id", "task", "source"]));
+    if (!options.workspace || !options["task-id"]) {
+      throw cliError("cli.missing_argument", "--workspace and --task-id are required.");
+    }
+    return workspaceTaskStore().create({
+      projectRoot: options.workspace,
+      taskId: options["task-id"],
+      task: options.task ? await readTask(options.task, "Task Card") : undefined,
+      source: { kind: "upstream-agent", ...(options.source ? { actor: options.source } : {}) },
+    });
+  }
+  if (command === "write") {
+    requireAllowedOptions(options, new Set([
+      "workspace", "task-id", "task", "expected-working-copy-generation", "source",
+    ]));
+    if (!options.workspace || !options["task-id"] || !options.task) {
+      throw cliError("cli.missing_argument", "--workspace, --task-id, and --task are required.");
+    }
+    return workspaceTaskStore().write({
+      projectRoot: options.workspace,
+      taskId: options["task-id"],
+      task: await readTask(options.task, "Task Card"),
+      expectedWorkingCopyGeneration: integerOption(options, "expected-working-copy-generation"),
+      source: { kind: "upstream-agent", ...(options.source ? { actor: options.source } : {}) },
+    });
+  }
+  if (command === "freeze") {
+    requireAllowedOptions(options, new Set([
+      "workspace", "task-id", "expected-working-copy-generation",
+    ]));
+    if (!options.workspace || !options["task-id"]) {
+      throw cliError("cli.missing_argument", "--workspace and --task-id are required.");
+    }
+    return workspaceTaskStore().freeze({
+      projectRoot: options.workspace,
+      taskId: options["task-id"],
+      expectedWorkingCopyGeneration: integerOption(options, "expected-working-copy-generation"),
+    });
+  }
+  if (command === "current") {
+    requireAllowedOptions(options, new Set(["workspace", "task-id"]));
+    if (!options.workspace) throw cliError("cli.missing_argument", "--workspace is required.");
+    return workspaceTaskStore().current({
+      projectRoot: options.workspace,
+      taskId: options["task-id"],
+    });
+  }
+  if (command === "list") {
+    requireAllowedOptions(options, new Set(["workspace"]));
+    if (!options.workspace) throw cliError("cli.missing_argument", "--workspace is required.");
+    return workspaceTaskStore().list({ projectRoot: options.workspace });
+  }
+  if (command === "preflight") {
+    requireAllowedOptions(options, new Set([
+      "workspace", "task-id", "workflow-mode", "adapter", "worktree", "strategy",
+      "wake-adapter", "policy",
+      "main-review-calls", "downstream-calls", "advisor-calls", "reserved-final-review-calls",
+      "context-seconds", "first-progress-seconds", "active-seconds", "extension-seconds",
+      "growing-extension-seconds", "hard-cap-seconds",
+      "execution-env", "proxy-mode", "environment-isolation", "network-diagnostics",
+    ]));
+    if (!options.workspace || !new Set(["balanced", "overnight"]).has(options["workflow-mode"])) {
+      throw cliError(
+        "cli.missing_argument",
+        "--workspace and --workflow-mode balanced|overnight are required.",
+      );
+    }
+    const workflowMode = options["workflow-mode"];
+    const active = await discoverRuntimeActivation(workflowMode);
+    const store = workspaceTaskStore();
+    const current = await store.current({
+      projectRoot: options.workspace,
+      ...(options["task-id"] ? { taskId: options["task-id"] } : {}),
+    });
+    if (!current.revisionArtifact) {
+      throw new WorkspaceTaskStoreError(
+        "preflight.task_not_frozen",
+        "Preflight requires an immutable frozen Task Revision.",
+        409,
+      );
+    }
+    const adapterId = options.adapter ?? active.targetAdapterId;
+    if (!adapterId) {
+      throw cliError("cli.missing_argument", "--adapter is required when the active Skill has no downstream binding.");
+    }
+    const balanced = balancedPreflightProfile(active, options);
+    const preflight = await preflightTaskCard({
+      task: current.revisionArtifact.task,
+      workflowMode,
+      adapterId,
+      worktree: options.worktree ?? options.workspace,
+      runtimeEnvironment: {
+        executionEnvironment: options["execution-env"],
+        proxyMode: options["proxy-mode"],
+        isolationMode: options["environment-isolation"],
+        networkDiagnostics: options["network-diagnostics"],
+      },
+      ...(workflowMode === "overnight" ? {
+        strategy: overnightPreflightStrategy(active, options.strategy),
+        wakeAdapterId: options["wake-adapter"] ?? "durable-file",
+      } : {
+        policyRef: options.policy ?? balanced.policyRef,
+        timing: balanced.timing,
+        budget: balanced.budget,
+      }),
+    }, {
+      adapters: createTaskCardPreflightAdapters(process.env),
+      environment: process.env,
+      workflowContract: await workflowCoreAdapter.status(),
+    });
+    if (!preflight.ready) {
+      return { ...preflight, executionReady: false, receipt: null };
+    }
+    const persisted = await store.createPreflight({
+      projectRoot: options.workspace,
+      taskId: current.revisionArtifact.taskId,
+      taskRevision: current.revisionArtifact.taskRevision,
+      taskSha256: current.revisionArtifact.taskSha256,
+      preflightResult: preflight,
+      activation: active,
+    });
+    return { ...preflight, executionReady: true, receipt: persisted.receipt };
   }
   if (command === "migrate") {
     requireAllowedOptions(options, new Set(["task", "output"]));
@@ -209,33 +408,137 @@ function launchOvernightSupervisor(runDirectory) {
   return child.pid ?? null;
 }
 
+async function loadExecutionReceipt(mode, options) {
+  if (!options.workspace || !options["task-id"] || !options["preflight-id"]) {
+    throw cliError(
+      "cli.missing_argument",
+      "--workspace, --task-id, and --preflight-id are required.",
+    );
+  }
+  const active = await discoverRuntimeActivation(mode);
+  const store = workspaceTaskStore();
+  const bound = await store.preflight({
+    projectRoot: options.workspace,
+    taskId: options["task-id"],
+    preflightId: options["preflight-id"],
+    activation: active,
+  });
+  if (bound.receipt.runtimeEnvelope.workflowMode !== mode) {
+    throw new WorkspaceTaskStoreError(
+      "preflight.workflow_mode_mismatch",
+      `Preflight Receipt is not for ${mode}.`,
+      409,
+    );
+  }
+  return { ...bound, active, store };
+}
+
+async function prepareRevision(mode, options, status) {
+  if (!options.workspace || !options.delta) {
+    throw cliError("cli.missing_argument", "--workspace and --delta are required for revise.");
+  }
+  const active = await discoverRuntimeActivation(mode);
+  const store = workspaceTaskStore();
+  const priorBinding = (status.revisionBindings ?? []).at(-1)?.executionBinding ?? status.executionBinding;
+  if (!priorBinding?.task || !priorBinding?.preflight?.preflightId) {
+    throw cliError("revision_delta.base_binding_missing", "The run has no immutable current Task/Preflight binding.");
+  }
+  const taskId = priorBinding.task.taskId;
+  if (options["task-id"] && options["task-id"] !== taskId) {
+    throw cliError("revision_delta.task_mismatch", "--task-id does not match the run's current Task binding.");
+  }
+  const prior = await store.preflight({
+    projectRoot: options.workspace,
+    taskId,
+    preflightId: priorBinding.preflight.preflightId,
+    activation: active,
+  });
+  const delta = await readTask(options.delta, "Revision Delta");
+  if (!delta?.task) {
+    throw cliError("revision_delta.invalid", "Revision Delta must contain the complete candidate Task in 'task'.");
+  }
+  const envelope = prior.receipt.runtimeEnvelope;
+  const diagnostic = await preflightTaskCard({
+    task: delta.task,
+    workflowMode: mode,
+    adapterId: envelope.adapterId,
+    worktree: envelope.worktree,
+    runtimeEnvironment: envelope.runtimeEnvironment,
+    ...(mode === "overnight" ? {
+      strategy: envelope.strategy,
+      wakeAdapterId: envelope.wakeAdapterId,
+    } : {
+      policyRef: envelope.policyRef,
+      timing: envelope.timing,
+      budget: envelope.budget,
+    }),
+  }, {
+    adapters: createTaskCardPreflightAdapters(process.env),
+    environment: process.env,
+    workflowContract: await workflowCoreAdapter.status(),
+  });
+  if (!diagnostic.ready) {
+    const error = cliError("revision_delta.preflight_failed", "Revision Delta candidate did not pass Preflight.");
+    error.details = diagnostic;
+    throw error;
+  }
+  const reviewArtifactSha256 = mode === "balanced" ? status.latestReviewSha256 : status.latestWakeSha256;
+  const sequence = mode === "balanced" ? status.rounds : status.cycle;
+  const revised = await store.revise({
+    projectRoot: options.workspace,
+    taskId,
+    baseTask: priorBinding.task,
+    delta,
+    source: { kind: "revision-delta", actor: "upstream-reviewer" },
+    review: {
+      runId: status.runId,
+      workflowMode: mode,
+      artifactSha256: reviewArtifactSha256,
+      sequence,
+    },
+  });
+  const persisted = await store.createPreflight({
+    projectRoot: options.workspace,
+    taskId,
+    taskRevision: revised.task.taskRevision,
+    taskSha256: revised.task.taskSha256,
+    preflightResult: diagnostic,
+    activation: active,
+  });
+  return {
+    active,
+    store,
+    taskId,
+    revisionArtifact: revised.revisionArtifact,
+    revisionDelta: revised.revisionDelta,
+    receipt: persisted.receipt,
+  };
+}
+
 async function runOvernightCommand(command, options) {
   const runtime = createOvernightRuntime({ protocolProvider: runtimeProtocolProvider });
   if (command === "submit") {
-    requireAllowedOptions(options, new Set([
-      "task", "worktree", "adapter", "strategy", "wake-adapter",
-      "activation-id", "skill-sha256",
-      "execution-env", "proxy-mode", "environment-isolation", "network-diagnostics",
-    ]));
-    if (!options.worktree || !options.adapter || !options.strategy) {
-      throw cliError("cli.missing_argument", "--worktree, --adapter, and --strategy are required.");
-    }
-    const active = await discoverRuntimeActivation("overnight");
+    requireAllowedOptions(options, new Set(["workspace", "task-id", "preflight-id"]));
+    const bound = await loadExecutionReceipt("overnight", options);
+    const envelope = bound.receipt.runtimeEnvelope;
     const created = await runtime.createRun({
-      task: await readTask(options.task, "Task"),
-      worktree: options.worktree,
-      adapterId: options.adapter,
-      activationId: options["activation-id"] ?? active.activationId,
-      effectiveSkillSha256: options["skill-sha256"] ?? active.effectiveSkillSha256,
-      projectBinding: active.projectBinding,
-      strategy: options.strategy,
-      wakeAdapterId: options["wake-adapter"] ?? "durable-file",
-      runtimeEnvironment: {
-        executionEnvironment: options["execution-env"],
-        proxyMode: options["proxy-mode"],
-        isolationMode: options["environment-isolation"],
-        networkDiagnostics: options["network-diagnostics"],
-      },
+      task: bound.revisionArtifact.task,
+      worktree: envelope.worktree,
+      adapterId: envelope.adapterId,
+      activationId: bound.active.activationId,
+      effectiveSkillSha256: bound.active.effectiveSkillSha256,
+      projectBinding: bound.active.projectBinding,
+      strategy: envelope.strategy,
+      wakeAdapterId: envelope.wakeAdapterId,
+      runtimeEnvironment: envelope.runtimeEnvironment,
+      preflightReceipt: bound.receipt,
+    });
+    await bound.store.recordSubmission({
+      projectRoot: options.workspace,
+      taskId: options["task-id"],
+      preflightId: options["preflight-id"],
+      runId: created.metadata.runId,
+      activation: bound.active,
     });
     return {
       state: created.metadata.state,
@@ -255,18 +558,33 @@ async function runOvernightCommand(command, options) {
     };
   }
   if (command === "review") {
-    requireAllowedOptions(options, new Set(["run", "decision", "revision", "next"]));
+    requireAllowedOptions(options, new Set(["run", "decision", "workspace", "task-id", "delta", "next"]));
     if (!options.run || !options.decision) {
       throw cliError("cli.missing_argument", "--run and --decision are required.");
     }
+    const revision = options.decision === "revise"
+      ? await prepareRevision("overnight", options, await runtime.status(options.run))
+      : null;
     const reviewed = await runtime.review({
       runDirectory: options.run,
       decision: options.decision,
-      revisionTask:
-        options.decision === "revise" ? await readTask(options.revision, "Revision") : undefined,
+      revision: revision ? {
+        task: revision.revisionArtifact.task,
+        revisionDelta: revision.revisionDelta,
+        preflightReceipt: revision.receipt,
+      } : undefined,
       continuation:
         options.decision === "continue" ? await readTask(options.next, "Next-cycle contract") : undefined,
     });
+    if (revision) {
+      await revision.store.recordSubmission({
+        projectRoot: options.workspace,
+        taskId: revision.taskId,
+        preflightId: revision.receipt.preflightId,
+        runId: (await runtime.status(options.run)).runId,
+        activation: revision.active,
+      });
+    }
     return {
       ...reviewed,
       ...(reviewed.resumeRequired
@@ -323,68 +641,28 @@ async function main(argv) {
   const runtime = createBalancedRuntime({ protocolProvider: runtimeProtocolProvider });
   let result;
   if (command === "run") {
-    requireAllowedOptions(options, new Set([
-      "task",
-      "worktree",
-      "adapter",
-      "policy",
-      "main-review-calls",
-      "downstream-calls",
-      "advisor-calls",
-      "reserved-final-review-calls",
-      "context-seconds",
-      "first-progress-seconds",
-      "active-seconds",
-      "extension-seconds",
-      "growing-extension-seconds",
-      "hard-cap-seconds",
-      "execution-env",
-      "proxy-mode",
-      "environment-isolation",
-      "network-diagnostics",
-      "activation-id",
-      "skill-sha256",
-      // Accepted but ignored so previously activated Skills do not regain a Token cap.
-      "max-total-tokens",
-    ]));
-    if (!options.worktree || !options.adapter) {
-      throw new BalancedRuntimeError(
-        "cli.missing_argument",
-        "--worktree and --adapter are required.",
-      );
-    }
-    if (options["max-total-tokens"] !== undefined) {
-      integerOption(options, "max-total-tokens");
-    }
-    const active = await discoverRuntimeActivation("balanced");
+    requireAllowedOptions(options, new Set(["workspace", "task-id", "preflight-id"]));
+    const bound = await loadExecutionReceipt("balanced", options);
+    const envelope = bound.receipt.runtimeEnvelope;
     result = await runtime.run({
-      task: await readTask(options.task, "Task"),
-      worktree: options.worktree,
-      adapterId: options.adapter,
-      activationId: options["activation-id"] ?? active.activationId,
-      effectiveSkillSha256: options["skill-sha256"] ?? active.effectiveSkillSha256,
-      projectBinding: active.projectBinding,
-      policyRef: options.policy ?? "balanced-default@1.0.0",
-      budget: {
-        mainReviewCalls: integerOption(options, "main-review-calls"),
-        downstreamCalls: integerOption(options, "downstream-calls"),
-        advisorCalls: integerOption(options, "advisor-calls"),
-        reservedFinalReviewCalls: integerOption(options, "reserved-final-review-calls"),
-      },
-      timing: {
-        contextAcquisitionSeconds: integerOption(options, "context-seconds"),
-        firstProgressSeconds: integerOption(options, "first-progress-seconds"),
-        activeWindowSeconds: integerOption(options, "active-seconds"),
-        progressExtensionSeconds: integerOption(options, "extension-seconds"),
-        growingProgressExtensionSeconds: integerOption(options, "growing-extension-seconds"),
-        hardCapSeconds: integerOption(options, "hard-cap-seconds"),
-      },
-      runtimeEnvironment: {
-        executionEnvironment: options["execution-env"],
-        proxyMode: options["proxy-mode"],
-        isolationMode: options["environment-isolation"],
-        networkDiagnostics: options["network-diagnostics"],
-      },
+      task: bound.revisionArtifact.task,
+      worktree: envelope.worktree,
+      adapterId: envelope.adapterId,
+      activationId: bound.active.activationId,
+      effectiveSkillSha256: bound.active.effectiveSkillSha256,
+      projectBinding: bound.active.projectBinding,
+      policyRef: envelope.policyRef,
+      budget: envelope.budget,
+      timing: envelope.timing,
+      runtimeEnvironment: envelope.runtimeEnvironment,
+      preflightReceipt: bound.receipt,
+    });
+    await bound.store.recordSubmission({
+      projectRoot: options.workspace,
+      taskId: options["task-id"],
+      preflightId: options["preflight-id"],
+      runId: result.review.runId,
+      activation: bound.active,
     });
     result = {
       state: result.review.roundStatus,
@@ -393,17 +671,32 @@ async function main(argv) {
       reviewSha256: result.reviewSha256,
     };
   } else if (command === "review") {
-    requireAllowedOptions(options, new Set(["run", "decision", "revision"]));
+    requireAllowedOptions(options, new Set(["run", "decision", "workspace", "task-id", "delta"]));
     if (!options.run) throw new BalancedRuntimeError("cli.missing_argument", "--run is required.");
     if (!options.decision) {
       throw new BalancedRuntimeError("cli.missing_argument", "--decision is required.");
     }
+    const revision = options.decision === "revise"
+      ? await prepareRevision("balanced", options, await runtime.status(options.run))
+      : null;
     result = await runtime.review({
       runDirectory: options.run,
       decision: options.decision,
-      revisionTask:
-        options.decision === "revise" ? await readTask(options.revision, "Revision") : undefined,
+      revision: revision ? {
+        task: revision.revisionArtifact.task,
+        revisionDelta: revision.revisionDelta,
+        preflightReceipt: revision.receipt,
+      } : undefined,
     });
+    if (revision) {
+      await revision.store.recordSubmission({
+        projectRoot: options.workspace,
+        taskId: revision.taskId,
+        preflightId: revision.receipt.preflightId,
+        runId: (await runtime.status(options.run)).runId,
+        activation: revision.active,
+      });
+    }
     result = result.review
       ? {
           state: result.review.roundStatus,
@@ -436,7 +729,9 @@ main(process.argv.slice(2)).catch(async (error) => {
     error:
       error instanceof BalancedRuntimeError ||
       error instanceof OvernightRuntimeError ||
-      error instanceof TaskCardError
+      error instanceof TaskCardError ||
+      error instanceof ProjectConfigError ||
+      error instanceof WorkspaceTaskStoreError
         ? error.code
         : "runtime.unexpected",
     message: error.message,
@@ -446,7 +741,9 @@ main(process.argv.slice(2)).catch(async (error) => {
   process.exitCode =
     error instanceof BalancedRuntimeError ||
     error instanceof OvernightRuntimeError ||
-    error instanceof TaskCardError
+    error instanceof TaskCardError ||
+    error instanceof ProjectConfigError ||
+    error instanceof WorkspaceTaskStoreError
       ? 2
       : 1;
 });

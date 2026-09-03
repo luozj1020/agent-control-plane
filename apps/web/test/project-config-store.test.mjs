@@ -82,6 +82,24 @@ test("opening a new directory registers a local-only workspace without repositor
   });
 });
 
+test("workspace resolution names workspaceRevision explicitly and can require prior registration", async () => {
+  await withProject(async ({ project, root, stateRoot }) => {
+    const unopened = join(root, "unopened");
+    await mkdir(unopened);
+    const store = createProjectConfigStore({ stateRoot });
+    await assert.rejects(
+      store.resolveWorkspace(unopened, { register: false }),
+      (error) => error instanceof ProjectConfigError && error.code === "project.workspace_not_registered",
+    );
+    const opened = await store.open(project);
+    const workspace = await store.resolveWorkspace(project, { register: false });
+    assert.equal(workspace.workspaceId, opened.workspaceId);
+    assert.equal(workspace.workspaceRevision, opened.revision);
+    assert.equal(workspace.workspaceRoot, join(stateRoot, opened.workspaceId));
+    assert.equal(Object.hasOwn(workspace, "revision"), false);
+  });
+});
+
 test("repository configuration is opt-in and preserves the existing workspace", async () => {
   await withProject(async ({ project, stateRoot }) => {
     let nonce = 0;

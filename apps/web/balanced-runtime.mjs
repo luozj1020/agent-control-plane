@@ -36,11 +36,20 @@ import { normalizeRuntimeEnvironment } from "./runtime-environment.mjs";
 import { normalizeRuntimeActivation } from "./runtime-activation.mjs";
 import { resolveRuntimeProtocol } from "./workflow-runtime-protocol.mjs";
 import {
+  bindReceiptToRuntime,
+  taskCardSha256,
+  validateRunReceipt,
+} from "./execution-receipt.mjs";
+import {
   TaskCardError,
   taskAllowsNoChanges,
   taskValidationCommands,
   validateTaskCard,
 } from "./task-card.mjs";
+import {
+  validateBoundedTaskRevision,
+  validateRevisionDeltaArtifact,
+} from "./revision-delta.mjs";
 
 const RUNTIME_SCHEMA_VERSION = 1;
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,159}$/;
@@ -560,6 +569,7 @@ export function createBalancedRuntime(options = {}) {
   const clock = options.clock ?? (() => Date.now());
   const snapshot = options.snapshotWorktree ?? snapshotWorktree;
   const protocolProvider = options.protocolProvider;
+  const allowUnboundTaskForTests = options.allowUnboundTaskForTests === true;
 
   const recordCoordination = (runDirectory, metadata, kind, input = {}) =>
     appendCoordinationEvent(
@@ -605,13 +615,47 @@ export function createBalancedRuntime(options = {}) {
     const budget = resolveBudget(catalog, input.budget);
     const runtimeEnvironment = normalizeRuntimeEnvironment(input.runtimeEnvironment);
     const activation = normalizeRuntimeActivation(input, BalancedRuntimeError);
+    const workflowContract = {
+      source: protocol.source,
+      version: protocol.contractVersion,
+      sha256: protocol.contractSha256,
+    };
+    const executionBinding = input.preflightReceipt
+      ? bindReceiptToRuntime({
+          receipt: input.preflightReceipt,
+          task,
+          workflowMode: "balanced",
+          worktree,
+          adapterId: adapter.id,
+          runtimeEnvironment,
+          policyRef: input.policyRef ?? "balanced-default@1.0.0",
+          timing: input.timing,
+          budget: input.budget,
+          activation,
+          workflowContract,
+        }, BalancedRuntimeError)
+      : null;
+    if (!executionBinding && !allowUnboundTaskForTests) {
+      throw new BalancedRuntimeError(
+        "runtime.preflight_required",
+        "A current immutable Preflight Receipt is required for a new Balanced run.",
+        409,
+      );
+    }
     const containment = normalizeAdapterContainment({
       filesystemIsolation: "post-run-only",
       ...adapter,
     }, { requireExtractor: false });
-    const runId = `${new Date(clock()).toISOString().replace(/[:.]/g, "-").toLowerCase()}-${task.id.slice(0, 64)}-${randomUUID()}`;
+    const runId = `${new Date(clock()).toISOString().replace(/[:.]/g, "-").toLowerCase()}-${task.id.slice(0, 64).toLowerCase()}-${randomUUID()}`;
     const runDirectory = join(runtimeRoot, runId);
     await mkdir(runDirectory, { mode: 0o700 });
+    if (executionBinding) {
+      await writeFile(
+        join(runDirectory, "preflight-receipt.json"),
+        stableJson(input.preflightReceipt),
+        { mode: 0o400, flag: "wx" },
+      );
+    }
     const contract = { schemaVersion: 1, kind: "balanced-task", task };
     const contractText = stableJson(contract);
     await writeFile(join(runDirectory, "task.json"), contractText, { mode: 0o600, flag: "wx" });
@@ -621,6 +665,8 @@ export function createBalancedRuntime(options = {}) {
       state: protocol.initialState,
       taskId: task.id,
       taskSha256: sha256(contractText),
+      executionBinding,
+      revisionBindings: [],
       worktree,
       adapterId: adapter.id,
       ...activation,
@@ -633,11 +679,7 @@ export function createBalancedRuntime(options = {}) {
       sessionId: null,
       latestReviewPath: null,
       latestReviewSha256: null,
-      workflowContract: {
-        source: protocol.source,
-        version: protocol.contractVersion,
-        sha256: protocol.contractSha256,
-      },
+      workflowContract,
       createdAt: new Date(clock()).toISOString(),
       updatedAt: new Date(clock()).toISOString(),
     };
@@ -651,6 +693,17 @@ export function createBalancedRuntime(options = {}) {
       bytes: Buffer.byteLength(contractText),
       detail: { artifactKind: "frozen_task", sha256: metadata.taskSha256 },
     });
+    if (executionBinding) {
+      const receiptText = stableJson(input.preflightReceipt);
+      await recordCoordination(runDirectory, metadata, "artifact_write", {
+        target: { type: "artifact", id: "preflight-receipt.json" },
+        bytes: Buffer.byteLength(receiptText),
+        detail: {
+          artifactKind: "preflight_receipt",
+          sha256: executionBinding.preflight.preflightSha256,
+        },
+      });
+    }
     await recordCoordination(runDirectory, metadata, "state_transition", {
       target: { type: "state", id: metadata.state },
       detail: { to: metadata.state, round: 0 },
@@ -681,7 +734,58 @@ export function createBalancedRuntime(options = {}) {
       throw new BalancedRuntimeError("runtime.corrupt_run", "Frozen Balanced Task hash is invalid.", 409);
     }
     const taskEnvelope = JSON.parse(taskText.toString("utf8"));
-    const task = validateBalancedTask(taskEnvelope?.task);
+    const initialTask = validateBalancedTask(taskEnvelope?.task);
+    if (metadata.executionBinding) {
+      const receipt = await readJson(
+        join(runDirectory, "preflight-receipt.json"),
+        "runtime.preflight_receipt_corrupt",
+      );
+      if (!receipt) {
+        throw new BalancedRuntimeError(
+          "runtime.preflight_receipt_corrupt",
+          "Balanced Preflight Receipt snapshot is missing.",
+          409,
+        );
+      }
+      validateRunReceipt(receipt, metadata.executionBinding, BalancedRuntimeError);
+      if (taskCardSha256(initialTask) !== metadata.executionBinding.task.taskSha256) {
+        throw new BalancedRuntimeError(
+          "runtime.task_preflight_mismatch",
+          "Balanced Task snapshot no longer matches its Preflight Receipt.",
+          409,
+        );
+      }
+    }
+    const revisionBindings = metadata.revisionBindings ?? [];
+    if (!Array.isArray(revisionBindings)) {
+      throw new BalancedRuntimeError("runtime.corrupt_run", "Balanced revision bindings are invalid.", 409);
+    }
+    let task = initialTask;
+    let priorTaskBinding = metadata.executionBinding?.task ?? null;
+    for (const entry of revisionBindings) {
+      if (!Number.isSafeInteger(entry?.round) || entry.round < 2 || !entry.executionBinding) {
+        throw new BalancedRuntimeError("runtime.corrupt_run", "Balanced revision binding is invalid.", 409);
+      }
+      const roundDirectory = join(runDirectory, "rounds", String(entry.round).padStart(3, "0"));
+      const contract = await readJson(join(roundDirectory, "contract.json"), "runtime.revision_contract_corrupt");
+      const receipt = await readJson(join(roundDirectory, "preflight-receipt.json"), "runtime.preflight_receipt_corrupt");
+      const delta = await readJson(join(roundDirectory, "revision-delta.json"), "runtime.revision_delta_corrupt");
+      if (!contract || !receipt || !delta || contract.round !== entry.round) {
+        throw new BalancedRuntimeError("runtime.revision_binding_corrupt", "Balanced revision artifacts are missing.", 409);
+      }
+      const candidate = validateBalancedTask(contract.task);
+      validateRunReceipt(receipt, entry.executionBinding, BalancedRuntimeError);
+      validateRevisionDeltaArtifact(delta, {
+        revisionDeltaId: entry.revisionDeltaId,
+        baseTask: priorTaskBinding,
+        resultTask: entry.executionBinding.task,
+      }, BalancedRuntimeError);
+      if (taskCardSha256(candidate) !== entry.executionBinding.task.taskSha256) {
+        throw new BalancedRuntimeError("runtime.task_preflight_mismatch", "Balanced revision Task does not match its Preflight Receipt.", 409);
+      }
+      task = candidate;
+      priorTaskBinding = entry.executionBinding.task;
+    }
     const adapter = adapters.get(metadata.adapterId);
     if (!adapter) throw new BalancedRuntimeError("runtime.adapter_unknown", `Unknown adapter '${metadata.adapterId}'.`);
     return {
@@ -1334,8 +1438,8 @@ export function createBalancedRuntime(options = {}) {
         throw new BalancedRuntimeError("review.stale", "Balanced review hash does not match run state.", 409);
       }
       const latestReview = JSON.parse(reviewText.toString("utf8"));
-      const current = await snapshot(metadata.worktree);
-      if (current.digest !== latestReview.evidence.finalProductDigest) {
+      const currentProduct = await snapshot(metadata.worktree);
+      if (currentProduct.digest !== latestReview.evidence.finalProductDigest) {
         throw new BalancedRuntimeError("review.stale", "Worktree changed after the Balanced review was generated.", 409);
       }
       if (!loaded.protocol.reviewDecisions.has(input.decision)) {
@@ -1348,7 +1452,49 @@ export function createBalancedRuntime(options = {}) {
           409,
         );
       }
-      const revision = input.decision === "revise" ? validateBalancedTask(input.revisionTask) : null;
+      let revision = null;
+      let revisionBinding = null;
+      if (input.decision === "revise") {
+        if (input.revision?.task && input.revision?.preflightReceipt && input.revision?.revisionDelta) {
+          revision = validateBoundedTaskRevision(loaded.task, input.revision.task, BalancedRuntimeError);
+          const activation = normalizeRuntimeActivation(metadata, BalancedRuntimeError);
+          const executionBinding = bindReceiptToRuntime({
+            receipt: input.revision.preflightReceipt,
+            task: revision,
+            workflowMode: "balanced",
+            worktree: metadata.worktree,
+            adapterId: metadata.adapterId,
+            runtimeEnvironment: metadata.runtimeEnvironment,
+            policyRef: metadata.policyRef,
+            timing: Object.fromEntries(
+              Object.keys(BALANCED_TIMING_LIMITS).map((key) => [key, metadata.policy[key]]),
+            ),
+            budget: metadata.budget,
+            activation,
+            workflowContract: metadata.workflowContract,
+          }, BalancedRuntimeError);
+          const priorTask = (metadata.revisionBindings ?? []).at(-1)?.executionBinding?.task ?? metadata.executionBinding?.task;
+          const delta = validateRevisionDeltaArtifact(input.revision.revisionDelta, {
+            baseTask: priorTask,
+            resultTask: executionBinding.task,
+          }, BalancedRuntimeError);
+          if (
+            delta.review.runId !== metadata.runId || delta.review.workflowMode !== "balanced" ||
+            delta.review.artifactSha256 !== metadata.latestReviewSha256 || delta.review.sequence !== metadata.rounds
+          ) {
+            throw new BalancedRuntimeError("revision_delta.review_stale", "Revision Delta is not bound to the current Balanced review.", 409);
+          }
+          revisionBinding = { delta, executionBinding };
+        } else if (allowUnboundTaskForTests) {
+          revision = validateBalancedTask(input.revisionTask);
+        } else {
+          throw new BalancedRuntimeError(
+            "revision_delta.binding_required",
+            "Balanced revision requires an immutable Revision Delta and Preflight Receipt.",
+            409,
+          );
+        }
+      }
       if (revision) {
         await checkBudgetAvailable(
           loaded.runDirectory,
@@ -1373,8 +1519,14 @@ export function createBalancedRuntime(options = {}) {
         decision: input.decision,
         reviewPath: metadata.latestReviewPath,
         reviewSha256: metadata.latestReviewSha256,
-        productDigest: current.digest,
+        productDigest: currentProduct.digest,
         recordedAt: new Date(clock()).toISOString(),
+        ...(revisionBinding ? {
+          revisionDeltaId: revisionBinding.delta.revisionDeltaId,
+          revisionDeltaSha256: revisionBinding.delta.revisionDeltaSha256,
+          resultTask: revisionBinding.executionBinding.task,
+          preflightId: revisionBinding.executionBinding.preflight.preflightId,
+        } : {}),
       };
       const decisionPath = join(
         loaded.runDirectory,
@@ -1386,10 +1538,48 @@ export function createBalancedRuntime(options = {}) {
       await recordCoordination(loaded.runDirectory, metadata, "review_decision", {
         actor: { type: "operator", id: "upstream-reviewer" },
         target: { type: "artifact", id: `rounds/${String(metadata.rounds).padStart(3, "0")}/review-decision.json` },
-        detail: { round: metadata.rounds, decision: input.decision, reviewSha256: metadata.latestReviewSha256 },
+        detail: {
+          round: metadata.rounds,
+          decision: input.decision,
+          reviewSha256: metadata.latestReviewSha256,
+          ...(revisionBinding ? { revisionDeltaId: revisionBinding.delta.revisionDeltaId } : {}),
+        },
       });
       await settleBudget(loaded.runDirectory, reservation, "succeeded", 0);
       if (input.decision === "revise") {
+        if (revisionBinding) {
+          const nextRound = metadata.rounds + 1;
+          const nextDirectory = join(loaded.runDirectory, "rounds", String(nextRound).padStart(3, "0"));
+          await mkdir(nextDirectory, { recursive: true, mode: 0o700 });
+          await writeFile(join(nextDirectory, "preflight-receipt.json"), stableJson(input.revision.preflightReceipt), {
+            encoding: "utf8", flag: "wx", mode: 0o400,
+          });
+          await writeFile(join(nextDirectory, "revision-delta.json"), stableJson(revisionBinding.delta), {
+            encoding: "utf8", flag: "wx", mode: 0o400,
+          });
+          await recordCoordination(loaded.runDirectory, metadata, "artifact_write", {
+            target: { type: "artifact", id: `rounds/${String(nextRound).padStart(3, "0")}/revision-delta.json` },
+            bytes: Buffer.byteLength(stableJson(revisionBinding.delta)),
+            detail: {
+              artifactKind: "revision_delta",
+              sha256: revisionBinding.delta.revisionDeltaSha256,
+            },
+          });
+          await recordCoordination(loaded.runDirectory, metadata, "artifact_write", {
+            target: { type: "artifact", id: `rounds/${String(nextRound).padStart(3, "0")}/preflight-receipt.json` },
+            bytes: Buffer.byteLength(stableJson(input.revision.preflightReceipt)),
+            detail: {
+              artifactKind: "preflight_receipt",
+              sha256: revisionBinding.executionBinding.preflight.preflightSha256,
+            },
+          });
+          metadata.revisionBindings = [...(metadata.revisionBindings ?? []), {
+            round: nextRound,
+            revisionDeltaId: revisionBinding.delta.revisionDeltaId,
+            revisionDeltaSha256: revisionBinding.delta.revisionDeltaSha256,
+            executionBinding: revisionBinding.executionBinding,
+          }];
+        }
         metadata.state = loaded.protocol.decisionStates.revise;
         metadata.updatedAt = new Date(clock()).toISOString();
         await writeJsonAtomic(join(loaded.runDirectory, "run.json"), metadata);
@@ -1428,15 +1618,17 @@ export function createBalancedRuntime(options = {}) {
     for (const entry of entries) {
       if (!entry.isDirectory() || !SAFE_ID.test(entry.name)) continue;
       try {
-        const metadata = await readJson(join(root, entry.name, "run.json"));
-        if (metadata?.schemaVersion === RUNTIME_SCHEMA_VERSION) {
-          const ledger = await readLedger(join(root, entry.name, "budget-ledger.jsonl"));
-          const coordination = await coordinationSummaryForRun(join(root, entry.name), {
-            ...metadata,
-            mode: "balanced",
-          });
-          runs.push({ ...metadata, budgetState: budgetSnapshot(ledger, metadata.budget), coordination });
-        }
+        const loaded = await loadRun(join(root, entry.name));
+        const ledger = await readLedger(join(root, entry.name, "budget-ledger.jsonl"));
+        const coordination = await coordinationSummaryForRun(join(root, entry.name), {
+          ...loaded.metadata,
+          mode: "balanced",
+        });
+        runs.push({
+          ...loaded.metadata,
+          budgetState: budgetSnapshot(ledger, loaded.metadata.budget),
+          coordination,
+        });
       } catch {
         // Corrupt runs remain isolated and do not hide healthy history.
       }
@@ -1450,15 +1642,12 @@ export function createBalancedRuntime(options = {}) {
     }
     const root = await existingRuntimeRoot(runtimeRootConfigured);
     if (!root) throw new BalancedRuntimeError("runtime.path_missing", "Balanced runtime root does not exist.", 404);
-    const runDirectory = await validateDirectory(resolve(root, runId), "Run directory");
-    const metadata = await readJson(join(runDirectory, "run.json"));
-    if (
-      metadata?.schemaVersion !== RUNTIME_SCHEMA_VERSION || metadata.runId !== runId ||
-      basename(runDirectory) !== runId || resolve(root, runId) !== runDirectory
-    ) {
-      throw new BalancedRuntimeError("runtime.corrupt_run", "Balanced run identity is invalid.", 409);
-    }
-    return coordinationDetailForRun(runDirectory, { ...metadata, mode: "balanced" }, options);
+    const loaded = await loadRun(resolve(root, runId));
+    return coordinationDetailForRun(
+      loaded.runDirectory,
+      { ...loaded.metadata, mode: "balanced" },
+      options,
+    );
   }
 
   return Object.freeze({ coordinationDetail, listRuns, review, run, status });

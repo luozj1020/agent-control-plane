@@ -378,20 +378,56 @@
             <div>
               <p class="eyebrow">MACHINE-READABLE TASK CONTRACT</p>
               <h1>Task Card</h1>
-              <p class="subtitle">JSON 是运行时唯一事实源；Markdown 只用于阅读和审阅。</p>
+              <p class="subtitle">上游 Agent 创建并冻结合同；ACP 负责版本、检查和审计。</p>
             </div>
             <div class="top-actions">
               <input id="task-card-import-input" type="file" accept="application/json,.json" hidden>
-              <button class="button ghost" id="task-card-import" type="button">导入 JSON</button>
+              <button class="button ghost" id="task-card-import" type="button">导入到当前草稿</button>
               <button class="button ghost" id="task-card-undo" type="button" disabled>撤销</button>
               <button class="button ghost" id="task-card-redo" type="button" disabled>重做</button>
               <button class="button ghost" id="task-card-revert" type="button" disabled>回退修改</button>
-              <button class="button ghost" id="task-card-reset" type="button">恢复模板</button>
+              <button class="button ghost" id="task-card-reset" type="button">恢复 Scaffold</button>
               <button class="button primary" id="task-card-export" type="button" disabled>导出 TASK.json</button>
             </div>
           </header>
 
           <div class="task-card-layout">
+            <section class="task-card-inspector" id="task-card-inspector">
+              <div class="task-card-inspector-heading">
+                <div>
+                  <p class="token-kicker">WORKSPACE TASK LIFECYCLE</p>
+                  <h2>合同 Inspector</h2>
+                  <p id="task-card-context">正在识别当前 Workspace 的 Task Card。</p>
+                </div>
+                <span class="task-card-state pending" id="task-card-lifecycle-state">正在载入</span>
+              </div>
+              <div class="task-card-inspector-controls">
+                <label>
+                  <span>Workspace Task</span>
+                  <select id="task-card-task-select" disabled>
+                    <option value="">尚无任务</option>
+                  </select>
+                </label>
+                <div class="task-card-inspector-actions">
+                  <button class="button ghost" id="task-card-refresh" type="button">刷新</button>
+                  <button class="button ghost" id="task-card-scaffold" type="button">查看 Scaffold</button>
+                  <button class="button ghost" id="task-card-save-working-copy" type="button" hidden>保存草稿</button>
+                  <button class="button ghost" id="task-card-validate-working-copy" type="button" hidden>验证草稿</button>
+                  <button class="button primary" id="task-card-freeze" type="button" hidden>冻结合同</button>
+                </div>
+              </div>
+              <div class="task-card-inspector-metrics">
+                <div><span>Workspace</span><strong id="task-card-workspace-id">—</strong></div>
+                <div><span>Task ID</span><strong id="task-card-task-id">—</strong></div>
+                <div><span>草稿代次</span><strong id="task-card-working-copy-generation">—</strong></div>
+                <div><span>基于合同</span><strong id="task-card-base-task-revision">—</strong></div>
+                <div><span>冻结合同</span><strong id="task-card-task-revision">—</strong></div>
+                <div><span>合同指纹</span><strong id="task-card-task-sha256">—</strong></div>
+                <div><span>来源</span><strong id="task-card-source">—</strong></div>
+              </div>
+              <p class="task-card-inspector-note" id="task-card-inspector-note">Scaffold 仅供上游 Agent、CLI 和人工兜底使用。</p>
+            </section>
+
             <section class="task-card-panel">
               <div class="task-card-panel-heading">
                 <div>
@@ -406,7 +442,11 @@
                   <span class="task-card-state pending" id="task-card-state">正在载入</span>
                 </div>
               </div>
-              <div class="task-card-form" id="task-card-form" aria-label="Task Card 结构化编辑器"></div>
+              <div class="task-card-empty" id="task-card-empty">
+                <strong>尚无上游 Agent 创建的任务合同</strong>
+                <p>当前 Workspace 没有 working copy 或 frozen Task Revision。等待上游 Agent 通过 CLI/API 创建，或者只读查看 Scaffold。</p>
+              </div>
+              <div class="task-card-form" id="task-card-form" aria-label="Task Card 结构化编辑器" hidden></div>
               <textarea
                 id="task-card-editor"
                 class="task-card-json-editor"
@@ -439,6 +479,8 @@
               <div class="task-card-rules">
                 <strong>运行时约束</strong>
                 <ul>
+                  <li>草稿用 <code>workingCopyGeneration</code> 做 CAS；只有 freeze 成功才产生 <code>taskRevision</code>。</li>
+                  <li>冻结合同只读，修改必须在后续“编辑为新版本”流程中产生新的 working copy。</li>
                   <li>未知字段会被拒绝，不会静默忽略。</li>
                   <li>路径必须相对工作树，禁止绝对路径与 <code>..</code>。</li>
                   <li>验证命令必须是 argv 数组，不接受 Shell 字符串。</li>
@@ -452,7 +494,7 @@
             <section class="task-card-panel task-card-preflight" id="task-card-preflight-panel">
               <div class="task-card-panel-heading">
                 <div>
-                  <p class="token-kicker">READ-ONLY LAUNCH CHECK</p>
+                  <p class="token-kicker">IMMUTABLE LAUNCH RECEIPT</p>
                   <h2>Preflight</h2>
                 </div>
                 <span class="task-card-state pending" id="task-card-preflight-state">尚未检查</span>
@@ -518,7 +560,7 @@
                   <div class="task-card-connectivity-result wide" id="task-card-connectivity-result" hidden></div>
                 </div>
                 <div class="task-card-preflight-result" id="task-card-preflight-result">
-                  <p>先完成 Task Card，并选择工作树与下游 Adapter。这里不会启动任何 Agent，也不会显示代理地址、Token 或凭证。</p>
+                  <p>冻结合同会生成绑定当前 Workspace 配置与 Effective Skill 的不可变回执；草稿与 Scaffold 只执行诊断。这里不会启动任何 Agent，也不会显示代理地址、Token 或凭证。</p>
                 </div>
               </div>
             </section>

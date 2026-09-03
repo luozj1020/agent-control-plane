@@ -122,6 +122,7 @@ test("convergent strategy writes hash-bound wake evidence and accepts terminal r
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
     const adapter = editingAdapter();
     const runtime = createOvernightRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       adapters: registry(adapter),
       pollMilliseconds: 1,
@@ -178,6 +179,27 @@ test("convergent strategy writes hash-bound wake evidence and accepts terminal r
   });
 });
 
+test("new Overnight runs fail closed without an immutable Preflight Receipt", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const adapter = editingAdapter();
+    const runtime = createOvernightRuntime({
+      runtimeRoot,
+      adapters: registry(adapter),
+      pollMilliseconds: 1,
+      protocolProvider,
+    });
+    await assert.rejects(
+      runtime.createRun({
+        task: task(),
+        worktree,
+        adapterId: adapter.id,
+        strategy: "convergent",
+      }),
+      (error) => error instanceof OvernightRuntimeError && error.code === "runtime.preflight_required",
+    );
+  });
+});
+
 test("convergent revisions fail closed when objective, acceptance, or scope expands", () => {
   const previous = task();
   assert.throws(
@@ -206,7 +228,12 @@ test("runtime records observed reads and classifies forbidden or out-of-scope pa
       readContainment: "partial-event-audit",
       observedReads: ["app.txt", "secret/key.txt", "@outside-worktree"],
     });
-    const runtime = createOvernightRuntime({ runtimeRoot, adapters: registry(adapter), pollMilliseconds: 1 });
+    const runtime = createOvernightRuntime({
+      allowUnboundTaskForTests: true,
+      runtimeRoot,
+      adapters: registry(adapter),
+      pollMilliseconds: 1,
+    });
     const created = await runtime.createRun({
       task: task(),
       worktree,
@@ -230,7 +257,12 @@ test("runtime records observed reads and classifies forbidden or out-of-scope pa
 test("continuous improvement preserves metric floor and explicitly declares added paths", async () => {
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
     const adapter = editingAdapter();
-    const runtime = createOvernightRuntime({ runtimeRoot, adapters: registry(adapter), pollMilliseconds: 1 });
+    const runtime = createOvernightRuntime({
+      allowUnboundTaskForTests: true,
+      runtimeRoot,
+      adapters: registry(adapter),
+      pollMilliseconds: 1,
+    });
     const initial = task();
     const created = await runtime.createRun({
       task: initial,
@@ -300,7 +332,12 @@ test("continuous continuation cannot remove the original metric floor or hide sc
 test("out-of-scope downstream changes become a durable scope-violation wake", async () => {
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
     const adapter = editingAdapter({ path: "outside.txt" });
-    const runtime = createOvernightRuntime({ runtimeRoot, adapters: registry(adapter), pollMilliseconds: 1 });
+    const runtime = createOvernightRuntime({
+      allowUnboundTaskForTests: true,
+      runtimeRoot,
+      adapters: registry(adapter),
+      pollMilliseconds: 1,
+    });
     const created = await runtime.createRun({
       task: task(),
       worktree,
@@ -338,6 +375,7 @@ test("an explicit downstream no-response classification becomes a runtime-blocke
       },
     };
     const runtime = createOvernightRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       adapters: registry(silent),
       pollMilliseconds: 1,

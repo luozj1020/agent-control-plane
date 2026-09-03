@@ -11,6 +11,8 @@ import {
   validateBalancedTask,
 } from "../balanced-runtime.mjs";
 import { createTaskCardTemplate } from "../task-card.mjs";
+import { createPreflightReceipt, taskCardSha256 } from "../execution-receipt.mjs";
+import { normalizeRuntimeEnvironment } from "../runtime-environment.mjs";
 import { EMBEDDED_RUNTIME_PROTOCOLS } from "../workflow-runtime-protocol.mjs";
 
 const TEST_CONTRACT_SHA256 = `sha256:${"a".repeat(64)}`;
@@ -138,6 +140,7 @@ test("refuses to place Balanced runtime artifacts inside the product worktree", 
   await withWorkspace(async ({ worktree }) => {
     const adapter = editingAdapter();
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot: join(worktree, "runtime-artifacts"),
       catalog: testCatalog(),
       adapters: adapterRegistry(adapter),
@@ -158,6 +161,7 @@ test("runtime rejects budget overrides above the shared product limits", async (
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
     const adapter = editingAdapter();
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       catalog: testCatalog(),
       adapters: adapterRegistry(adapter),
@@ -178,10 +182,134 @@ test("runtime rejects budget overrides above the shared product limits", async (
   });
 });
 
+test("new Balanced runs fail closed without an immutable Preflight Receipt", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const adapter = editingAdapter();
+    const runtime = createBalancedRuntime({
+      runtimeRoot,
+      catalog: testCatalog(),
+      adapters: adapterRegistry(adapter),
+      protocolProvider,
+    });
+    await assert.rejects(
+      runtime.run({
+        task: task(),
+        worktree,
+        adapterId: adapter.id,
+        policyRef: "balanced-test@1.0.0",
+      }),
+      (error) => error instanceof BalancedRuntimeError && error.code === "runtime.preflight_required",
+    );
+  });
+});
+
+test("Balanced run snapshots its Preflight Receipt and verifies it on reload", async () => {
+  await withWorkspace(async ({ runtimeRoot, worktree }) => {
+    const adapter = editingAdapter();
+    const runtimeEnvironment = normalizeRuntimeEnvironment();
+    const timing = {
+      contextAcquisitionSeconds: 45,
+      firstProgressSeconds: 40,
+      activeWindowSeconds: 50,
+      progressExtensionSeconds: 20,
+      growingProgressExtensionSeconds: 25,
+      hardCapSeconds: 90,
+    };
+    const budget = {
+      mainReviewCalls: 3,
+      downstreamCalls: 3,
+      advisorCalls: 2,
+      reservedFinalReviewCalls: 1,
+    };
+    const frozenTask = task({ id: "ANNC-123" });
+    const taskHash = taskCardSha256(frozenTask);
+    const activation = {
+      activationId: "activation-1",
+      effectiveSkillSha256: "b".repeat(64),
+      projectBinding: {
+        projectId: null,
+        workspaceId: "workspace-1",
+        projectRevision: 2,
+        projectConfigSha256: "c".repeat(64),
+      },
+    };
+    const receipt = createPreflightReceipt({
+      preflightId: "preflight-balanced-1",
+      createdAt: "2026-09-03T02:00:00.000Z",
+      task: {
+        workspaceId: "workspace-1",
+        taskId: frozenTask.id,
+        taskRevision: 1,
+        taskSha256: taskHash,
+      },
+      workflow: {
+        workspaceRevision: 2,
+        configSha256: "c".repeat(64),
+        activationId: activation.activationId,
+        effectiveSkillSha256: activation.effectiveSkillSha256,
+      },
+      runtimeEnvelope: {
+        schemaVersion: 1,
+        workflowMode: "balanced",
+        taskId: frozenTask.id,
+        taskSha256: taskHash,
+        worktree,
+        adapterId: adapter.id,
+        runtimeEnvironment,
+        workflowContract: {
+          sourceId: "agent-control-plane/workflow-core",
+          version: "1.1.0",
+          sha256: TEST_CONTRACT_SHA256,
+          compatible: true,
+        },
+        policyRef: "balanced-default@1.0.0",
+        timing,
+        budget,
+      },
+      checks: [],
+      issues: [],
+    });
+    const runtime = createBalancedRuntime({
+      runtimeRoot,
+      adapters: adapterRegistry(adapter),
+      protocolProvider,
+    });
+    const result = await runtime.run({
+      task: frozenTask,
+      worktree,
+      adapterId: adapter.id,
+      activationId: activation.activationId,
+      effectiveSkillSha256: activation.effectiveSkillSha256,
+      projectBinding: activation.projectBinding,
+      policyRef: "balanced-default@1.0.0",
+      timing,
+      budget,
+      runtimeEnvironment,
+      preflightReceipt: receipt,
+    });
+    const status = await runtime.status(result.runDirectory);
+    assert.equal(status.executionBinding.task.taskRevision, 1);
+    assert.equal(status.executionBinding.preflight.preflightId, "preflight-balanced-1");
+    assert.match(result.runDirectory, /annc-123/);
+
+    await rm(join(result.runDirectory, "preflight-receipt.json"));
+    await assert.rejects(
+      runtime.status(result.runDirectory),
+      (error) => error.code === "runtime.preflight_receipt_corrupt",
+    );
+    assert.deepEqual(await runtime.listRuns(), []);
+    await assert.rejects(
+      runtime.coordinationDetail(status.runId),
+      (error) => error.code === "runtime.preflight_receipt_corrupt",
+    );
+  });
+});
+
 test("runtime applies bounded timing overrides to the effective round policy", async () => {
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
     const adapter = editingAdapter();
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       adapters: adapterRegistry(adapter),
       protocolProvider,
@@ -228,6 +356,7 @@ test("runtime projects explicit adapter reads into coordination evidence", async
       observedReads: ["app.txt", "unscoped.txt"],
     });
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       adapters: adapterRegistry(adapter),
       protocolProvider,
@@ -255,6 +384,7 @@ test("runtime rejects a hard cap shorter than a configured wait window", async (
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
     const adapter = editingAdapter();
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       adapters: adapterRegistry(adapter),
     });
@@ -342,6 +472,7 @@ test("runs a hash-bound Balanced round and records an accepted review", async ()
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
     const adapter = editingAdapter();
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       catalog: testCatalog(),
       adapters: adapterRegistry(adapter),
@@ -382,6 +513,7 @@ test("revisions reuse the run and preserve a final-review budget slot", async ()
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
     const adapter = editingAdapter();
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       catalog: testCatalog(),
       adapters: adapterRegistry(adapter),
@@ -416,6 +548,7 @@ test("review fails closed when product state changed after evidence capture", as
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
     const adapter = editingAdapter();
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       catalog: testCatalog(),
       adapters: adapterRegistry(adapter),
@@ -454,6 +587,7 @@ test("context timeout terminates a stalled adapter and returns runtime_blocked",
       },
     };
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       catalog: testCatalog(),
       adapters: adapterRegistry(stalled),
@@ -489,6 +623,7 @@ test("zero advisor budget disables extensions without misclassifying the round b
       },
     };
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       catalog: testCatalog({ advisorCalls: 0 }),
       adapters: adapterRegistry(stalled),
@@ -528,6 +663,7 @@ test("an explicit downstream no-response classification becomes runtime_blocked"
       },
     };
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       catalog: testCatalog(),
       adapters: adapterRegistry(silent),
@@ -548,6 +684,7 @@ test("downstream Token usage is observed but never used as a termination budget"
   await withWorkspace(async ({ runtimeRoot, worktree }) => {
     const adapter = editingAdapter();
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       catalog: testCatalog(),
       adapters: adapterRegistry(adapter),
@@ -584,6 +721,7 @@ test("scope violations cannot be accepted", async () => {
       },
     };
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       catalog: testCatalog(),
       adapters: adapterRegistry(adapter),
@@ -653,6 +791,7 @@ test("invalidates an advisor decision when the product changes during evaluation
       },
     };
     const runtime = createBalancedRuntime({
+      allowUnboundTaskForTests: true,
       runtimeRoot,
       catalog: testCatalog(),
       adapters: adapterRegistry(adapter),

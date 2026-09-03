@@ -64,6 +64,10 @@ export async function discoverRuntimeActivation(mode, options = {}) {
           activationId: active.historyId,
           effectiveSkillSha256: active.contentSha256,
           projectBinding: active.projectBinding?.workspaceId ? active.projectBinding : null,
+          ...(active.targetAdapterId ? { targetAdapterId: active.targetAdapterId } : {}),
+          ...(active.overnightLoopPolicy ? { overnightLoopPolicy: active.overnightLoopPolicy } : {}),
+          ...(active.balancedBudget ? { balancedBudget: active.balancedBudget } : {}),
+          ...(active.balancedTiming ? { balancedTiming: active.balancedTiming } : {}),
         }
       : { activationId: null, effectiveSkillSha256: null, projectBinding: null };
   } catch {

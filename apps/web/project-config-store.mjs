@@ -663,6 +663,40 @@ export function createProjectConfigStore(options = {}) {
     return touchRecent(await publicCurrent(projectRoot, repository, workspace));
   }
 
+  async function resolveWorkspace(input, options = {}) {
+    const state = options.register === false ? await inspect(input) : await openProject(input);
+    if (!state.initialized) {
+      throw new ProjectConfigError(
+        "project.workspace_not_registered",
+        "Open the directory as a local workspace before using workspace state.",
+        409,
+      );
+    }
+    if (!state.workspaceId) {
+      throw new ProjectConfigError(
+        "project.workspace_invalid",
+        "The local workspace identity is unavailable.",
+        409,
+      );
+    }
+    const descriptor = await workspaceDescriptor(state.projectRoot, state.projectId ?? null);
+    if (descriptor.workspaceId !== state.workspaceId) {
+      throw new ProjectConfigError(
+        "project.workspace_invalid",
+        "The resolved local workspace identity is inconsistent.",
+        409,
+      );
+    }
+    return Object.freeze({
+      workspaceId: state.workspaceId,
+      workspaceRoot: descriptor.root,
+      projectId: state.projectId,
+      projectRoot: state.projectRoot,
+      workspaceRevision: state.revision,
+      configSha256: state.configSha256,
+    });
+  }
+
   async function recent() {
     await ensureStateRoot();
     const entries = await readdir(stateRoot, { withFileTypes: true });
@@ -1110,5 +1144,14 @@ export function createProjectConfigStore(options = {}) {
     };
   }
 
-  return Object.freeze({ initialize, inspect, migrate, open: openProject, recent, restore, save });
+  return Object.freeze({
+    initialize,
+    inspect,
+    migrate,
+    open: openProject,
+    recent,
+    resolveWorkspace,
+    restore,
+    save,
+  });
 }

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
@@ -7,6 +6,7 @@ import { delimiter, join } from "node:path";
 import {
   BALANCED_BUDGET_LIMITS,
   BALANCED_TIMING_LIMITS,
+  EXAMPLE_AGENTS,
 } from "../../packages/contracts/dist/index.js";
 import {
   resolveRuntimeEnvironment,
@@ -14,9 +14,32 @@ import {
 } from "./runtime-environment.mjs";
 import { normalizeAdapterContainment } from "./adapter-containment.mjs";
 import { normalizeTaskCard } from "./task-card.mjs";
+import { taskCardSha256 } from "./execution-receipt.mjs";
 
 const WORKFLOW_MODES = new Set(["overnight", "balanced"]);
 const OVERNIGHT_STRATEGIES = new Set(["convergent", "continuous-improvement"]);
+
+export function createTaskCardPreflightAdapters(environment = process.env) {
+  return EXAMPLE_AGENTS
+    .filter((agent) => agent.capabilities.includes("bounded-execution"))
+    .map((agent) => ({
+      id: agent.id,
+      displayName: agent.displayName,
+      requiresNetwork: true,
+      providerEnvironmentPrefixes: agent.id === "claude-code"
+        ? ["ANTHROPIC_", "CLAUDE_", "CC_SWITCH_"]
+        : [],
+      filesystemIsolation: "post-run-only",
+      readContainment: agent.id === "claude-code" ? "partial-event-audit" : "unsupported",
+      writeContainment: "post-run-audit",
+      filesystemEventSource: agent.id === "claude-code"
+        ? "claude-stream-json-explicit-read-tool-v1"
+        : null,
+      command: agent.id === "claude-code"
+        ? (environment.AGENT_CONTROL_CLAUDE_COMMAND ?? "claude")
+        : null,
+    }));
+}
 
 function issue(severity, code, message, path = null) {
   return { severity, code, message, ...(path ? { path } : {}) };
@@ -24,10 +47,6 @@ function issue(severity, code, message, path = null) {
 
 function check(id, label, status, detail) {
   return { id, label, status, detail };
-}
-
-function stableTaskText(task) {
-  return `${JSON.stringify(task)}\n`;
 }
 
 async function findExecutable(command, environment) {
@@ -442,10 +461,7 @@ export async function preflightTaskCard(input, options = {}) {
     }
   }
 
-  const taskText = normalized ? stableTaskText(normalized.task) : null;
-  const taskSha256 = taskText
-    ? createHash("sha256").update(taskText).digest("hex")
-    : null;
+  const taskSha256 = normalized ? taskCardSha256(normalized.task) : null;
   const ready = !issues.some((entry) => entry.severity === "error");
 
   return {
@@ -471,8 +487,12 @@ export async function preflightTaskCard(input, options = {}) {
           compatible: workflowContract.compatible === true,
         },
       } : {}),
-      ...(workflowMode === "overnight" ? { strategy: strategy || null } : {}),
+      ...(workflowMode === "overnight" ? {
+        strategy: strategy || null,
+        wakeAdapterId: input?.wakeAdapterId ?? "durable-file",
+      } : {}),
       ...(workflowMode === "balanced" ? {
+        policyRef: input?.policyRef ?? "balanced-default@1.0.0",
         timing: input?.timing ?? null,
         budget: input?.budget ?? null,
       } : {}),

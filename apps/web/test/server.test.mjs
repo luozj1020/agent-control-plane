@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { CODEX_OVERNIGHT_CLAUDE_PROFILE } from "../../../packages/contracts/dist/index.js";
 import { createAppServer, resolveLocalCodexPaths } from "../server.mjs";
+import { taskCardSha256 } from "../execution-receipt.mjs";
 
 async function withServer(run, options = {}) {
   const server = createAppServer(options);
@@ -87,7 +88,14 @@ test("serves the application and health endpoint", async () => {
     assert.match(html, /id="task-card-environment-isolation"/);
     assert.match(html, /id="task-card-network-diagnostics"/);
     assert.match(html, /id="task-card-markdown"/);
-    assert.match(html, /JSON 是运行时唯一事实源/);
+    assert.match(html, /上游 Agent 创建并冻结合同/);
+    assert.match(html, /id="task-card-inspector"/);
+    assert.match(html, /id="task-card-lifecycle-state"/);
+    assert.match(html, /id="task-card-task-select"/);
+    assert.match(html, /id="task-card-save-working-copy"/);
+    assert.match(html, /id="task-card-validate-working-copy"/);
+    assert.match(html, /id="task-card-freeze"/);
+    assert.match(html, /尚无上游 Agent 创建的任务合同/);
     assert.match(html, /class="usage-view" id="usage-view" hidden/);
     assert.match(html, /class="coordination-view" id="coordination-view" hidden/);
     assert.match(html, /id="coordination-run-list"/);
@@ -420,6 +428,128 @@ test("workspace APIs expose local open, explicit repository enablement, saves, a
   }, { projectConfigStore });
 });
 
+test("workspace Task APIs preserve explicit lifecycle names and protect every mutation", async () => {
+  const calls = [];
+  const workspaceTaskStore = {
+    async list(input) {
+      calls.push(["list", input]);
+      return { activeTask: null, tasks: [], corruptEntries: 0 };
+    },
+    async create(input) {
+      calls.push(["create", input]);
+      return { workingCopy: { workingCopyGeneration: 1, baseTaskRevision: null } };
+    },
+    async write(input) {
+      calls.push(["write", input]);
+      return { workingCopy: { workingCopyGeneration: 2, baseTaskRevision: null } };
+    },
+    async validate(input) {
+      calls.push(["validate", input]);
+      return { valid: true, workingCopyGeneration: input.expectedWorkingCopyGeneration };
+    },
+    async freeze(input) {
+      calls.push(["freeze", input]);
+      return {
+        task: {
+          taskId: input.taskId,
+          taskRevision: 1,
+          taskSha256: "a".repeat(64),
+        },
+      };
+    },
+    async current(input) {
+      calls.push(["current", input]);
+      return { activeTask: null };
+    },
+  };
+  await withServer(async (baseUrl) => {
+    const projectRoot = tmpdir();
+    const source = { kind: "upstream-agent", actor: "codex" };
+    const task = { id: "task-1" };
+    const listed = await fetch(
+      `${baseUrl}/api/workspace-tasks?projectRoot=${encodeURIComponent(projectRoot)}`,
+    );
+    assert.equal(listed.status, 200);
+    assert.deepEqual((await listed.json()).tasks, []);
+    const created = await fetch(`${baseUrl}/api/workspace-tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({ projectRoot, taskId: "task-1", task, source }),
+    });
+    assert.equal(created.status, 201);
+    assert.equal((await created.json()).workingCopy.workingCopyGeneration, 1);
+
+    const written = await fetch(`${baseUrl}/api/workspace-tasks/working-copy`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({
+        projectRoot,
+        taskId: "task-1",
+        expectedWorkingCopyGeneration: 1,
+        task,
+        source,
+      }),
+    });
+    assert.equal(written.status, 200);
+    assert.equal((await written.json()).workingCopy.workingCopyGeneration, 2);
+
+    for (const action of ["validate", "freeze"]) {
+      const response = await fetch(`${baseUrl}/api/workspace-tasks/${action}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: baseUrl },
+        body: JSON.stringify({
+          projectRoot,
+          taskId: "task-1",
+          expectedWorkingCopyGeneration: 2,
+        }),
+      });
+      assert.equal(response.status, 200);
+    }
+
+    const current = await fetch(
+      `${baseUrl}/api/workspace-tasks/current?projectRoot=${encodeURIComponent(projectRoot)}`,
+    );
+    assert.equal(current.status, 200);
+    assert.equal((await current.json()).activeTask, null);
+
+    const rejected = await fetch(`${baseUrl}/api/workspace-tasks/freeze`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://attacker.example",
+      },
+      body: JSON.stringify({
+        projectRoot,
+        taskId: "task-1",
+        expectedWorkingCopyGeneration: 2,
+      }),
+    });
+    assert.equal(rejected.status, 403);
+    assert.deepEqual(calls, [
+      ["list", { projectRoot }],
+      ["create", { projectRoot, taskId: "task-1", task, source }],
+      ["write", {
+        projectRoot,
+        taskId: "task-1",
+        expectedWorkingCopyGeneration: 1,
+        task,
+        source,
+      }],
+      ["validate", {
+        projectRoot,
+        taskId: "task-1",
+        expectedWorkingCopyGeneration: 2,
+      }],
+      ["freeze", {
+        projectRoot,
+        taskId: "task-1",
+        expectedWorkingCopyGeneration: 2,
+      }],
+      ["current", { projectRoot }],
+    ]);
+  }, { workspaceTaskStore });
+});
+
 test("workflow core APIs expose compatibility and protect explicit diagnosis", async () => {
   const calls = [];
   const workflowCoreAdapter = {
@@ -551,10 +681,128 @@ test("serves and validates the canonical Task Card used by both delegated modes"
     assert.equal(preflightResponse.status, 200);
     const preflight = await preflightResponse.json();
     assert.equal(preflight.ready, true);
+    assert.equal(preflight.executionReady, false);
+    assert.equal(preflight.receipt, null);
     assert.match(preflight.taskSha256, /^[a-f0-9]{64}$/);
     assert.equal(preflight.envelope.strategy, "convergent");
     assert.equal(preflight.envelope.runtimeEnvironment.proxyMode, "direct");
   }, {
+    preflightEnvironment: {},
+    preflightAdapters: [{
+      id: "claude-code",
+      displayName: "Claude Code",
+      requiresNetwork: true,
+      filesystemIsolation: "post-run-only",
+    }],
+  });
+});
+
+test("Workspace Preflight API persists a receipt only for the exact frozen Task and active Skill", async () => {
+  const task = {
+    schema_version: 1,
+    id: "api-frozen-task",
+    mode: "builder",
+    goal: "Validate the frozen Workspace contract.",
+    profiles: ["overnight", "balanced"],
+    scope: { write_paths: ["src/**"], read_paths: ["src/**"], forbidden_paths: [] },
+    acceptance: [{ id: "acceptance-1", description: "The contract remains hash-bound." }],
+    risk: {
+      public_api: "no", data_model: "no", security: "no", migration: "no",
+      permission: "no", concurrency: "no", cross_module: "no", production_impact: "no",
+    },
+    handoff: {
+      must_do: [], must_not_do: [], may_decide: [], must_report: [],
+      stop_condition: ["Stop when the acceptance condition is met."],
+    },
+    validation: [{ id: "tests", command: ["npm", "test"] }],
+    stop_conditions: ["scope_boundary_crossed"],
+    extensions: { task_shape: { responsibilities: [], new_modules: [], split_decision: "exception", split_reason: "Bounded single-owner task." } },
+  };
+  const taskSha256 = taskCardSha256(task);
+  const workspaceTaskStore = {
+    async current() {
+      return {
+        revisionArtifact: {
+          workspaceId: "workspace-1",
+          taskId: task.id,
+          taskRevision: 2,
+          taskSha256,
+          task,
+        },
+      };
+    },
+    async createPreflight(input) {
+      assert.equal(input.taskRevision, 2);
+      assert.equal(input.taskSha256, taskSha256);
+      assert.equal(input.activation.activationId, "activation-1");
+      return {
+        receipt: {
+          preflightId: "preflight-1",
+          preflightSha256: "e".repeat(64),
+          task: { taskRevision: 2 },
+        },
+      };
+    },
+  };
+  const store = {
+    async history() {
+      return {
+        entries: [{
+          historyId: "activation-1",
+          isActive: true,
+          mode: { id: "overnight" },
+          contentSha256: "a".repeat(64),
+          projectBinding: {
+            projectId: null,
+            workspaceId: "workspace-1",
+            projectRevision: 4,
+            projectConfigSha256: "b".repeat(64),
+          },
+        }],
+      };
+    },
+  };
+  const workflowCoreAdapter = {
+    async status() {
+      return {
+        available: true,
+        compatible: true,
+        health: "compatible",
+        sourceId: "agent-control-plane/workflow-core",
+        contractVersion: "1.6.0",
+        contractSha256: `sha256:${"c".repeat(64)}`,
+      };
+    },
+    async runtimeProtocol() {
+      throw new Error("not used");
+    },
+  };
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/task-card/preflight`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({
+        workspaceTask: {
+          projectRoot: tmpdir(),
+          taskId: task.id,
+          taskRevision: 2,
+          taskSha256,
+        },
+        workflowMode: "overnight",
+        worktree: tmpdir(),
+        adapterId: "claude-code",
+        strategy: "convergent",
+      }),
+    });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.ready, true);
+    assert.equal(result.executionReady, true);
+    assert.equal(result.receipt.preflightId, "preflight-1");
+  }, {
+    store,
+    workspaceTaskStore,
+    workflowCoreAdapter,
     preflightEnvironment: {},
     preflightAdapters: [{
       id: "claude-code",

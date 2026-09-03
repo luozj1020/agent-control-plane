@@ -62,7 +62,8 @@ test("Overnight resolves one minimal Skill with only selected agents", () => {
   });
   assert.match(result.value.id, /overnight-convergent/);
   assert.match(result.value.content, /agent-control-plane overnight submit/);
-  assert.match(result.value.content, /--adapter claude-code --strategy convergent/);
+  assert.match(result.value.content, /task preflight.*--adapter claude-code --strategy convergent/);
+  assert.match(result.value.content, /--preflight-id PREFLIGHT_ID/);
   assert.match(result.value.content, /end the current upstream inference episode/);
   assert.match(result.value.content, /Do not call status or poll downstream/);
   assert.match(result.value.content, /process -> activity -> state -> evidence -> wake/);
@@ -178,7 +179,7 @@ test("Overnight Skills invoke the product-owned detached runner", () => {
   assert.equal(convergent.ok, true);
   if (!convergent.ok) return;
   assert.match(convergent.value.content, /agent-control-plane overnight submit/);
-  assert.match(convergent.value.content, /--strategy convergent/);
+  assert.match(convergent.value.content, /task preflight.*--strategy convergent/);
   assert.match(convergent.value.content, /agent-control-plane overnight review/);
   assert.doesNotMatch(convergent.value.content, /aiwf\.py/);
 
@@ -188,7 +189,7 @@ test("Overnight Skills invoke the product-owned detached runner", () => {
   });
   assert.equal(continuous.ok, true);
   if (!continuous.ok) return;
-  assert.match(continuous.value.content, /--strategy continuous-improvement/);
+  assert.match(continuous.value.content, /task preflight.*--strategy continuous-improvement/);
   assert.match(continuous.value.content, /--decision continue --next NEXT\.json/);
   assert.match(continuous.value.content, /overnight interrupt/);
 });
@@ -250,7 +251,7 @@ test("Overnight loop selection is rejected outside Overnight mode", () => {
   }
 });
 
-test("Balanced embeds validated budget and timing overrides in the external Runner command", () => {
+test("Balanced carries validated budget and timing overrides into activation-bound Preflight", () => {
   const profile = {
     ...CODEX_OVERNIGHT_CLAUDE_PROFILE,
     id: "codex-balanced-budgeted",
@@ -273,10 +274,13 @@ test("Balanced embeds validated budget and timing overrides in the external Runn
   const result = resolve(profile);
   assert.equal(result.ok, true);
   if (!result.ok) return;
-  assert.match(result.value.content, /--main-review-calls 4/);
-  assert.match(result.value.content, /--downstream-calls 5/);
-  assert.match(result.value.content, /--context-seconds 480/);
-  assert.match(result.value.content, /--growing-extension-seconds 300/);
+  assert.deepEqual(result.value.balancedBudget, profile.balancedBudget);
+  assert.deepEqual(result.value.balancedTiming, profile.balancedTiming);
+  assert.match(result.value.content, /Calls: main-review=4, downstream=5, advisor=2/);
+  assert.match(result.value.content, /Windows \(seconds\): context=480, first-progress=420/);
+  assert.match(result.value.content, /task preflight.*--workflow-mode balanced/);
+  assert.match(result.value.content, /balanced run.*--preflight-id PREFLIGHT_ID/);
+  assert.doesNotMatch(result.value.content, /--main-review-calls|--context-seconds/);
   assert.doesNotMatch(result.value.content, /max-total-tokens/);
 });
 
@@ -410,7 +414,9 @@ test("generated Skills are self-contained, mode-isolated, and bounded in size", 
     } else {
       assert.match(result.value.content, /## Task Card/);
       assert.match(result.value.content, /agent-control-plane task init --output TASK\.json/);
-      assert.match(result.value.content, /agent-control-plane task validate --task TASK\.json/);
+      assert.match(result.value.content, /agent-control-plane task validate --workspace ABSOLUTE_WORKTREE/);
+      assert.match(result.value.content, /agent-control-plane task freeze --workspace ABSOLUTE_WORKTREE/);
+      assert.match(result.value.content, /agent-control-plane task preflight/);
       assert.doesNotMatch(result.value.content, /```json/);
     }
   }

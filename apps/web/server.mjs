@@ -32,13 +32,19 @@ import {
   renderTaskCardMarkdown,
 } from "./task-card.mjs";
 import {
+  WorkspaceTaskStoreError,
+  createWorkspaceTaskStore,
+} from "./workspace-task-store.mjs";
+import {
   preflightTaskCard,
+  createTaskCardPreflightAdapters,
   TASK_CARD_PREFLIGHT_OPTIONS,
 } from "./task-card-preflight.mjs";
 import {
   createClaudeConnectivityAdapter,
   probeDownstreamConnectivity,
 } from "./runtime-connectivity.mjs";
+import { discoverRuntimeActivation } from "./runtime-activation.mjs";
 import { createUsageMonitor } from "./usage-monitor.mjs";
 
 const PUBLIC_ROOT = fileURLToPath(new URL("./public/", import.meta.url));
@@ -167,25 +173,8 @@ export function createAppServer(options = {}) {
     ]);
     return buildActivityLog(history, balancedRuns, overnightRuns);
   }
-  const preflightAdapters = options.preflightAdapters ?? EXAMPLE_AGENTS
-    .filter((agent) => agent.capabilities.includes("bounded-execution"))
-    .map((agent) => ({
-      id: agent.id,
-      displayName: agent.displayName,
-      requiresNetwork: true,
-      providerEnvironmentPrefixes: agent.id === "claude-code"
-        ? ["ANTHROPIC_", "CLAUDE_", "CC_SWITCH_"]
-        : [],
-      filesystemIsolation: "post-run-only",
-      readContainment: agent.id === "claude-code" ? "partial-event-audit" : "unsupported",
-      writeContainment: "post-run-audit",
-      filesystemEventSource: agent.id === "claude-code"
-        ? "claude-stream-json-explicit-read-tool-v1"
-        : null,
-      command: agent.id === "claude-code"
-        ? (process.env.AGENT_CONTROL_CLAUDE_COMMAND ?? "claude")
-        : null,
-    }));
+  const preflightAdapters = options.preflightAdapters ??
+    createTaskCardPreflightAdapters(process.env);
   const connectivityAdapters = options.connectivityAdapters ?? [
     createClaudeConnectivityAdapter({
       command: process.env.AGENT_CONTROL_CLAUDE_COMMAND ?? "claude",
@@ -203,6 +192,11 @@ export function createAppServer(options = {}) {
   const projectConfigStore = options.projectConfigStore ?? createProjectConfigStore({
     stateRoot: options.projectStateRoot,
   });
+  const workspaceTaskStore = options.workspaceTaskStore ?? (
+    typeof projectConfigStore.resolveWorkspace === "function"
+      ? createWorkspaceTaskStore({ projectConfigStore })
+      : null
+  );
   const directoryPicker = options.directoryPicker ?? createDirectoryPicker();
   async function verifiedProjectBinding(input) {
     if (input === undefined || input === null) return null;
@@ -439,6 +433,111 @@ export function createAppServer(options = {}) {
         return;
       }
 
+      if (
+        pathname === "/api/workspace-tasks/current" &&
+        (request.method === "GET" || request.method === "HEAD")
+      ) {
+        if (!workspaceTaskStore) {
+          sendJson(response, 501, { error: "task.workspace_store_unavailable" }, request.method === "HEAD");
+          return;
+        }
+        const requestedTaskId = requestUrl.searchParams.get("taskId") || undefined;
+        sendJson(
+          response,
+          200,
+          await workspaceTaskStore.current({
+            projectRoot: requestUrl.searchParams.get("projectRoot"),
+            ...(requestedTaskId === undefined ? {} : { taskId: requestedTaskId }),
+          }),
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      if (
+        pathname === "/api/workspace-tasks" &&
+        (request.method === "GET" || request.method === "HEAD")
+      ) {
+        if (!workspaceTaskStore) {
+          sendJson(response, 501, { error: "task.workspace_store_unavailable" }, request.method === "HEAD");
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          await workspaceTaskStore.list({
+            projectRoot: requestUrl.searchParams.get("projectRoot"),
+          }),
+          request.method === "HEAD",
+        );
+        return;
+      }
+
+      if (pathname === "/api/workspace-tasks" && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        if (!workspaceTaskStore) {
+          sendJson(response, 501, { error: "task.workspace_store_unavailable" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        sendJson(response, 201, await workspaceTaskStore.create({
+          projectRoot: body?.projectRoot,
+          taskId: body?.taskId,
+          task: body?.task,
+          source: body?.source,
+        }));
+        return;
+      }
+
+      if (pathname === "/api/workspace-tasks/working-copy" && request.method === "PUT") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        if (!workspaceTaskStore) {
+          sendJson(response, 501, { error: "task.workspace_store_unavailable" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await workspaceTaskStore.write({
+          projectRoot: body?.projectRoot,
+          taskId: body?.taskId,
+          expectedWorkingCopyGeneration: body?.expectedWorkingCopyGeneration,
+          task: body?.task,
+          source: body?.source,
+        }));
+        return;
+      }
+
+      const workspaceTaskAction = pathname.match(/^\/api\/workspace-tasks\/(validate|freeze)$/);
+      if (workspaceTaskAction && request.method === "POST") {
+        if (!trustedMutationOrigin(request)) {
+          sendJson(response, 403, { error: "request.untrusted_origin" });
+          return;
+        }
+        if (!workspaceTaskStore) {
+          sendJson(response, 501, { error: "task.workspace_store_unavailable" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        const input = {
+          projectRoot: body?.projectRoot,
+          taskId: body?.taskId,
+          expectedWorkingCopyGeneration: body?.expectedWorkingCopyGeneration,
+        };
+        sendJson(
+          response,
+          200,
+          workspaceTaskAction[1] === "validate"
+            ? await workspaceTaskStore.validate(input)
+            : await workspaceTaskStore.freeze(input),
+        );
+        return;
+      }
+
       const integrationAction = pathname.match(/^\/api\/integrations\/([^/]+)\/(diagnose|plan)$/);
       if (integrationAction && request.method === "POST") {
         if (!trustedMutationOrigin(request)) {
@@ -670,15 +769,64 @@ export function createAppServer(options = {}) {
           sendJson(response, 403, { error: "request.untrusted_origin" });
           return;
         }
-        sendJson(
-          response,
-          200,
-          await preflightTaskCard(await readJsonBody(request), {
-            adapters: preflightAdapters,
-            environment: options.preflightEnvironment ?? process.env,
-            workflowContract: await workflowCoreAdapter.status(),
-          }),
-        );
+        const body = await readJsonBody(request);
+        const workspaceTask = body?.workspaceTask;
+        let task = body?.task;
+        if (workspaceTask !== undefined) {
+          if (!workspaceTaskStore) {
+            throw new WorkspaceTaskStoreError(
+              "task.workspace_store_unavailable",
+              "Workspace Task Store is unavailable.",
+              501,
+            );
+          }
+          const current = await workspaceTaskStore.current({
+            projectRoot: workspaceTask?.projectRoot,
+            taskId: workspaceTask?.taskId,
+          });
+          if (
+            !current.revisionArtifact ||
+            current.revisionArtifact.taskRevision !== workspaceTask?.taskRevision ||
+            current.revisionArtifact.taskSha256 !== workspaceTask?.taskSha256
+          ) {
+            throw new WorkspaceTaskStoreError(
+              "preflight.task_reference_stale",
+              "Requested Task reference does not match the immutable Workspace Task Revision.",
+              409,
+            );
+          }
+          task = current.revisionArtifact.task;
+        }
+        const preflight = await preflightTaskCard({ ...body, task }, {
+          adapters: preflightAdapters,
+          environment: options.preflightEnvironment ?? process.env,
+          workflowContract: await workflowCoreAdapter.status(),
+        });
+        if (workspaceTask === undefined || !preflight.ready) {
+          sendJson(response, 200, {
+            ...preflight,
+            executionReady: false,
+            receipt: null,
+          });
+          return;
+        }
+        const activation = await discoverRuntimeActivation(body.workflowMode, {
+          store,
+          environment: options.preflightEnvironment ?? process.env,
+        });
+        const persisted = await workspaceTaskStore.createPreflight({
+          projectRoot: workspaceTask.projectRoot,
+          taskId: workspaceTask.taskId,
+          taskRevision: workspaceTask.taskRevision,
+          taskSha256: workspaceTask.taskSha256,
+          preflightResult: preflight,
+          activation,
+        });
+        sendJson(response, 200, {
+          ...preflight,
+          executionReady: true,
+          receipt: persisted.receipt,
+        });
         return;
       }
 

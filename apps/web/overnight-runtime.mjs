@@ -29,11 +29,20 @@ import {
 import { normalizeRuntimeEnvironment } from "./runtime-environment.mjs";
 import { normalizeRuntimeActivation } from "./runtime-activation.mjs";
 import {
+  bindReceiptToRuntime,
+  taskCardSha256,
+  validateRunReceipt,
+} from "./execution-receipt.mjs";
+import {
   createNextCycleTemplate,
   taskAllowsNoChanges,
   taskValidationCommands,
   validateTaskCard,
 } from "./task-card.mjs";
+import {
+  validateBoundedTaskRevision,
+  validateRevisionDeltaArtifact,
+} from "./revision-delta.mjs";
 import { createWakeAdapterRegistry } from "./wake-adapters.mjs";
 import { resolveRuntimeProtocol } from "./workflow-runtime-protocol.mjs";
 
@@ -206,40 +215,14 @@ function riskDoesNotDecrease(previous, candidate) {
 }
 
 export function validateConvergentRevision(previous, candidateInput) {
-  previous = validateTaskCard(previous);
-  const candidate = validateTaskCard(candidateInput);
-  if (
-    candidate.goal !== previous.goal ||
-    candidate.mode !== previous.mode ||
-    JSON.stringify(candidate.profiles) !== JSON.stringify(previous.profiles)
-  ) {
-    throw new OvernightRuntimeError("revision.expanded", "A convergent revision must preserve goal, mode, and profiles.", 409);
+  try {
+    return validateBoundedTaskRevision(previous, candidateInput, OvernightRuntimeError);
+  } catch (error) {
+    if (error instanceof OvernightRuntimeError && error.code === "revision_delta.expanded") {
+      throw new OvernightRuntimeError("revision.expanded", error.message, error.status);
+    }
+    throw error;
   }
-  if (!objectSetContainsAll(previous.acceptance, candidate.acceptance)) {
-    throw new OvernightRuntimeError("revision.expanded", "A convergent revision may only narrow acceptance criteria.", 409);
-  }
-  if (!setContainsAll(previous.scope.write_paths, candidate.scope.write_paths)) {
-    throw new OvernightRuntimeError("revision.expanded", "A convergent revision may not add allowed paths.", 409);
-  }
-  if (!setContainsAll(previous.scope.read_paths ?? [], candidate.scope.read_paths ?? [])) {
-    throw new OvernightRuntimeError("revision.expanded", "A convergent revision may not add read paths.", 409);
-  }
-  if (!setContainsAll(candidate.scope.forbidden_paths ?? [], previous.scope.forbidden_paths ?? [])) {
-    throw new OvernightRuntimeError("revision.expanded", "A convergent revision may not relax forbidden paths.", 409);
-  }
-  if (!objectSetContainsAll(previous.validation, candidate.validation)) {
-    throw new OvernightRuntimeError("revision.expanded", "A convergent revision may not add validation commands.", 409);
-  }
-  if (
-    !setContainsAll(candidate.handoff.must_not_do ?? [], previous.handoff.must_not_do ?? []) ||
-    !setContainsAll(candidate.stop_conditions, previous.stop_conditions) ||
-    !setContainsAll(previous.handoff.may_decide ?? [], candidate.handoff.may_decide ?? []) ||
-    !riskDoesNotDecrease(previous.risk, candidate.risk) ||
-    (!taskAllowsNoChanges(previous) && taskAllowsNoChanges(candidate))
-  ) {
-    throw new OvernightRuntimeError("revision.expanded", "A convergent revision may not relax authority, stop, or risk boundaries.", 409);
-  }
-  return candidate;
 }
 
 export function validateImprovementContinuation(initial, previous, input) {
@@ -345,6 +328,7 @@ export function createOvernightRuntime(options = {}) {
   const executionEpochMilliseconds = options.executionEpochMilliseconds ?? 6 * 60 * 60 * 1000;
   const validationTimeoutMilliseconds = options.validationTimeoutMilliseconds ?? 15 * 60 * 1000;
   const protocolProvider = options.protocolProvider;
+  const allowUnboundTaskForTests = options.allowUnboundTaskForTests === true;
 
   const recordCoordination = (runDirectory, metadata, kind, input = {}) =>
     appendCoordinationEvent(
@@ -396,14 +380,47 @@ export function createOvernightRuntime(options = {}) {
     }
     const runtimeEnvironment = normalizeRuntimeEnvironment(input.runtimeEnvironment);
     const activation = normalizeRuntimeActivation(input, OvernightRuntimeError);
+    const workflowContract = {
+      source: protocol.source,
+      version: protocol.contractVersion,
+      sha256: protocol.contractSha256,
+    };
+    const executionBinding = input.preflightReceipt
+      ? bindReceiptToRuntime({
+          receipt: input.preflightReceipt,
+          task,
+          workflowMode: "overnight",
+          worktree,
+          adapterId: adapter.id,
+          runtimeEnvironment,
+          strategy: input.strategy,
+          wakeAdapterId: wakeAdapter.id,
+          activation,
+          workflowContract,
+        }, OvernightRuntimeError)
+      : null;
+    if (!executionBinding && !allowUnboundTaskForTests) {
+      throw new OvernightRuntimeError(
+        "runtime.preflight_required",
+        "A current immutable Preflight Receipt is required for a new Overnight run.",
+        409,
+      );
+    }
     const containment = normalizeAdapterContainment({
       filesystemIsolation: "post-run-only",
       ...adapter,
     }, { requireExtractor: false });
-    const runId = `${new Date(clock()).toISOString().replace(/[:.]/g, "-").toLowerCase()}-${task.id.slice(0, 64)}-${randomUUID()}`;
+    const runId = `${new Date(clock()).toISOString().replace(/[:.]/g, "-").toLowerCase()}-${task.id.slice(0, 64).toLowerCase()}-${randomUUID()}`;
     const runDirectory = join(runtimeRoot, runId);
     const cycleDirectory = join(runDirectory, "cycles", "001");
     await mkdir(cycleDirectory, { recursive: true, mode: 0o700 });
+    if (executionBinding) {
+      await writeFile(
+        join(runDirectory, "preflight-receipt.json"),
+        stableJson(input.preflightReceipt),
+        { encoding: "utf8", flag: "wx", mode: 0o400 },
+      );
+    }
     const taskEnvelope = { schemaVersion: 1, kind: "overnight-task", cycle: 1, task };
     const taskText = stableJson(taskEnvelope);
     await writeFile(join(cycleDirectory, "task.json"), taskText, { encoding: "utf8", flag: "wx", mode: 0o600 });
@@ -415,6 +432,8 @@ export function createOvernightRuntime(options = {}) {
       taskId: task.id,
       initialTaskSha256: sha256(taskText),
       currentTaskSha256: sha256(taskText),
+      executionBinding,
+      revisionBindings: [],
       worktree,
       adapterId: adapter.id,
       ...activation,
@@ -426,11 +445,7 @@ export function createOvernightRuntime(options = {}) {
       activeProcess: null,
       latestWakePath: null,
       latestWakeSha256: null,
-      workflowContract: {
-        source: protocol.source,
-        version: protocol.contractVersion,
-        sha256: protocol.contractSha256,
-      },
+      workflowContract,
       createdAt: new Date(clock()).toISOString(),
       updatedAt: new Date(clock()).toISOString(),
     };
@@ -445,6 +460,17 @@ export function createOvernightRuntime(options = {}) {
       bytes: Buffer.byteLength(taskText),
       detail: { artifactKind: "frozen_task", sha256: metadata.currentTaskSha256 },
     });
+    if (executionBinding) {
+      const receiptText = stableJson(input.preflightReceipt);
+      await recordCoordination(runDirectory, metadata, "artifact_write", {
+        target: { type: "artifact", id: "preflight-receipt.json" },
+        bytes: Buffer.byteLength(receiptText),
+        detail: {
+          artifactKind: "preflight_receipt",
+          sha256: executionBinding.preflight.preflightSha256,
+        },
+      });
+    }
     await recordCoordination(runDirectory, metadata, "state_transition", {
       target: { type: "state", id: metadata.state },
       detail: { to: metadata.state, cycle: 1 },
@@ -470,6 +496,60 @@ export function createOvernightRuntime(options = {}) {
       throw new OvernightRuntimeError("runtime.corrupt_run", "Current Overnight task hash is invalid.", 409);
     }
     const task = validateTaskCard(JSON.parse(taskText).task);
+    if (metadata.executionBinding) {
+      const receipt = await readJson(join(runDirectory, "preflight-receipt.json"), {
+        code: "runtime.preflight_receipt_corrupt",
+      });
+      if (!receipt) {
+        throw new OvernightRuntimeError(
+          "runtime.preflight_receipt_corrupt",
+          "Overnight Preflight Receipt snapshot is missing.",
+          409,
+        );
+      }
+      validateRunReceipt(receipt, metadata.executionBinding, OvernightRuntimeError);
+      const initialTaskForBinding = validateTaskCard(JSON.parse(
+        await readFile(join(runDirectory, "cycles", "001", "task.json"), "utf8"),
+      ).task);
+      if (taskCardSha256(initialTaskForBinding) !== metadata.executionBinding.task.taskSha256) {
+        throw new OvernightRuntimeError(
+          "runtime.task_preflight_mismatch",
+          "Overnight Task snapshot no longer matches its Preflight Receipt.",
+          409,
+        );
+      }
+    }
+    const revisionBindings = metadata.revisionBindings ?? [];
+    if (!Array.isArray(revisionBindings)) {
+      throw new OvernightRuntimeError("runtime.corrupt_run", "Overnight revision bindings are invalid.", 409);
+    }
+    let priorTaskBinding = metadata.executionBinding?.task ?? null;
+    for (const entry of revisionBindings) {
+      if (!Number.isSafeInteger(entry?.cycle) || entry.cycle < 2 || !entry.executionBinding) {
+        throw new OvernightRuntimeError("runtime.corrupt_run", "Overnight revision binding is invalid.", 409);
+      }
+      const directory = join(runDirectory, "cycles", String(entry.cycle).padStart(3, "0"));
+      const contract = await readJson(join(directory, "task.json"), { code: "runtime.revision_contract_corrupt" });
+      const receipt = await readJson(join(directory, "preflight-receipt.json"), { code: "runtime.preflight_receipt_corrupt" });
+      const delta = await readJson(join(directory, "revision-delta.json"), { code: "runtime.revision_delta_corrupt" });
+      if (!contract || contract.cycle !== entry.cycle || !receipt || !delta) {
+        throw new OvernightRuntimeError("runtime.revision_binding_corrupt", "Overnight revision artifacts are missing.", 409);
+      }
+      const candidate = validateTaskCard(contract.task);
+      validateRunReceipt(receipt, entry.executionBinding, OvernightRuntimeError);
+      validateRevisionDeltaArtifact(delta, {
+        revisionDeltaId: entry.revisionDeltaId,
+        baseTask: priorTaskBinding,
+        resultTask: entry.executionBinding.task,
+      }, OvernightRuntimeError);
+      if (taskCardSha256(candidate) !== entry.executionBinding.task.taskSha256) {
+        throw new OvernightRuntimeError("runtime.task_preflight_mismatch", "Overnight revision Task does not match its Preflight Receipt.", 409);
+      }
+      if (entry.cycle === metadata.cycle && taskCardSha256(task) !== taskCardSha256(candidate)) {
+        throw new OvernightRuntimeError("runtime.task_preflight_mismatch", "Current Overnight Task differs from its revision binding.", 409);
+      }
+      priorTaskBinding = entry.executionBinding.task;
+    }
     const initialText = await readFile(join(runDirectory, "cycles", "001", "task.json"), "utf8").catch(() => null);
     if (!initialText || sha256(initialText) !== metadata.initialTaskSha256) {
       throw new OvernightRuntimeError("runtime.corrupt_run", "Initial Overnight task hash is invalid.", 409);
@@ -772,8 +852,44 @@ export function createOvernightRuntime(options = {}) {
       }
       let nextTask;
       let continuation = null;
+      let revisionBinding = null;
       if (input.decision === "revise") {
-        nextTask = validateConvergentRevision(current.task, input.revisionTask);
+        if (input.revision?.task && input.revision?.preflightReceipt && input.revision?.revisionDelta) {
+          nextTask = validateConvergentRevision(current.task, input.revision.task);
+          const activation = normalizeRuntimeActivation(metadata, OvernightRuntimeError);
+          const executionBinding = bindReceiptToRuntime({
+            receipt: input.revision.preflightReceipt,
+            task: nextTask,
+            workflowMode: "overnight",
+            worktree: metadata.worktree,
+            adapterId: metadata.adapterId,
+            runtimeEnvironment: metadata.runtimeEnvironment,
+            strategy: metadata.strategy,
+            wakeAdapterId: metadata.wakeAdapterId,
+            activation,
+            workflowContract: metadata.workflowContract,
+          }, OvernightRuntimeError);
+          const priorTask = (metadata.revisionBindings ?? []).at(-1)?.executionBinding?.task ?? metadata.executionBinding?.task;
+          const delta = validateRevisionDeltaArtifact(input.revision.revisionDelta, {
+            baseTask: priorTask,
+            resultTask: executionBinding.task,
+          }, OvernightRuntimeError);
+          if (
+            delta.review.runId !== metadata.runId || delta.review.workflowMode !== "overnight" ||
+            delta.review.artifactSha256 !== metadata.latestWakeSha256 || delta.review.sequence !== metadata.cycle
+          ) {
+            throw new OvernightRuntimeError("revision_delta.review_stale", "Revision Delta is not bound to the current Overnight wake request.", 409);
+          }
+          revisionBinding = { delta, executionBinding };
+        } else if (allowUnboundTaskForTests) {
+          nextTask = validateConvergentRevision(current.task, input.revisionTask);
+        } else {
+          throw new OvernightRuntimeError(
+            "revision_delta.binding_required",
+            "Overnight revision requires an immutable Revision Delta and Preflight Receipt.",
+            409,
+          );
+        }
       } else {
         if (metadata.strategy !== "continuous-improvement") {
           throw new OvernightRuntimeError("review.invalid_decision", "Only continuous improvement may continue with expanded scope.", 409);
@@ -794,6 +910,30 @@ export function createOvernightRuntime(options = {}) {
       };
       const taskText = stableJson(envelope);
       await writeFile(join(nextDirectory, "task.json"), taskText, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      if (revisionBinding) {
+        await writeFile(join(nextDirectory, "preflight-receipt.json"), stableJson(input.revision.preflightReceipt), {
+          encoding: "utf8", flag: "wx", mode: 0o400,
+        });
+        await writeFile(join(nextDirectory, "revision-delta.json"), stableJson(revisionBinding.delta), {
+          encoding: "utf8", flag: "wx", mode: 0o400,
+        });
+        await recordCoordination(runDirectory, metadata, "artifact_write", {
+          target: { type: "artifact", id: `cycles/${String(nextCycle).padStart(3, "0")}/revision-delta.json` },
+          bytes: Buffer.byteLength(stableJson(revisionBinding.delta)),
+          detail: {
+            artifactKind: "revision_delta",
+            sha256: revisionBinding.delta.revisionDeltaSha256,
+          },
+        });
+        await recordCoordination(runDirectory, metadata, "artifact_write", {
+          target: { type: "artifact", id: `cycles/${String(nextCycle).padStart(3, "0")}/preflight-receipt.json` },
+          bytes: Buffer.byteLength(stableJson(input.revision.preflightReceipt)),
+          detail: {
+            artifactKind: "preflight_receipt",
+            sha256: revisionBinding.executionBinding.preflight.preflightSha256,
+          },
+        });
+      }
       await writeJsonAtomic(join(current.cycleDirectory, "review-decision.json"), {
         schemaVersion: 1,
         decision: input.decision,
@@ -801,14 +941,33 @@ export function createOvernightRuntime(options = {}) {
         nextTaskSha256: sha256(taskText),
         wakeSha256: metadata.latestWakeSha256,
         decidedAt: new Date(clock()).toISOString(),
+        ...(revisionBinding ? {
+          revisionDeltaId: revisionBinding.delta.revisionDeltaId,
+          revisionDeltaSha256: revisionBinding.delta.revisionDeltaSha256,
+          resultTask: revisionBinding.executionBinding.task,
+          preflightId: revisionBinding.executionBinding.preflight.preflightId,
+        } : {}),
       });
       await recordCoordination(runDirectory, metadata, "review_decision", {
         actor: { type: "operator", id: "upstream-reviewer" },
         target: { type: "artifact", id: `cycles/${String(metadata.cycle).padStart(3, "0")}/review-decision.json` },
-        detail: { cycle: metadata.cycle, decision: input.decision, nextCycle },
+        detail: {
+          cycle: metadata.cycle,
+          decision: input.decision,
+          nextCycle,
+          ...(revisionBinding ? { revisionDeltaId: revisionBinding.delta.revisionDeltaId } : {}),
+        },
       });
       metadata.cycle = nextCycle;
       metadata.currentTaskSha256 = sha256(taskText);
+      if (revisionBinding) {
+        metadata.revisionBindings = [...(metadata.revisionBindings ?? []), {
+          cycle: nextCycle,
+          revisionDeltaId: revisionBinding.delta.revisionDeltaId,
+          revisionDeltaSha256: revisionBinding.delta.revisionDeltaSha256,
+          executionBinding: revisionBinding.executionBinding,
+        }];
+      }
       const submittedState = current.protocol.decisionStates[input.decision];
       await persistMetadata(runDirectory, metadata, submittedState);
       return { runDirectory, state: submittedState, cycle: nextCycle, resumeRequired: true };
@@ -882,14 +1041,12 @@ export function createOvernightRuntime(options = {}) {
     for (const entry of await readdir(root, { withFileTypes: true })) {
       if (!entry.isDirectory() || !SAFE_ID.test(entry.name)) continue;
       try {
-        const metadata = await readJson(join(root, entry.name, "run.json"));
-        if (metadata?.schemaVersion === RUNTIME_SCHEMA_VERSION) {
-          const coordination = await coordinationSummaryForRun(join(root, entry.name), {
-            ...metadata,
-            mode: "overnight",
-          });
-          runs.push({ ...metadata, coordination });
-        }
+        const loaded = await loadRun(join(root, entry.name));
+        const coordination = await coordinationSummaryForRun(join(root, entry.name), {
+          ...loaded.metadata,
+          mode: "overnight",
+        });
+        runs.push({ ...loaded.metadata, coordination });
       } catch {
         // One corrupt run must not hide healthy run history.
       }
@@ -903,15 +1060,12 @@ export function createOvernightRuntime(options = {}) {
     }
     const root = await existingRoot(runtimeRootConfigured);
     if (!root) throw new OvernightRuntimeError("runtime.path_missing", "Overnight runtime root does not exist.", 404);
-    const runDirectory = await ensureDirectory(resolve(root, runId), "Run directory");
-    const metadata = await readJson(join(runDirectory, "run.json"));
-    if (
-      metadata?.schemaVersion !== RUNTIME_SCHEMA_VERSION || metadata.runId !== runId ||
-      basename(runDirectory) !== runId || resolve(root, runId) !== runDirectory
-    ) {
-      throw new OvernightRuntimeError("runtime.corrupt_run", "Overnight run identity is invalid.", 409);
-    }
-    return coordinationDetailForRun(runDirectory, { ...metadata, mode: "overnight" }, options);
+    const loaded = await loadRun(resolve(root, runId));
+    return coordinationDetailForRun(
+      loaded.runDirectory,
+      { ...loaded.metadata, mode: "overnight" },
+      options,
+    );
   }
 
   return Object.freeze({
